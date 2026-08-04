@@ -2,9 +2,9 @@
 /**
  * seeds/vc-portfolios.mjs — VC portfolio seed fetchers for career-ops.
  *
- * Pulls public VC portfolio company lists (Y Combinator, Andreessen Horowitz)
- * and emits company entries compatible with the existing ATS scan/discovery
- * path (same shape as tracked_companies entries in portals.yml).
+ * Pulls public VC portfolio company lists (Y Combinator, Andreessen Horowitz,
+ * Index Ventures) and emits company entries compatible with the existing ATS
+ * scan/discovery path (same shape as tracked_companies entries in portals.yml).
  *
  * Design constraints:
  *  - Zero auth — public sources only, no login, no API keys.
@@ -17,7 +17,7 @@
  *
  * Typical usage (via scan-ats-full.mjs --seeds flag):
  *   node scan-ats-full.mjs --seeds yc
- *   node scan-ats-full.mjs --seeds yc,a16z --since 7 --dry-run
+ *   node scan-ats-full.mjs --seeds yc,a16z,index --since 7 --dry-run
  *
  * Direct usage:
  *   import { fetchYCCompanies, fetchA16zCompanies } from './seeds/vc-portfolios.mjs';
@@ -47,6 +47,22 @@ const YC_API_URL = 'https://api.ycombinator.com/v0.1/companies?page=1&per_page=1
  * The portfolio is a publicly accessible HTML page listing all portfolio companies.
  */
 const A16Z_PORTFOLIO_URL = 'https://a16z.com/portfolio/';
+
+/**
+ * Index Ventures public portfolio page.
+ *
+ * YC and a16z are both US-weighted; this rung is the European complement
+ * (Personio, DeepL, Raisin, auxmoney, cargo.one, Pitch, Productboard, Wise,
+ * Revolut...), which is what a DACH or wider-EU search actually needs.
+ *
+ * It earned its place by being the only candidate that server-renders the whole
+ * list: a survey of the obvious alternatives found Point Nine, Northzone,
+ * Creandum and Earlybird 404 on their documented portfolio paths, and
+ * Speedinvest, Accel, HV Capital and Atomico render theirs client-side, leaving
+ * nothing for a zero-token fetcher to read. Index emits ~300 plain
+ * `<a href="/companies/{slug}/">Name</a>` anchors with no JS required.
+ */
+const INDEX_PORTFOLIO_URL = 'https://www.indexventures.com/companies/';
 
 // ── HTTP helper (local — avoids importing providers/_http.mjs to keep seeds/ self-contained) ──
 
@@ -86,7 +102,7 @@ async function fetchWithTimeout(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
  * @property {string}   url             Company website URL.
  * @property {string}   [ats]           ATS platform if detectable: 'greenhouse' | 'lever' | 'ashby'.
  * @property {string}   [ats_id]        ATS board/org slug for URL construction.
- * @property {string}   [source]        Which VC list this came from: 'yc' | 'a16z'.
+ * @property {string}   [source]        Which VC list this came from: 'yc' | 'a16z' | 'index'.
  * @property {string}   [batch]         YC batch label, e.g. "W21" (YC only).
  */
 
@@ -97,7 +113,7 @@ async function fetchWithTimeout(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
  * @typedef {object} SeedPortalEntry
  * @property {string} name
  * @property {string} careers_url   Best-effort ATS or website URL.
- * @property {string} [source]      Seed origin ('yc' | 'a16z').
+ * @property {string} [source]      Seed origin ('yc' | 'a16z' | 'index').
  */
 
 // ── Pure parser: YC ──────────────────────────────────────────────────
@@ -231,6 +247,101 @@ export function parseA16zPayload(html) {
   return [...seen.values()];
 }
 
+// ── Pure parser: Index Ventures ──────────────────────────────────────
+
+/**
+ * Decode the handful of HTML entities that show up in portfolio company names.
+ *
+ * Not a general-purpose decoder: names are short plain text, and the only
+ * entities observed in the wild are the ampersand ones ("Bloom &amp; Wild",
+ * "Ben &#38; Jerry"-style) plus quotes. Anything else is left verbatim rather
+ * than guessed at — a name is user-visible output, so a wrong expansion is
+ * worse than an untouched entity.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function decodeNameEntities(text) {
+  return text
+    .replace(/&(?:#0*38|#x0*26|amp);/gi, '&')
+    .replace(/&(?:#0*39|#x0*27|apos|rsquo);/gi, "'")
+    .replace(/&(?:#0*34|#x0*22|quot);/gi, '"')
+    .replace(/&(?:#0*60|#x0*3c|lt);/gi, '<')
+    .replace(/&(?:#0*62|#x0*3e|gt);/gi, '>')
+    .replace(/&(?:#0*160|#x0*a0|nbsp);/gi, ' ');
+}
+
+/**
+ * Strip a trailing legal-entity suffix from a company name.
+ *
+ * "CodeSignal, Inc." and "ApplyBoard Inc." are the same board as "codesignal"
+ * and "applyboard" as far as any ATS is concerned; leaving the suffix in place
+ * would derive `codesignal-inc` and miss the board entirely.
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function stripLegalSuffix(name) {
+  return name
+    .replace(/[,\s]+(?:Inc|Incorporated|LLC|L\.L\.C|Ltd|Limited|Corp|Corporation|Co|GmbH|AG|BV|B\.V|NV|N\.V|SA|S\.A|SAS|S\.A\.S|SL|S\.L|AB|AS|A\/S|Oy|PLC|P\.L\.C|Pty|PBC)\.?$/i, '')
+    .trim();
+}
+
+/**
+ * Parse raw Index Ventures portfolio HTML into SeedCompany entries.
+ *
+ * This is the testable unit — pure, no network, no side effects.
+ *
+ * The page server-renders the full list as plain detail-page anchors:
+ *   <a href="/companies/personio/">Personio</a>
+ *
+ * Two deliberate choices:
+ *
+ *  - **The slug comes from the NAME, not from Index's own path segment.** Index
+ *    routes Wiz at `/companies/wizio/` and Abacus.ai at `/companies/abacusai/`;
+ *    those are Index's internal identifiers and have no relationship to the
+ *    company's ATS board slug. Deriving from the display name is what YC and
+ *    a16z already do and is the guess most likely to hit a real board.
+ *  - **No website URL is recorded.** The only href on offer points back at
+ *    indexventures.com, and putting that in `url` would make toPortalEntry's
+ *    last-resort fallback hand the scanner a VC marketing page instead of a
+ *    careers page. An empty url makes it fall through to the slug-based ATS
+ *    guess, which is the correct behaviour here.
+ *
+ * @param {string} html    Raw HTML from the Index portfolio page (or a fixture in tests).
+ * @returns {SeedCompany[]}
+ */
+export function parseIndexPayload(html) {
+  if (typeof html !== 'string' || !html.trim()) return [];
+
+  /** @type {Map<string, SeedCompany>} */
+  const seen = new Map();
+
+  // Accept both the root-relative form the live page emits and an absolute one,
+  // so a mirrored or proxied copy of the page parses identically. The trailing
+  // `[\s\S]{1,160}?` tolerates the wrapper markup Index puts inside the anchor.
+  const anchorRe = /<a\b[^>]*href=["'](?:https?:\/\/[^"'/]*indexventures\.com)?\/companies\/([A-Za-z0-9._-]+)\/?["'][^>]*>([\s\S]{1,160}?)<\/a>/gi;
+
+  for (const match of html.matchAll(anchorRe)) {
+    const rawText = match[2] ?? '';
+    // Anchor text may wrap the name in spans/headings; strip tags, collapse space.
+    const name = stripLegalSuffix(
+      decodeNameEntities(rawText.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim(),
+    );
+    if (!name || name.length > 60) continue;
+
+    // Nav and CTA links live under the same path prefix on some page revisions.
+    if (/^(all|read more|learn more|view all|see all|more|companies|portfolio|next|previous)$/i.test(name)) continue;
+
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (!slug || !SLUG_RE.test(slug) || seen.has(slug)) continue;
+
+    seen.set(slug, { name, slug, url: '', source: 'index' });
+  }
+
+  return [...seen.values()];
+}
+
 // ── Generic pure parser (entry point for test-all.mjs) ───────────────
 
 /**
@@ -238,13 +349,18 @@ export function parseA16zPayload(html) {
  * SeedCompany entries. This is the universal testable unit cited in the
  * issue acceptance criteria.
  *
- * @param {unknown} payload     JSON object (YC) or HTML string (a16z).
- * @param {'yc'|'a16z'} source  Which VC portfolio this payload came from.
+ * @param {unknown} payload             JSON object (YC) or HTML string (a16z, Index).
+ * @param {'yc'|'a16z'|'index'} source  Which VC portfolio this payload came from.
  * @returns {SeedCompany[]}
  */
 export function parseSeedEntries(payload, source) {
+  // HTML-payload sources are routed explicitly: each one has its own markup and
+  // its own parser, and passing HTML to the YC default would silently return [].
   if (source === 'a16z') {
     return parseA16zPayload(typeof payload === 'string' ? payload : '');
+  }
+  if (source === 'index') {
+    return parseIndexPayload(typeof payload === 'string' ? payload : '');
   }
   // Default: YC (also used for unknown sources — parse defensively).
   return parseYCPayload(payload);
@@ -369,6 +485,26 @@ export async function fetchA16zCompanies({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}
   return parseA16zPayload(html);
 }
 
+/**
+ * Fetch the Index Ventures public portfolio page and return parsed SeedCompany entries.
+ *
+ * Index exposes no JSON API, but the companies page is fully server-rendered,
+ * so a single zero-auth GET is enough — no per-company follow-up requests.
+ *
+ * @param {{ timeoutMs?: number }} [opts]
+ * @returns {Promise<SeedCompany[]>}
+ */
+export async function fetchIndexCompanies({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  let html;
+  try {
+    const res = await fetchWithTimeout(INDEX_PORTFOLIO_URL, { timeoutMs });
+    html = await res.text();
+  } catch (err) {
+    throw new Error(`vc-portfolios: Index Ventures portfolio fetch failed — ${err.message}`);
+  }
+  return parseIndexPayload(html);
+}
+
 // ── SEED_SOURCES registry ────────────────────────────────────────────
 
 /**
@@ -389,5 +525,9 @@ export const SEED_SOURCES = {
   a16z: {
     fetch: fetchA16zCompanies,
     label: 'Andreessen Horowitz (a16z) Portfolio',
+  },
+  index: {
+    fetch: fetchIndexCompanies,
+    label: 'Index Ventures Portfolio',
   },
 };

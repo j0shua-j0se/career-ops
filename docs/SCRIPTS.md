@@ -542,11 +542,13 @@ node scan-ats-full.mjs --dry-run               # preview without writing
 node scan-ats-full.mjs --liveness              # Playwright-verify matches first
 node scan-ats-full.mjs --include-blacklisted   # audit blacklist matches instead of skipping
 node scan-ats-full.mjs --md-out notes/scans    # also write a dated markdown digest
-npm run scan:seeds                             # probe VC portfolio seed companies (--seeds yc,a16z)
+npm run scan:seeds                             # probe VC portfolio seed companies (--seeds yc,a16z,index)
 npm run scan:yc                                # Y Combinator portfolio only (--seeds yc)
+npm run scan:eu                                # Index Ventures only (--seeds index) — Europe-weighted
 ```
 
-`--seeds <list>` fetches comma-separated VC portfolio sources (e.g. `yc,a16z`)
+`--seeds <list>` fetches comma-separated VC portfolio sources (`yc`, `a16z`,
+`index`; YC and a16z are US-weighted, Index Ventures is the European complement)
 and probes those companies via the ATS providers instead of (or in addition
 to) the directory walk. Other flags: `--verbose`, `--json`, `--include-undated`,
 `--shuffle`.
