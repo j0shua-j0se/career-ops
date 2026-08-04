@@ -279,6 +279,40 @@ cover_letter:
 #   triage_threshold: 3.5
 #   triage_min_urls: 5
 
+# ── Scan loop ───────────────────────────────────────────────────────────────
+#
+# `/career-ops scan` runs as a loop rather than a single pass (see LOOP.md).
+# It widens the search wave by wave — configured portals, then progressively
+# broader reverse-ATS sweeps, then agent-driven web discovery — until it has
+# `target` NEW postings scoring at least `min_score`, or until a budget below
+# stops it. It never lowers `min_score` to reach `target`: a run that ends
+# short is a correct run, one that ends on target by sliding the bar is not.
+#
+#   target            — new qualified postings before the loop stops. Default: 10.
+#   min_score         — the bar, on the same 0-5 scale as `modes/triage.md`.
+#                       Default: 3.8. Note that AGENTS.md recommends against
+#                       applying below 4.0 — 3.8 defines the inbox, not the
+#                       advice. Shortlist entries below 4.0 are flagged.
+#   max_waves         — hard cap on discovery waves. Default: 6.
+#   max_barren_waves  — circuit breaker: stop after this many consecutive
+#                       fully-scored waves that produced no qualifier.
+#                       Default: 2.
+#   max_scored        — token-budget proxy: most postings triaged in one run.
+#                       Default: 120.
+#   score_batch       — postings handed to the agent per scoring turn.
+#                       Default: 12.
+#
+# Values that aren't positive numbers are ignored, so a typo here cannot
+# accidentally uncap a budget.
+#
+# loop:
+#   target: 10
+#   min_score: 3.8
+#   max_waves: 6
+#   max_barren_waves: 2
+#   max_scored: 120
+#   score_batch: 12
+
 # ── Re-apply Cooldown Windows ──────────────────────────────────────────────
 #
 # Define cooldown windows for companies where you've recently applied.

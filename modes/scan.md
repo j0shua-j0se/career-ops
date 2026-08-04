@@ -6,6 +6,41 @@ Scans configured job portals, filters by title relevance, and adds new offers to
 >
 > **Rule (v1.8+):** If a company's local parser completes successfully in Level 0, the agent **must not** repeat that company in Playwright (Level 1) or API (Level 2). In Level 3, general queries remain active, but results from companies already covered by a parser are discarded. See [Rule: Successful Local Parser](#rule-successful-local-parser--no-expensive-scraping-repetition).
 
+## The Scan Loop (READ FIRST)
+
+**`scan` is a loop, not a single pass.** One sweep of the levels below is one *wave*. The mode is not finished when a wave finishes — it is finished when the loop has **`loop.target` NEW postings scoring at least `loop.minScore`** (defaults: 10 and 3.8), or when a budget stops it. See `LOOP.md` for the design and `config/profile.yml` → `loop:` for the budgets.
+
+The control law lives in `loop-core.mjs` and is driven by `scan-loop.mjs`. **You do not decide when to stop** — you ask, and you do what it says:
+
+```bash
+node scan-loop.mjs start          # once per /career-ops scan invocation
+node scan-loop.mjs next           # ask what to do; repeat until action = finish|halt
+```
+
+`next` returns exactly one action:
+
+| Action | What you do |
+|---|---|
+| `scan` | `node scan-loop.mjs wave` — runs the next rung of the escalation ladder and ingests whatever landed in `data/pipeline.md`. If the rung is `agent-web`, it instead hands you an instruction: do Level 1 (Playwright on `tracked_companies`) and Level 3 (WebSearch) from the workflow below, collect `{url, company, title, location}`, and `node scan-loop.mjs ingest --file <offers.json>`. |
+| `score` | Triage the returned batch. **Load `modes/triage.md` and follow it exactly** — read only `modes/_brief.md`, ≤ 500 tokens per posting, emit exactly one `TRIAGE:` line per posting. Write `{key}\t{TRIAGE line}` per posting to a file and `node scan-loop.mjs record --file <scores.txt>`. `key` is the `key` field from the batch, not the URL. |
+| `finish` | `node scan-loop.mjs finish` — promotes the qualified set, writes tracker rows, runs `merge-tracker.mjs`, writes `data/loop-shortlist.md`. |
+| `halt` | A budget was spent. `node scan-loop.mjs finish` anyway to keep whatever qualified, then report the `reason` to the user plainly. |
+| `done` | Nothing to do. |
+
+### Non-negotiables
+
+- **Never lower `minScore` to hit `target`.** Ending at 6 qualified jobs with an honest `halted_reason` is a correct outcome. Reporting 10 by relaxing the bar is a broken one — say the number you actually found.
+- **Never score a posting yourself outside `modes/triage.md`.** The scoring contract is what makes the 3.8 gate mean the same thing across waves and runs.
+- **Never hand-edit `data/loop-state.json`.** It is the loop's durable spine; `scan-loop.mjs` is its only writer.
+- **The loop stops at the shortlist.** `finish` writes `data/loop-shortlist.md` and ends. Reviewing it is the user's job; `/career-ops pipeline` is a separate, user-initiated command. Do not chain into it.
+- Scores of 3.8–3.9 are flagged in the shortlist because `AGENTS.md` → Ethical Use recommends against applying below 4.0/5. Surface that flag; do not quietly drop those rows either.
+
+### Recovery
+
+The state file survives context loss and crashes. If you lose track mid-run, `node scan-loop.mjs status --summary` tells you where the loop is; `next` tells you what to do about it. Start a genuinely fresh run with `start --reset`; abandon one with `abort --note "why"`.
+
+Everything below describes what happens **inside one wave**.
+
 ## Recommended Execution
 
 Execute as a worker/subagent if your CLI supports it, to avoid consuming the main interactive context:
@@ -18,7 +53,7 @@ Agent(
 )
 ```
 
-The spawned subagent is a **single-pass worker**: it runs the scan with the parsers/APIs/Playwright/WebSearch named below, directly. It must **not** spawn further subagents or invoke other skills (see `modes/_shared.md` → Subagent delegation). Scanning is bounded by `portals.yml`; it is never an open-ended research task.
+The spawned subagent is a **single-wave worker**: it runs one wave with the parsers/APIs/Playwright/WebSearch named below, directly, and returns its candidates. It must **not** spawn further subagents or invoke other skills (see `modes/_shared.md` → Subagent delegation), and it must **not** run the loop itself — the loop is driven by `scan-loop.mjs` in the main context, which owns the state, the budgets, and the stop decision. Scanning is bounded by `portals.yml`; it is never an open-ended research task.
 
 ## Configuration
 
@@ -159,7 +194,9 @@ The `search_queries` with `site:` filters cover portals transversally (all Ashby
 
 Levels are additive — they are executed in order, and results are merged and deduplicated. Companies in `local_parser_ok` **do not** go through Levels 1 or 2; in Level 3, they only contribute transversal discovery (other companies on the same portal).
 
-## Workflow
+## Workflow (one wave)
+
+> This is the body of a single wave. `scan-loop.mjs wave` runs steps 3.5–11 for the scripted rungs by shelling out to `scan.mjs` / `scan-ats-full.mjs`; you run Levels 1 and 3 by hand only when the loop escalates to the `agent-web` rung. Either way the wave ends at step 11 — the decision to run another one belongs to `node scan-loop.mjs next`.
 
 1. **Read Configuration**: `portals.yml`
 2. **Read History**: `data/scan-history.tsv` → already seen URLs

@@ -84,6 +84,9 @@ AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluat
 | `scan.mjs` | Zero-token portal scanner (Greenhouse/Ashby/Lever APIs, zero LLM cost) |
 | `scan-ats-full.mjs` | Reverse-ATS keyword-first scanner over full public ATS datasets (Greenhouse/Lever/Ashby/Workday/iCIMS), filtered by portals.yml `title_filter`/`location_filter` — no company list needed; checkpoints every 500 companies, `--resume` continues an interrupted sweep |
 | `scan-interamt.mjs` | Playwright browser scanner for Interamt.de (German public sector portal — Apache Wicket, no REST API) |
+| `scan-loop.mjs` / `loop-core.mjs` | The scan loop: `/career-ops scan` keeps widening the search until it has 10 NEW postings scoring >= `loop.min_score` (3.8) or a budget stops it. `loop-core.mjs` is the pure control law (no I/O, unit-tested); `scan-loop.mjs` is the only thing that touches disk. State in `data/loop-state.json`, audit trail in `data/loop-run-log.md`, human review gate in `data/loop-shortlist.md`. See `LOOP.md` |
+| `gmail-sweep.mjs` | Non-interactive reply sweep run as Step 0 of `/career-ops pipeline`: `query` scopes a Gmail search to companies actually in flight, `plan` classifies + matches fetched messages, `apply` writes the high-confidence, forward-only transitions through `set-status.mjs`. Never touches the mailbox itself and never sends anything |
+| `LOOP.md` | Loop design: budgets, escalation ladder, dedup, the L1/L2/L3 autonomy ladder, and what the loop is not allowed to do |
 | `check-liveness.mjs` / `liveness-core.mjs` | Job posting liveness checker + shared logic (expired signals win over generic Apply text) |
 | `set-status.mjs` | Canonical tracker-row update: `node set-status.mjs <report#\|company> <State> [--note] [--force]` — strict states.yml validation, report-link mismatch guard, shared lock, atomic write |
 | `invite-match.mjs` | Fuzzy-match a pasted interview invite (company, date, req ID) against the tracker, ranking candidates when a company has multiple entries (JSON or `--summary`) |
@@ -117,7 +120,9 @@ Some users enable plugins (external integrations). If an enabled plugin ships a 
 node doctor.mjs --json
 ```
 
-Output: `{"onboardingNeeded": <bool>, "missing": [...], "warnings": [...], "autoCopied": [...]}` — `missing` lists whichever of `cv.md`, `config/profile.yml`, `modes/_profile.md`, `portals.yml` are absent; `warnings` is reserved for non-blocking setup signals; `autoCopied` lists customization files (`modes/_profile.md` or `modes/_custom.md`) doctor copied from `modes/_profile.template.md` / `modes/_custom.template.md`.
+Output: `{"onboardingNeeded": <bool>, "missing": [...], "warnings": [...], "autoCopied": [...], "confirmFields": [...]}` — `missing` lists whichever of `cv.md`, `config/profile.yml`, `modes/_profile.md`, `portals.yml` are absent; `warnings` is reserved for non-blocking setup signals; `autoCopied` lists customization files (`modes/_profile.md` or `modes/_custom.md`) doctor copied from `modes/_profile.template.md` / `modes/_custom.template.md`; `confirmFields` lists `config/profile.yml` keys still carrying a `# CONFIRM:` placeholder.
+
+**`confirmFields` is not an onboarding blocker.** A present-but-unfilled field (a phone number straight off a LinkedIn export, a placeholder comp range) leaves `onboardingNeeded` false. Mention it once when it is relevant to what the user is doing — a placeholder phone matters when drafting an application email, a placeholder comp range matters when evaluating an offer — and never invent the real value.
 
 **If `onboardingNeeded` is true, enter onboarding mode.** Do NOT proceed with evaluations, scans, or any other mode until the basics are in place. Guide the user step by step:
 
