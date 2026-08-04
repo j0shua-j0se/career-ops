@@ -2,6 +2,16 @@
 
 Procesa las URLs de ofertas acumuladas en `data/pipeline.md`. El candidato añade URLs cuando quiere y luego lanza `/career-ops pipeline` para procesarlas todas de una vez.
 
+## Barrido de liveness
+
+**Ejecutarlo antes de procesar cualquier URL.** Las entradas que el escáner escribió en modo headless/batch llevan `**Verification:** unconfirmed (batch mode)` porque Playwright no estaba disponible al escanear — nunca se comprobó su liveness. Sin barrido, las ofertas muertas llegan a la evaluación de una en una y queman tiempo y tokens en roles fantasma.
+
+1. Ejecutar `node check-liveness.mjs --file data/pipeline.md` (añadir `--throttle` en lotes grandes para no superar los límites de tasa del WAF; es Playwright puro, cero tokens de Claude). El checker lee el inbox directamente — toma las filas `- [ ]`, ignora las filas `- [x]`/`- [!]` y las entradas `local:`, e informa cuántas líneas omitió. **No** copiar las URLs a mano a un archivo temporal antes; ese paso cuesta tokens y es justo el que se acaba saltando.
+2. El checker imprime un veredicto por URL y termina con código distinto de cero en cuanto alguna URL está expired/uncertain.
+3. Cada URL que el checker reporte como **expired/closed** se resuelve en lugar de procesarse: moverla a la sección de procesadas como `- [x] ~~URL | Empresa | Rol~~ — oferta expirada (barrido de liveness)` y, si ya existe una fila en el tracker, ponerla en `Discarded`. **Nada** de extracción, evaluación ni generación de report/PDF para ella.
+4. Los resultados `uncertain` se dejan en su sitio y se confirman durante la extracción normal (un timeout transitorio no debe descartar una oferta posiblemente viva).
+5. Solo las URLs vivas supervivientes pasan al bucle de procesamiento de abajo.
+
 ## Workflow
 
 1. **Leer** `data/pipeline.md` -> encontrar los ítems `- [ ]` en la sección "Pendientes" / "Pending" / "En attente"

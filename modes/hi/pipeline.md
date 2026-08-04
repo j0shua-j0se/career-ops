@@ -2,6 +2,16 @@
 
 `data/pipeline.md` में accumulated offer URLs process करता है। Candidate जब चाहे URLs add करता है और फिर एक बार में सब process करने के लिए `/career-ops pipeline` run करता है।
 
+## Liveness sweep
+
+**कोई भी URL process करने से पहले इसे चलाएं।** Scanner ने headless/batch mode में जो entries लिखी हैं उन पर `**Verification:** unconfirmed (batch mode)` लगा होता है, क्योंकि scan के समय Playwright उपलब्ध नहीं था — उनकी liveness कभी जांची ही नहीं गई। Sweep के बिना मरी हुई postings एक-एक करके evaluation तक पहुंचती हैं और phantom roles पर समय और tokens जलाती हैं।
+
+1. `node check-liveness.mjs --file data/pipeline.md` चलाएं (बड़े batches में WAF rate limits के नीचे रहने के लिए `--throttle` जोड़ें; यह शुद्ध Playwright है, zero Claude tokens)। Checker inbox सीधे पढ़ता है — वह `- [ ]` rows लेता है, `- [x]`/`- [!]` rows और `local:` entries को ignore करता है, और बताता है कि उसने कितनी lines skip कीं। URLs को पहले हाथ से किसी temp file में **मत** copy करें; वह step tokens खर्च करता है और वही असल में skip हो जाता है।
+2. Checker हर URL का verdict print करता है और जैसे ही कोई URL expired/uncertain हो, non-zero code के साथ exit करता है।
+3. जिस भी URL को checker **expired/closed** बताए उसे process करने के बजाय resolve करें: उसे processed section में `- [x] ~~URL | Company | Role~~ — posting expired (liveness sweep)` के रूप में ले जाएं और, अगर tracker row पहले से है, तो उसे `Discarded` कर दें। उसके लिए **कोई** extraction, evaluation या report/PDF generation नहीं।
+4. `uncertain` results अपनी जगह रहते हैं और सामान्य extraction के दौरान confirm होते हैं (एक क्षणिक timeout किसी संभवतः जीवित posting को नहीं गिराना चाहिए)।
+5. केवल बची हुई live URLs नीचे दिए processing loop में जाती हैं।
+
 ## Workflow
 
 1. **पढ़ें** `data/pipeline.md` → "Pending" / "En attente" / "Pendientes" / "Offen" / "लंबित" section में `- [ ]` items ढूंढें

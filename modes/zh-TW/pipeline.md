@@ -2,6 +2,16 @@
 
 用於批次處理記錄在 `data/pipeline.md` 中的職缺 URL。求職者可以隨時把看到的職缺連結丟進待處理清單，之後執行 `/career-ops pipeline` 一次自動評估所有機會。
 
+## 有效性掃描（liveness sweep）
+
+**在處理任何 URL 之前先執行。** 掃描器在 headless/batch 模式下寫入的項目都帶有 `**Verification:** unconfirmed (batch mode)`，因為掃描當下 Playwright 無法使用——它們的有效性從未被檢查過。少了這一步，失效的職缺會被逐筆送進評估流程，在幽靈職缺上白白燒掉時間與 token。
+
+1. 執行 `node check-liveness.mjs --file data/pipeline.md`（批次較大時加上 `--throttle`，以免觸發 WAF 速率限制；純 Playwright，零 Claude token）。檢查器直接讀取收件匣——它只取 `- [ ]` 列，忽略 `- [x]`/`- [!]` 列以及 `local:` 項目，並回報略過了多少行。**不要**先把 URL 手動複製到暫存檔；那一步既花 token，也正是實務上會被省略的一步。
+2. 檢查器逐筆列印判定結果，只要有任何 URL 為 expired/uncertain，就以非零碼結束。
+3. 凡是被回報為 **expired/closed** 的 URL 一律結案而不進入處理：將其移到已處理區，寫成 `- [x] ~~URL | 公司 | 職務~~ — 職缺已過期（有效性掃描）`；若追蹤表中已有對應列，則將其設為 `Discarded`。**不要**為它做擷取、評估或產生 report/PDF。
+4. `uncertain` 的結果原地保留，在正常擷取過程中再確認（單次偶發逾時不應丟棄一個可能仍然有效的職缺）。
+5. 只有存活下來的有效 URL 才會進入下面的處理迴圈。
+
 ## 即時工作流程
 
 1. **讀取資料**：分析 `data/pipeline.md`，找出 "Pending" 區塊下所有標記為 `- [ ]` 的待處理項目。

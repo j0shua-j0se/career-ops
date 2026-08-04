@@ -2,6 +2,16 @@
 
 用于批量处理记录在 `data/pipeline.md` 中的职位 URL 链接。候选人可以随时向待处理列表中追加抓取的岗位链接，然后运行 `/career-ops pipeline` 一键自动化评估所有待投递机会。
 
+## 有效性扫描（liveness sweep）
+
+**在处理任何 URL 之前先运行。** 扫描器在 headless/batch 模式下写入的条目都带有 `**Verification:** unconfirmed (batch mode)`，因为扫描时 Playwright 不可用——它们的有效性从未被检查过。没有这一步，失效的职位会被逐条送进评估流程，在幽灵岗位上白白烧掉时间和 token。
+
+1. 运行 `node check-liveness.mjs --file data/pipeline.md`（批量较大时加 `--throttle`，以免触发 WAF 速率限制；纯 Playwright，零 Claude token）。检查器直接读取收件箱——它只取 `- [ ]` 行，忽略 `- [x]`/`- [!]` 行以及 `local:` 条目，并报告跳过了多少行。**不要**先把 URL 手工复制到临时文件；那一步既消耗 token，也正是实际会被省略的一步。
+2. 检查器逐条打印判定结果，只要有任何 URL 处于 expired/uncertain，就以非零码退出。
+3. 凡是被报告为 **expired/closed** 的 URL 一律结案而不进入处理：将其移入已处理区，写成 `- [x] ~~URL | 公司 | 职位~~ — 职位已过期（有效性扫描）`；若追踪表中已有对应行，则将其置为 `Discarded`。**不要**为它做抽取、评估或生成 report/PDF。
+4. `uncertain` 的结果原地保留，在正常抽取过程中再确认（一次偶发超时不应丢弃一个可能仍然有效的职位）。
+5. 只有存活下来的有效 URL 才进入下面的处理循环。
+
 ## 实时工作流
 
 1. **读取数据**：分析 `data/pipeline.md` 文件，找出 "Pending" 模块下所有标记为 `- [ ]` 的待处理项目。

@@ -2,6 +2,16 @@
 
 Processen bieden URL's aan die zijn verzameld in `data/pipeline.md`. De kandidaat voegt URL's toe wanneer hij maar wil en voert vervolgens `/career-ops pipeline` uit om ze allemaal in één keer te verwerken.
 
+## Liveness-sweep
+
+**Voer dit uit vóór het verwerken van welke URL dan ook.** Items die de scanner in headless/batch-modus heeft weggeschreven dragen `**Verification:** unconfirmed (batch mode)`, omdat Playwright niet beschikbaar was tijdens het scannen — hun liveness is nooit gecontroleerd. Zonder sweep bereiken dode vacatures één voor één de evaluatie en verbranden ze tijd en tokens aan spookrollen.
+
+1. Voer `node check-liveness.mjs --file data/pipeline.md` uit (voeg `--throttle` toe bij grote batches om onder de WAF-ratelimieten te blijven; het is pure Playwright, nul Claude-tokens). De checker leest de inbox rechtstreeks — hij neemt de `- [ ]`-regels, negeert `- [x]`/`- [!]`-regels en `local:`-items, en meldt hoeveel regels hij heeft overgeslagen. Kopieer de URLs **niet** eerst met de hand naar een tijdelijk bestand; die stap kost tokens en is precies degene die wordt overgeslagen.
+2. De checker drukt per URL een oordeel af en eindigt met een exitcode ongelijk aan nul zodra een URL expired/uncertain is.
+3. Elke URL die de checker als **expired/closed** meldt, wordt afgehandeld in plaats van verwerkt: verplaats hem naar de verwerkte sectie als `- [x] ~~URL | Bedrijf | Rol~~ — vacature verlopen (liveness-sweep)` en zet, als er al een trackerregel bestaat, die op `Discarded`. **Geen** extractie, evaluatie of report/PDF-generatie ervoor.
+4. `uncertain`-resultaten blijven staan en worden bevestigd tijdens de normale extractie (één tijdelijke timeout mag een mogelijk levende vacature niet weggooien).
+5. Alleen de overlevende, levende URLs gaan door naar de verwerkingslus hieronder.
+
 ## Werkstroom
 
 1. **Lees** `data/pipeline.md` -> zoek de items `- [ ]` in de sectie "In afwachting" / "Pending" / "Pendientes" / "Offen" / "En attente"

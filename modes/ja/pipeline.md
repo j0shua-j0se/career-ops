@@ -8,8 +8,8 @@
 
 Per-URL loop の前に、zero-token liveness checker で pending URLs をまとめて sweep する：
 
-1. "Pending" section のすべての `- [ ]` URL を temp file に集める（1 URL per line）。
-2. `node check-liveness.mjs --file <tmpfile>` を実行する（large batches では WAF rate limits を避けるため `--throttle` を追加。pure Playwright、zero Claude tokens）。Checker は URL ごとの verdict を出し、expired/uncertain がある場合は non-zero で終了する。
+1. `node check-liveness.mjs --file data/pipeline.md` を実行する（large batches では WAF rate limits を避けるため `--throttle` を追加。pure Playwright、zero Claude tokens）。Checker は inbox を直接読み、`- [ ]` 行だけを対象にし、`- [x]`/`- [!]` 行と `local:` entries は無視して、skip した行数を報告する。URL を temp file に手で集める**必要はない**（token を消費し、実際に省略されがちな step）。
+2. Checker は URL ごとの verdict を出し、expired/uncertain がある場合は non-zero で終了する。
 3. Checker が **expired/closed** と報告した URL は処理せず pipeline entry を resolve する：`- [x] ~~URL | Company | Role~~ -- posting expired (liveness sweep)` として "Processed" に移し、すでに tracker row がある場合は `Discarded` にする。**JD extraction、evaluation、report/PDF generation はしない。**
 4. `uncertain` results は残し、normal per-URL extraction 中に確認する（一時的な timeout で live posting を落とさないため）。
 5. 生き残った live URLs だけが下の per-URL processing loop に進む。

@@ -2,6 +2,16 @@
 
 `data/pipeline.md`에 쌓인 채용 공고 URL을 처리합니다. 후보자는 원할 때 URL을 추가하고, 이후 `/career-ops pipeline`을 실행해 한 번에 처리합니다.
 
+## Liveness 스윕
+
+**어떤 URL이든 처리하기 전에 먼저 실행합니다.** 스캐너가 headless/batch 모드에서 기록한 항목에는 `**Verification:** unconfirmed (batch mode)`가 붙어 있습니다. 스캔 시점에 Playwright를 쓸 수 없어 liveness를 한 번도 확인하지 않았기 때문입니다. 스윕이 없으면 죽은 공고가 하나씩 평가 단계까지 도달해 유령 포지션에 시간과 토큰을 태웁니다.
+
+1. `node check-liveness.mjs --file data/pipeline.md`를 실행합니다(큰 배치에서는 WAF 레이트 리밋 아래로 유지하기 위해 `--throttle`을 추가하십시오. 순수 Playwright이며 Claude 토큰은 0입니다). 체커는 인박스를 직접 읽습니다 — `- [ ]` 행을 가져오고, `- [x]`/`- [!]` 행과 `local:` 항목은 무시하며, 건너뛴 줄 수를 보고합니다. URL을 먼저 손으로 임시 파일에 복사하지 **마십시오**. 그 단계는 토큰을 쓰면서 실제로는 건너뛰게 되는 단계입니다.
+2. 체커는 URL별 판정을 출력하고, expired/uncertain인 URL이 하나라도 있으면 0이 아닌 코드로 종료합니다.
+3. 체커가 **expired/closed**로 보고한 URL은 처리하지 않고 종결합니다: 처리 완료 섹션으로 `- [x] ~~URL | 회사 | 직무~~ — 공고 만료 (liveness 스윕)` 형태로 옮기고, 트래커 행이 이미 있으면 `Discarded`로 설정합니다. 해당 항목에 대한 추출, 평가, report/PDF 생성은 **하지 않습니다**.
+4. `uncertain` 결과는 그대로 두고 통상적인 추출 과정에서 확인합니다(일시적인 타임아웃 하나로 살아 있을 수도 있는 공고를 버려서는 안 됩니다).
+5. 살아남은 live URL만 아래 처리 루프로 넘어갑니다.
+
 ## Workflow
 
 1. **읽기** `data/pipeline.md` -> "대기" / "Pending" / "Pendientes" 섹션의 `- [ ]` item 찾기

@@ -2,6 +2,16 @@
 
 Processa URLs de vagas acumuladas em `data/pipeline.md`. O candidato adiciona URLs quando quiser e depois executa `/career-ops pipeline` para processar todas de uma vez.
 
+## Varredura de liveness
+
+**Execute antes de processar qualquer URL.** As entradas que o scanner gravou em modo headless/batch carregam `**Verification:** unconfirmed (batch mode)` porque o Playwright não estava disponível no momento da varredura — a liveness delas nunca foi verificada. Sem a varredura, vagas mortas chegam à avaliação uma a uma e queimam tempo e tokens em papéis fantasma.
+
+1. Execute `node check-liveness.mjs --file data/pipeline.md` (adicione `--throttle` em lotes grandes para ficar abaixo dos limites de taxa do WAF; é Playwright puro, zero tokens do Claude). O checker lê o inbox diretamente — pega as linhas `- [ ]`, ignora as linhas `- [x]`/`- [!]` e as entradas `local:`, e informa quantas linhas pulou. **Não** copie os URLs à mão para um arquivo temporário antes; esse passo custa tokens e é justamente o que acaba sendo pulado.
+2. O checker imprime um veredicto por URL e sai com código diferente de zero assim que algum URL estiver expired/uncertain.
+3. Todo URL reportado como **expired/closed** é resolvido em vez de processado: mova-o para a seção de processados como `- [x] ~~URL | Empresa | Cargo~~ — vaga expirada (varredura de liveness)` e, se já existir linha no tracker, defina-a como `Discarded`. **Nenhuma** extração, avaliação ou geração de report/PDF para ele.
+4. Resultados `uncertain` permanecem no lugar e são confirmados durante a extração normal (um timeout passageiro não deve descartar uma vaga possivelmente viva).
+5. Apenas os URLs vivos sobreviventes seguem para o laço de processamento abaixo.
+
 ## Workflow
 
 1. **Ler** `data/pipeline.md` → buscar itens `- [ ]` na seção "Pendentes"

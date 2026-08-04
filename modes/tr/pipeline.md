@@ -2,6 +2,16 @@
 
 `data/pipeline.md` dosyasına biriktirilen iş ilanı URL'lerini işler. İstediğin zaman URL ekle, hazır olduğunda `/career-ops pipeline` komutunu çalıştır.
 
+## Liveness taraması
+
+**Herhangi bir URL işlenmeden önce çalıştırın.** Tarayıcının headless/batch modunda yazdığı kayıtlar `**Verification:** unconfirmed (batch mode)` taşır; çünkü tarama anında Playwright kullanılamıyordu — liveness hiç kontrol edilmedi. Tarama yapılmazsa ölü ilanlar değerlendirmeye teker teker ulaşır ve hayalet roller için zaman ve token yakar.
+
+1. `node check-liveness.mjs --file data/pipeline.md` çalıştırın (büyük partilerde WAF hız limitlerinin altında kalmak için `--throttle` ekleyin; saf Playwright, sıfır Claude tokenı). Checker gelen kutusunu doğrudan okur — `- [ ]` satırlarını alır, `- [x]`/`- [!]` satırlarını ve `local:` kayıtlarını yok sayar ve kaç satır atladığını bildirir. URL'leri önce elle geçici bir dosyaya **kopyalamayın**; o adım token harcar ve pratikte atlanan adım tam olarak odur.
+2. Checker her URL için bir karar yazdırır ve herhangi bir URL expired/uncertain olur olmaz sıfırdan farklı bir kodla çıkar.
+3. Checker'ın **expired/closed** olarak bildirdiği her URL işlenmek yerine sonuçlandırılır: işlenmişler bölümüne `- [x] ~~URL | Şirket | Rol~~ — ilan süresi doldu (liveness taraması)` biçiminde taşıyın ve tracker satırı zaten varsa `Discarded` yapın. Onun için **hiçbir** çıkarım, değerlendirme veya report/PDF üretimi yapılmaz.
+4. `uncertain` sonuçlar yerinde bırakılır ve normal çıkarım sırasında doğrulanır (geçici tek bir zaman aşımı, muhtemelen canlı bir ilanı elemeye yetmemeli).
+5. Aşağıdaki işleme döngüsüne yalnızca hayatta kalan canlı URL'ler girer.
+
 ## İş Akışı
 
 1. **Oku** `data/pipeline.md` → "Bekleyenler" bölümündeki `- [ ]` satırlarını bul

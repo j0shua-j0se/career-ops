@@ -2,6 +2,16 @@
 
 Memproses URL lowongan yang menumpuk di `data/pipeline.md`. Kandidat menambahkan URL kapan pun ia mau lalu menjalankan `/career-ops pipeline` untuk memproses semuanya sekaligus.
 
+## Sapuan liveness
+
+**Jalankan sebelum memproses URL apa pun.** Entri yang ditulis pemindai dalam mode headless/batch membawa `**Verification:** unconfirmed (batch mode)` karena Playwright tidak tersedia saat pemindaian — liveness-nya tidak pernah diperiksa. Tanpa sapuan, lowongan mati sampai ke evaluasi satu per satu dan membakar waktu serta token untuk peran fantom.
+
+1. Jalankan `node check-liveness.mjs --file data/pipeline.md` (tambahkan `--throttle` untuk batch besar agar tetap di bawah batas laju WAF; ini Playwright murni, nol token Claude). Checker membaca inbox secara langsung — ia mengambil baris `- [ ]`, mengabaikan baris `- [x]`/`- [!]` serta entri `local:`, dan melaporkan berapa baris yang dilewati. **Jangan** menyalin URL secara manual ke berkas sementara lebih dulu; langkah itu memakan token dan justru itulah yang terlewat.
+2. Checker mencetak putusan per URL dan keluar dengan kode bukan nol begitu ada URL yang expired/uncertain.
+3. Setiap URL yang dilaporkan **expired/closed** diselesaikan alih-alih diproses: pindahkan ke bagian terproses sebagai `- [x] ~~URL | Perusahaan | Peran~~ — lowongan kedaluwarsa (sapuan liveness)` dan, jika baris tracker sudah ada, setel ke `Discarded`. **Tanpa** ekstraksi, evaluasi, atau pembuatan report/PDF untuknya.
+4. Hasil `uncertain` dibiarkan di tempat dan dikonfirmasi saat ekstraksi normal (satu timeout sesaat tidak boleh membuang lowongan yang mungkin masih hidup).
+5. Hanya URL hidup yang tersisa yang masuk ke loop pemrosesan di bawah.
+
 ## Alur kerja
 
 1. **Baca** `data/pipeline.md` -> temukan item `- [ ]` di bagian "Menunggu" / "Pending" / "Pendientes"

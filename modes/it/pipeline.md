@@ -2,6 +2,16 @@
 
 Elabora gli URL degli annunci accumulati in `data/pipeline.md`. Il candidato aggiunge gli URL quando vuole, poi esegue `/career-ops pipeline` per elaborarli tutti in una volta.
 
+## Scansione di liveness
+
+**Da eseguire prima di processare qualsiasi URL.** Le voci scritte dallo scanner in modalità headless/batch riportano `**Verification:** unconfirmed (batch mode)` perché Playwright non era disponibile al momento della scansione — la loro liveness non è mai stata verificata. Senza scansione, gli annunci morti arrivano alla valutazione uno alla volta e bruciano tempo e token su ruoli fantasma.
+
+1. Eseguire `node check-liveness.mjs --file data/pipeline.md` (aggiungere `--throttle` per lotti grandi, per restare sotto i rate limit del WAF; è puro Playwright, zero token Claude). Il checker legge l'inbox direttamente — prende le righe `- [ ]`, ignora le righe `- [x]`/`- [!]` e le voci `local:`, e riporta quante righe ha saltato. **Non** copiare a mano gli URL in un file temporaneo prima; quel passaggio costa token ed è proprio quello che finisce per essere saltato.
+2. Il checker stampa un verdetto per URL ed esce con codice diverso da zero non appena un URL risulta expired/uncertain.
+3. Ogni URL segnalato come **expired/closed** viene risolto invece che processato: spostarlo nella sezione dei processati come `- [x] ~~URL | Azienda | Ruolo~~ — annuncio scaduto (scansione di liveness)` e, se esiste già una riga nel tracker, portarla a `Discarded`. **Nessuna** estrazione, valutazione o generazione di report/PDF per esso.
+4. I risultati `uncertain` restano al loro posto e vengono confermati durante l'estrazione normale (un timeout transitorio non deve scartare un annuncio forse ancora vivo).
+5. Solo gli URL vivi sopravvissuti passano al ciclo di elaborazione qui sotto.
+
 ## Workflow
 
 1. **Leggere** `data/pipeline.md` -> trovare gli elementi contrassegnati come `- [ ]` nella sezione "In attesa" / "Pending" / "Pendientes" / "En attente"

@@ -2,6 +2,16 @@
 
 Behandler URL'er til opslag, der er samlet i `data/pipeline.md`. Kandidaten tilføjer URL'er, når han vil, og kører derefter `/career-ops pipeline` for at behandle dem alle på én gang.
 
+## Liveness-sweep
+
+**Kør dette, før du behandler nogen URL.** Poster, som scanneren skrev i headless/batch-tilstand, bærer `**Verification:** unconfirmed (batch mode)`, fordi Playwright ikke var tilgængelig på scanningstidspunktet — de er aldrig blevet tjekket for liveness. Uden et sweep når døde opslag frem til evaluering ét ad gangen og brænder tid og tokens af på fantomroller.
+
+1. Kør `node check-liveness.mjs --file data/pipeline.md` (tilføj `--throttle` ved store batches for at holde dig under WAF-rate-limits; det er ren Playwright, nul Claude-tokens). Checkeren læser indbakken direkte — den tager `- [ ]`-rækkerne, ignorerer `- [x]`/`- [!]`-rækker samt `local:`-poster og rapporterer, hvor mange linjer den sprang over. Kopiér **ikke** URLerne manuelt til en midlertidig fil først; det trin koster tokens og er præcis det, der bliver sprunget over.
+2. Checkeren udskriver en afgørelse per URL og afslutter med en exit-kode forskellig fra nul, så snart en URL er expired/uncertain.
+3. Hver URL, som checkeren melder som **expired/closed**, afklares i stedet for at blive behandlet: flyt den til den behandlede sektion som `- [x] ~~URL | Virksomhed | Rolle~~ — opslag udløbet (liveness sweep)`, og hvis der allerede findes en tracker-række, sæt den til `Discarded`. **Ingen** ekstraktion, evaluering eller report/PDF-generering for den.
+4. `uncertain`-resultater bliver stående og bekræftes under den normale ekstraktion (en enkelt forbigående timeout må ikke kassere et muligvis levende opslag).
+5. Kun de overlevende, levende URLer går videre til behandlingsløkken nedenfor.
+
 ## Workflow
 
 1. **Læs** `data/pipeline.md` -> find `- [ ]`-elementer i sektionen "Afventer" / "Pending" / "Pendientes"

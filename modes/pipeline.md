@@ -2,14 +2,32 @@
 
 Process job URLs stored in `data/pipeline.md`. The user adds URLs at any time and then executes `/career-ops pipeline` to process them all.
 
+## Gmail sweep (run first)
+
+`pipeline` is where the tracker is reconciled with reality. Applications move without you: a rejection lands, a recruiter replies, an interview gets scheduled. A tracker that only records what *you* did is stale within a week, and every downstream number — `stats.mjs`, `analyze-patterns.mjs`, follow-up cadence — is computed from it. So sweep the mailbox **before** touching the URL inbox.
+
+1. **Scope the read.** `node gmail-sweep.mjs query` prints a Gmail search restricted to the companies whose tracker rows are `Applied`/`Responded`/`Interview`/`Offer`, within a recency window. If it returns `"query": null`, nothing is in flight — skip to the liveness sweep.
+2. **Fetch.** Run that query through whichever mail access exists:
+   - a Gmail connector/MCP (search threads, then fetch each matching message), or
+   - `node plugins.mjs run gmail` when the OAuth plugin is enabled (check with `node plugins.mjs list`).
+
+   **Search only what step 1 asked for.** Do not read the wider mailbox, do not open threads outside the query, and do not send, archive, label, or delete anything. This is a read, and a narrow one.
+3. **Hand it over.** Write the fetched messages to a JSON array — `[{"id", "from", "subject", "body", "date"}]` — and run `node gmail-sweep.mjs plan --file <messages.json>`. It classifies each reply (`reply-matcher.mjs`), matches it to a tracker row, and screens the resulting transition.
+4. **Apply the safe subset.** `node gmail-sweep.mjs apply --file <messages.json>` writes the `updates` through `node set-status.mjs --row N`, the canonical locked/validated/atomic path. Only high-confidence matches move, only forwards (`Rejected` excepted, since a rejection can arrive at any stage), and never out of a terminal state. Everything else lands in `needsReview`.
+5. **Report, don't bury.** Show the user what moved (`from` → `to`, per company) and list `needsReview` with its `skipReason`. Anything not applied stays queued in `data/reply-candidates.json` for `node reply-watch.mjs`.
+
+**Why this one is allowed to write.** A status change is internal, reversible with one `set-status.mjs` call, and outward-facing to nobody. It is not an application. `AGENTS.md` → Ethical Use still holds in full: nothing here drafts, sends, or submits anything, and the sweep never replies to a message it read.
+
+Processed message IDs are recorded in `data/gmail-sweep-state.json`, so re-running `pipeline` the same day does not re-apply the same transitions. `--all` reprocesses everything; `--dry-run` resolves and validates without writing.
+
 ## Liveness sweep
 
 **Run this before processing any URLs.** Entries added by the scanner in headless/batch mode carry `**Verification:** unconfirmed (batch mode)` because Playwright was unavailable at scan time — they were never checked for liveness. Without a sweep, dead postings reach evaluation one tab at a time, burning time and tokens on phantom roles (a single inbox of 8 stale URLs produces 8 wasted evaluations).
 
 Sweep all pending URLs in one batch with the zero-token liveness checker before the per-URL loop:
 
-1. Collect every `- [ ]` URL from the "Pending" section into a temp file (one URL per line).
-2. Run `node check-liveness.mjs --file <tmpfile>` (add `--throttle` for large batches to stay under WAF rate limits; it's pure Playwright, zero Claude tokens). The checker prints a per-URL verdict and exits non-zero if any are expired/uncertain.
+1. Run `node check-liveness.mjs --file data/pipeline.md` (add `--throttle` for large batches to stay under WAF rate limits; it's pure Playwright, zero Claude tokens). The checker reads the inbox directly — it takes the `- [ ]` rows, ignores `- [x]`/`- [!]` rows and `local:` entries, and reports how many lines it skipped. **Do not** hand-copy URLs into a temp file first; that step costs tokens and is the one that gets skipped.
+2. The checker prints a per-URL verdict and exits non-zero if any are expired/uncertain.
 3. For every URL the checker reports as **expired/closed**, resolve the pipeline entry instead of processing it: move it to "Processed" as `- [x] ~~URL | Company | Role~~ — posting expired (liveness sweep)` and, if it already has a tracker row, mark it `Discarded`. **Do not** extract the JD, evaluate, or generate a report/PDF for it.
 4. Leave `uncertain` results in place to be confirmed during normal per-URL extraction (a transient timeout shouldn't drop a possibly-live posting).
 5. Only the surviving live URLs continue to the per-URL processing loop below.
@@ -28,18 +46,28 @@ Read `spend_tier` from `config/profile.yml` (see `modes/_shared.md` -- Spend Tie
 
 ## Workflow
 
+0. **Gmail sweep** (above) → reconcile tracker statuses with the mailbox before anything else.
 1. **Read** `data/pipeline.md` → search for `- [ ]` items in the "Pending" section. Run the **Liveness sweep** (above) first and drop any expired entries before continuing.
 2. **For each surviving pending URL**:
    a. **Extract JD** using Playwright (browser_navigate + browser_snapshot) → WebFetch → WebSearch
    b. If the URL is not accessible → mark as `- [!]` with a note and continue
    c. **Pre-screen gate**: apply the gate above (using the extracted JD). If the JD is an obvious mismatch, log the discard to `data/discard.log` (per the **Discard log** rule above — three fields, no job ID in interactive mode), mark it `- [x] #-- | {url} | skipped (pre-screen mismatch: {reason})` in "Processed", and continue to the next URL. No `REPORT_NUM` is claimed for discarded postings.
    d. Claim the next sequential `REPORT_NUM` atomically by running `node reserve-report-num.mjs` (and release the sentinel using `node reserve-report-num.mjs --release <num>` after the report is written)
-   e. **Execute full auto-pipeline**: Evaluation A-F → Report .md → PDF (if score >= `auto_pdf_score_threshold`) → Tracker. Read `modes/_custom.md` → Pipeline Rules, if it exists, and apply its override here. Default (if absent or silent): standard pipeline execution.
-   f. **Move from "Pending" to "Processed"**: `- [x] #NNN | URL | Company | Role | Score/5 | PDF ✅/❌`
+   e. **Execute full auto-pipeline**: Evaluation A-F → Report .md → PDF (if score >= the **application-kit threshold** below) → Tracker. Read `modes/_custom.md` → Pipeline Rules, if it exists, and apply its override here. Default (if absent or silent): standard pipeline execution.
+   f. **Application kit — every role at or above the kit threshold gets both artifacts.** If the evaluation score >= the kit threshold, produce **both**:
+      - the tailored CV PDF (`modes/pdf.md`), and
+      - the cover letter (`modes/cover.md`), written to `output/{company-slug}-cover-letter.md`.
 
-   **About the PDF gate (configurable):** Read `config/profile.yml` → `auto_pdf_score_threshold`. If the key does not exist, default to `3.0` (this mode's original gate). If the evaluation score is less than the threshold, skip PDF generation: write the report normally, show in the header `**PDF:** not generated — run /career-ops pdf {company-slug} to create on demand`, and mark PDF ❌ in the tracker. If the score is ≥ threshold, generate the PDF as usual.
+      Not one or the other. A CV with no letter means the user still has to write the letter before applying, which is the part they wanted automated. Both are drafts for review — `AGENTS.md` → Ethical Use: nothing is submitted, ever, without the user.
+   g. **Move from "Pending" to "Processed"**: `- [x] #NNN | URL | Company | Role | Score/5 | PDF ✅/❌`
 
-   **Tuning it:** Generating a tailored PDF costs ~30–60s per entry (Playwright launch + HTML render) and produces files that often go unused — most roles score in the 2.x/3.x range and never reach the application stage. Raise `auto_pdf_score_threshold` (e.g. `4.0`) to write only the report for marginal offers and produce the PDF on demand via `/career-ops pdf {slug}`; set `0` to generate one for every offer. Both modes (Path A `/career-ops pipeline` and Path B `batch/batch-runner.sh`) read the same key, so behavior is identical regardless of which path processes an offer.
+   **The application-kit threshold:** read `loop.min_score` from `config/profile.yml` (default `3.8`); if there is no `loop:` block, fall back to `auto_pdf_score_threshold` (default `3.0`). Inside `/career-ops pipeline`, `loop.min_score` **wins over** `auto_pdf_score_threshold` — one bar decides what the scan loop shortlists and what the pipeline produces a kit for, so a role that survived the loop cannot arrive at pipeline and be silently skipped for being 0.2 below a second, different bar. `auto_pdf_score_threshold` continues to govern `batch/batch-runner.sh` unchanged.
+
+   **Below the kit threshold:** write the report, skip both artifacts, show `**PDF:** not generated — run /career-ops pdf {company-slug} to create on demand` in the header, mark PDF ❌ in the tracker.
+
+   **Between the kit threshold and 4.0:** generate the kit, and say plainly in the summary that `AGENTS.md` → Ethical Use recommends against applying below 4.0/5. The kit existing is not a recommendation to send it.
+
+   **Tuning it:** a tailored PDF costs ~30–60s per entry (Playwright launch + HTML render) and a cover letter costs tokens, and both go unused on roles that never reach the application stage. The kit threshold is the dial: raise `loop.min_score` to produce kits only for stronger matches, lower it to produce more. In `batch/batch-runner.sh` (Path B, no `loop:` context) the dial remains `auto_pdf_score_threshold`; set it to `0` there to generate a PDF for every offer.
 3. **If there are 3+ pending URLs**, launch agents in parallel (Agent tool with `run_in_background`) to maximize speed — at most one agent per pending URL. Each is a **single-pass worker**: it evaluates its one URL and must **not** spawn further subagents or invoke other skills; its company/comp research stays inline and bounded (see `modes/_shared.md` → Subagent delegation). This keeps a pipeline run from fanning out into a recursive agent swarm.
 4. **At the end**, show summary table:
 
@@ -110,6 +138,15 @@ them as hints when triaging; none changes how you process the URL.
 3. **WebSearch (last resort):** Search in secondary portals that index the JD.
 
 **Special cases:**
+- **Cookie/consent wall (Avature, SAP SuccessFactors and other white-labeled ATS)**: A consent
+  overlay that hides the JD in a real browser is almost always client-side JS — the server already
+  returned the full posting in the initial HTML. When Playwright shows nothing but a consent dialog,
+  retry the same URL with a **plain GET** (`WebFetch`, which does not execute JS) before marking the
+  URL `[!]`. Confirmed on Siemens Healthineers' Avature tenant, where two postings were unreadable
+  through the browser and complete over plain HTTP; SuccessFactors RMK boards are server-rendered by
+  the same design. **A consent overlay is not evidence that a posting is closed** — do not resolve
+  the entry as expired on that basis. This is an *extraction* fallback only: it does not relax the
+  Offer Verification rule in `AGENTS.md`, which still requires Playwright to confirm liveness.
 - **LinkedIn**: May require login → mark `[!]` and ask the user to paste the text
 - **PDF**: If the URL points to a PDF, read it directly with the Read tool
 - **`local:` prefix**: Read the local file. Example: `local:jds/linkedin-pm-ai.md` → read `jds/linkedin-pm-ai.md`

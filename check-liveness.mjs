@@ -11,12 +11,18 @@
  * Usage:
  *   node check-liveness.mjs <url1> [url2] ...
  *   node check-liveness.mjs --file urls.txt
+ *   node check-liveness.mjs --file data/pipeline.md
+ *
+ * `--file` takes either a plain one-URL-per-line list or `data/pipeline.md`
+ * itself, so the `pipeline` mode Liveness sweep no longer needs the agent to
+ * hand-copy URLs into a temp file first — the step that gets skipped in practice.
  *
  * Exit code: 0 if all active, 1 if any expired or uncertain
  */
 
 import { chromium } from 'playwright';
 import { readFile } from 'fs/promises';
+import { pathToFileURL } from 'url';
 import {
   checkUrlLivenessWithFallback,
   createHeadedPageProvider,
@@ -25,6 +31,7 @@ import {
   sleep,
 } from './liveness-browser.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
+import { extractPipelineUrls } from './liveness-core.mjs';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -46,10 +53,25 @@ async function main() {
     process.exit(1);
   }
 
-  let urls;
+  let urls, skippedLines = 0;
   if (positional[0] === '--file') {
+    if (!positional[1]) {
+      console.error('check-liveness: --file needs a path (a URL list or data/pipeline.md).');
+      process.exit(1);
+    }
     const text = await readFile(positional[1], 'utf-8');
-    urls = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+    ({ urls, skipped: skippedLines } = extractPipelineUrls(text));
+    if (urls.length === 0) {
+      // An inbox with nothing pending is a normal state, not a failure — exiting
+      // non-zero here would read as "something expired" to the pipeline sweep.
+      // Lines that were present but unusable mean the wrong file was passed.
+      if (skippedLines > 0) {
+        console.error(`check-liveness: no http(s) URLs in ${positional[1]} (${skippedLines} line(s) unusable) — wrong file?`);
+        process.exit(1);
+      }
+      console.log(`Nothing to check: no pending URLs in ${positional[1]}.`);
+      process.exit(0);
+    }
   } else {
     urls = positional;
   }
@@ -58,7 +80,13 @@ async function main() {
     noFallback ? null : 'headed fallback on challenge',
     throttleBaseMs ? `throttle ~${throttleBaseMs / 1000}-${(throttleBaseMs * 2) / 1000}s` : null,
   ].filter(Boolean);
-  console.log(`Checking ${urls.length} URL(s)...${notes.length ? ` (${notes.join(', ')})` : ''}\n`);
+  console.log(`Checking ${urls.length} URL(s)...${notes.length ? ` (${notes.join(', ')})` : ''}`);
+  // Never drop input silently: a mistyped path or an all-`local:` inbox should be
+  // visible, not read as "everything was checked".
+  if (skippedLines > 0) {
+    console.log(`(skipped ${skippedLines} line(s) with no http(s) URL — processed rows, local: entries, or prose)`);
+  }
+  console.log('');
 
   // Lazy browser: the API rung resolves ATS postings with no browser at all, so we
   // only launch Playwright if a URL actually needs the fallback.
@@ -109,7 +137,10 @@ async function main() {
   if (expired > 0 || uncertain > 0) process.exit(1);
 }
 
-main().catch(err => {
-  console.error('Fatal:', err.message);
-  process.exit(1);
-});
+// Guarded so tests can import extractPipelineUrls without launching the CLI.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(err => {
+    console.error('Fatal:', err.message);
+    process.exit(1);
+  });
+}

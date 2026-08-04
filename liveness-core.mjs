@@ -113,6 +113,49 @@ function hasApplyControl(controls = []) {
   return controls.some((control) => APPLY_PATTERNS.some((pattern) => pattern.test(control)));
 }
 
+/**
+ * Pull checkable URLs out of a `check-liveness.mjs --file` argument.
+ *
+ * Accepts both shapes the project passes:
+ *   - a plain list, one URL per line (`#` comments and blanks ignored)
+ *   - `data/pipeline.md`, whose rows are `- [ ] {url} | {company} | {title} | ...`
+ *
+ * Reading the inbox directly is the point: the `pipeline` mode Liveness sweep used
+ * to ask the agent to hand-copy URLs into a temp file, which costs tokens and is
+ * the step that gets skipped, and `--file data/pipeline.md` (already printed in
+ * `modes/apply.md` and `docs/APPLY_AUTOFILL.md`) used to feed Playwright whole
+ * markdown rows as URLs.
+ *
+ * Only unprocessed `- [ ]` rows are swept: `- [x]` is already resolved and `- [!]`
+ * was unreachable at extraction time, so re-checking either wastes a browser run.
+ * Lines carrying no http(s) URL — `local:jds/…` entries, prose, table rules — are
+ * counted rather than passed along, and the caller reports the count.
+ *
+ * @param {string} text file contents
+ * @returns {{ urls: string[], skipped: number }}
+ */
+export function extractPipelineUrls(text = '') {
+  const urls = [];
+  let skipped = 0;
+
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const task = /^[-*]\s*\[(.)\]\s*/.exec(line);
+    if (task && task[1] !== ' ') continue;
+
+    const body = task ? line.slice(task[0].length) : line;
+    // Stop at the pipeline row's column separator, a closing paren, or a bracket so
+    // both `{url} | {company}` rows and markdown links yield the bare URL.
+    const match = /https?:\/\/[^\s|)\]>]+/.exec(body);
+    if (match) urls.push(match[0]);
+    else skipped++;
+  }
+
+  return { urls, skipped };
+}
+
 export function classifyLiveness({ status = 0, requestedUrl = '', finalUrl = '', bodyText: rawBodyText = '', applyControls: rawApplyControls = [] } = {}) {
   const bodyText = normalizeForMatch(rawBodyText);
   const applyControls = (Array.isArray(rawApplyControls) ? rawApplyControls : []).map(normalizeForMatch);
