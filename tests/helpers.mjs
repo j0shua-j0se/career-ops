@@ -189,7 +189,7 @@ export function formatRunFailure(maxChars = 2000) {
  */
 export function fileExists(path) { return existsSync(join(ROOT, path)); }
 
-let bashCache = null;
+let bashCache;   // undefined = not probed yet; null = probed, none works
 
 /**
  * Resolve the bash executable to use for shell-script checks, lazily.
@@ -200,10 +200,18 @@ let bashCache = null;
  * Resolution therefore happens on first call and is memoized for the rest of
  * the process; suites that never touch bash never pay for it.
  *
- * @returns {string} Bash executable path or command name.
+ * Returns null when no probe succeeded. This used to fall back to the literal
+ * string 'bash', which on a Windows box without WSL installed resolves to the
+ * WindowsApps installer stub: it exits 1 printing "Class not registered", so
+ * every batch-runner check failed with an empty argv and empty output. Seven
+ * red lines that say nothing about the code under test train people to ignore
+ * the suite. Callers must now branch on null and warn/skip, the same way the
+ * dashboard section skips when the Go compiler is absent.
+ *
+ * @returns {string | null} Bash executable path/command, or null if unavailable.
  */
 export function getBash() {
-  if (bashCache !== null) return bashCache;
+  if (bashCache !== undefined) return bashCache;
   if (process.platform !== 'win32') return (bashCache = 'bash');
   for (const cmd of WINDOWS_BASH_CANDIDATES) {
     try {
@@ -222,7 +230,7 @@ export function getBash() {
       return (bashCache = cmd);
     } catch {}
   }
-  return (bashCache = 'bash');
+  return (bashCache = null);
 }
 
 export function toBashPath(wpath) {

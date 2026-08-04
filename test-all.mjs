@@ -91,6 +91,21 @@ function discoverTests(dir) {
   return out;
 }
 
+// Drop whole-line comments before grepping a suite for process.exit().
+// A suite that DOCUMENTS the no-exit rule ("NOTE: no process.exit() anywhere")
+// was being rejected for saying so — the guard fired on its own instructions.
+//
+// Only lines whose first non-whitespace is `//`, `/*` or `*` are removed: a real
+// process.exit() call can never sit on such a line, so this cannot create a
+// false negative. Trailing comments on a code line are deliberately still
+// scanned — erring toward a loud false positive, never a silent miss.
+function stripCommentLines(src) {
+  return src
+    .split('\n')
+    .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+    .join('\n');
+}
+
 async function runDiscovered(filter = null) {
   let files = discoverTests(TESTS_DIR);
   if (filter) {
@@ -107,7 +122,7 @@ async function runDiscovered(filter = null) {
     // process.exit() inside one would terminate test-all mid-run with a forged
     // exit code — every later section (and finish()) would silently never run.
     // Refuse to import such a suite and fail loudly instead (#1916 regression).
-    if (/\bprocess\.exit\s*\(/.test(readFileSync(f, 'utf-8'))) {
+    if (/\bprocess\.exit\s*\(/.test(stripCommentLines(readFileSync(f, 'utf-8')))) {
       fail(`${f.slice(ROOT.length + 1)} calls process.exit() — discovered suites must use pass/fail from tests/helpers.mjs and never exit`);
       continue;
     }
@@ -176,6 +191,7 @@ const scripts = [
   { name: 'verify-cv-facts.mjs --self-test', expectExit: 0 },
   { name: 'contacts.mjs --self-test', expectExit: 0 },
   { name: 'company-funded.mjs --self-test', expectExit: 0 },
+  { name: 'triage-prefilter.mjs --self-test', expectExit: 0 },
   { name: 'updater-migration-tests.mjs', expectExit: 0 },
   { name: 'tracker-columns-tests.mjs', expectExit: 0 },
   { name: 'agent-inbox-tests.mjs', expectExit: 0 },
@@ -2570,6 +2586,58 @@ if (
   fail('pipeline mode missing batch liveness sweep for unconfirmed entries');
 }
 
+// A JS consent overlay hides the JD from Playwright while the server has already
+// sent the whole posting. Observed on Siemens Healthineers' Avature tenant. The
+// fallback is extraction-only and must not be read as relaxing Offer Verification.
+if (
+  pipelineMode.includes('Cookie/consent wall') &&
+  pipelineMode.includes('plain GET') &&
+  pipelineMode.includes('which does not execute JS') &&
+  pipelineMode.includes('not evidence that a posting is closed') &&
+  pipelineMode.includes('still requires Playwright to confirm liveness')
+) {
+  pass('pipeline mode records the plain-GET fallback for JS consent walls without relaxing liveness verification');
+} else {
+  fail('pipeline mode missing the consent-wall plain-GET extraction fallback (Avature / SuccessFactors)');
+}
+
+// The sweep is the cheapest guard in the project and was the easiest to skip while
+// it required hand-copying URLs into a temp file. check-liveness.mjs --file now
+// reads data/pipeline.md directly, so no mode may still print the temp-file flow.
+//
+// Every market mirror is checked, not just English and German. Naming two of
+// them is what let sixteen mirrors drift: the assertion stayed green while
+// ar/da/es/fr/hi/id/it/ko/nl/pl/pt/ru/tr/ua/zh/zh-TW carried no sweep at all,
+// and modes_dir points a user at exactly one of those dirs — a mirror missing
+// the section is invisible to the user whose modes_dir it is. Discovering the
+// mirrors from disk means a newly added market is covered the day it lands.
+//
+// The assertion is on the command string, not on the heading: the heading is
+// translated per market ('## Liveness-Sweep', '## Balayage de liveness',
+// '## 有效性扫描（liveness sweep）'), while `check-liveness.mjs --file
+// data/pipeline.md` is an identifier and stays verbatim in every language.
+const pipelineMirrors = readdirSync(join(ROOT, 'modes'), { withFileTypes: true })
+  .filter((d) => d.isDirectory() && existsSync(join(ROOT, 'modes', d.name, 'pipeline.md')))
+  .map((d) => ({ label: `modes/${d.name}/pipeline.md`, text: readFile(`modes/${d.name}/pipeline.md`) }));
+
+const sweepSources = [
+  { label: 'modes/pipeline.md', text: pipelineMode },
+  { label: 'modes/apply.md', text: applyMode },
+  ...pipelineMirrors,
+];
+
+const missingSweep = sweepSources.filter((s) => !s.text.includes('check-liveness.mjs --file data/pipeline.md'));
+const tmpfileSweep = sweepSources.filter((s) => s.text.includes('<tmpfile>'));
+
+if (pipelineMirrors.length === 0) {
+  fail('no modes/*/pipeline.md mirrors discovered — the liveness sweep guard is asserting on nothing');
+} else if (missingSweep.length === 0 && tmpfileSweep.length === 0) {
+  pass(`liveness sweep reads data/pipeline.md directly in apply and all ${pipelineMirrors.length + 1} pipeline modes`);
+} else {
+  if (missingSweep.length) fail(`missing the liveness sweep: ${missingSweep.map((s) => s.label).join(', ')}`);
+  if (tmpfileSweep.length) fail(`still routes the liveness sweep through a hand-built temp file: ${tmpfileSweep.map((s) => s.label).join(', ')}`);
+}
+
 // --- salary tracking mode wiring (#1656 PR-2) ---
 const trackerModeDoc = readFile('modes/tracker.md');
 const patternsModeDoc = readFile('modes/patterns.md');
@@ -3467,6 +3535,7 @@ try {
   const {
     parseYCPayload,
     parseA16zPayload,
+    parseIndexPayload,
     parseSeedEntries,
     toPortalEntry,
     SEED_SOURCES,
@@ -3528,6 +3597,84 @@ try {
     fail('parseSeedEntries with source="a16z" did not return expected entries');
   }
 
+  // ── 2b. Index Ventures HTML parsing ────────────────────────────────
+  // Fixture mirrors the shapes the live page actually emits: plain anchors, an
+  // anchor with wrapper markup, an absolute href, an entity in the name, legal
+  // suffixes, a duplicate, a nav link, and an Index path slug that disagrees
+  // with the company name.
+  const indexHtml = `
+    <nav><a href="/companies/">All</a></nav>
+    <ul class="companies">
+      <a href="/companies/personio/">Personio</a>
+      <a href="/companies/deepl/"><span class="name">DeepL</span></a>
+      <a href="https://www.indexventures.com/companies/cargoone/">cargo.one</a>
+      <a href="/companies/bloomandwild/">Bloom &amp; Wild</a>
+      <a href="/companies/codesignal/">CodeSignal, Inc.</a>
+      <a href="/companies/applyboard/">ApplyBoard Inc.</a>
+      <a href="/companies/wizio/">Wiz</a>
+      <a href="/companies/revolut/">Revolut</a>
+      <a href="/companies/revolut/">Revolut</a>
+    </ul>
+  `;
+  const indexEntries = parseIndexPayload(indexHtml);
+  const bySlug = new Map(indexEntries.map(e => [e.slug, e]));
+  const indexOk =
+    indexEntries.length === 8 &&
+    bySlug.get('personio')?.name === 'Personio' &&
+    bySlug.get('personio')?.source === 'index' &&
+    // No website is published on the listing page, so url stays empty and
+    // toPortalEntry falls through to the slug-based ATS guess (see 5c).
+    bySlug.get('personio')?.url === '' &&
+    // Wrapper markup inside the anchor is stripped, not carried into the name.
+    bySlug.get('deepl')?.name === 'DeepL' &&
+    // Absolute hrefs parse the same as root-relative ones.
+    bySlug.get('cargo-one')?.name === 'cargo.one' &&
+    bySlug.has('revolut');
+  if (indexOk) pass('parseIndexPayload: extracts server-rendered /companies/ anchors (root-relative and absolute) into SeedCompany[]');
+  else fail(`parseIndexPayload: output wrong — got ${indexEntries.length} entries: ${JSON.stringify(indexEntries.map(e => e.slug))}`);
+
+  const entityOk = bySlug.get('bloom-wild')?.name === 'Bloom & Wild';
+  if (entityOk) pass('parseIndexPayload: HTML entities in company names are decoded (Bloom &amp; Wild → Bloom & Wild)');
+  else fail(`parseIndexPayload entity decoding wrong — got: ${JSON.stringify(indexEntries.map(e => e.name))}`);
+
+  // "CodeSignal, Inc." must not derive `codesignal-inc` — that misses the board.
+  const legalOk =
+    bySlug.get('codesignal')?.name === 'CodeSignal' &&
+    bySlug.get('applyboard')?.name === 'ApplyBoard' &&
+    !indexEntries.some(e => /-inc$/.test(e.slug));
+  if (legalOk) pass('parseIndexPayload: trailing legal suffixes are stripped before slug derivation (CodeSignal, Inc. → codesignal)');
+  else fail(`parseIndexPayload legal-suffix stripping wrong — got: ${JSON.stringify(indexEntries.map(e => e.slug))}`);
+
+  // Index routes Wiz at /companies/wizio/ — that is Index's own identifier and
+  // has no relationship to the company's ATS board, so the slug comes from the name.
+  const nameSlugOk = bySlug.has('wiz') && !bySlug.has('wizio');
+  if (nameSlugOk) pass('parseIndexPayload: slug is derived from the company name, not from Index\'s own path segment');
+  else fail(`parseIndexPayload slug source wrong — got: ${JSON.stringify(indexEntries.map(e => e.slug))}`);
+
+  const hygieneOk =
+    indexEntries.filter(e => e.slug === 'revolut').length === 1 &&
+    !indexEntries.some(e => e.name === 'All') &&
+    indexEntries.every(e => SLUG_RE.test(e.slug));
+  if (hygieneOk) pass('parseIndexPayload: dedupes repeated companies, drops nav links, and every slug passes SLUG_RE');
+  else fail(`parseIndexPayload hygiene wrong — got: ${JSON.stringify(indexEntries.map(e => e.slug))}`);
+
+  const indexEmptyOk =
+    parseIndexPayload('').length === 0 &&
+    parseIndexPayload(null).length === 0 &&
+    parseIndexPayload({ companies: [] }).length === 0 &&
+    parseIndexPayload('<html><body>no portfolio here</body></html>').length === 0;
+  if (indexEmptyOk) pass('parseIndexPayload: empty, non-string, and anchor-free input all return [] instead of throwing');
+  else fail('parseIndexPayload did not return [] for empty/non-string/anchor-free input');
+
+  // parseSeedEntries() delegating to Index — HTML sources are routed explicitly,
+  // so a missing route would silently fall through to the YC parser and return [].
+  const indexViaGeneric = parseSeedEntries(indexHtml, 'index');
+  if (indexViaGeneric.length === indexEntries.length && indexViaGeneric.some(e => e.slug === 'personio')) {
+    pass('parseSeedEntries(html, "index") delegates to parseIndexPayload correctly');
+  } else {
+    fail(`parseSeedEntries with source="index" did not return expected entries — got ${indexViaGeneric.length}`);
+  }
+
   // ── 3. SLUG_RE validation — invalid slugs are dropped ─────────────
   const badSlugFixture = {
     companies: [
@@ -3576,6 +3723,17 @@ try {
     fail(`toPortalEntry website fallback wrong — got: ${noSlug.careers_url}`);
   }
 
+  // ── 5c. toPortalEntry — Index entries carry no website ────────────
+  // Index publishes no company website on the listing page, so url is always ''.
+  // The slug-based ATS guess must win; falling back to '' would hand the scanner
+  // nothing at all.
+  const indexPortal = toPortalEntry({ name: 'Personio', slug: 'personio', url: '', source: 'index' });
+  if (indexPortal.careers_url === 'https://job-boards.greenhouse.io/personio' && indexPortal.source === 'index') {
+    pass('toPortalEntry: Index entries (no website URL) resolve through the slug-based ATS guess');
+  } else {
+    fail(`toPortalEntry index fallback wrong — got: ${JSON.stringify(indexPortal)}`);
+  }
+
   // ── 6. Dedup guard — duplicate slugs yield only one entry ─────────
   const dupFixture = {
     companies: [
@@ -3592,19 +3750,36 @@ try {
   }
 
   // ── 7. SEED_SOURCES registry ───────────────────────────────────────
-  const registryOk =
-    typeof SEED_SOURCES === 'object' &&
-    SEED_SOURCES !== null &&
-    typeof SEED_SOURCES.yc === 'object' &&
-    typeof SEED_SOURCES.yc.fetch === 'function' &&
-    typeof SEED_SOURCES.yc.label === 'string' &&
-    typeof SEED_SOURCES.a16z === 'object' &&
-    typeof SEED_SOURCES.a16z.fetch === 'function' &&
-    typeof SEED_SOURCES.a16z.label === 'string' &&
-    Object.keys(SEED_SOURCES).includes('yc') &&
-    Object.keys(SEED_SOURCES).includes('a16z');
-  if (registryOk) pass('SEED_SOURCES registry: both "yc" and "a16z" keys exist with fetch function and label string');
-  else fail(`SEED_SOURCES registry malformed — keys: ${JSON.stringify(Object.keys(SEED_SOURCES || {}))}`);
+  // The expected keys are named (a silently vanishing source is a regression),
+  // but the shape check iterates the registry so a fourth source is validated
+  // the day it lands rather than the day someone remembers to extend this list.
+  const EXPECTED_SEED_KEYS = ['yc', 'a16z', 'index'];
+  const registryKeys = SEED_SOURCES && typeof SEED_SOURCES === 'object' ? Object.keys(SEED_SOURCES) : [];
+  const missingKeys = EXPECTED_SEED_KEYS.filter(k => !registryKeys.includes(k));
+  const malformed = registryKeys.filter(k => {
+    const entry = SEED_SOURCES[k];
+    return !entry || typeof entry !== 'object' || typeof entry.fetch !== 'function' || typeof entry.label !== 'string' || !entry.label.trim();
+  });
+  if (missingKeys.length === 0 && malformed.length === 0 && registryKeys.length > 0) {
+    pass(`SEED_SOURCES registry: all ${registryKeys.length} sources (${registryKeys.join(', ')}) expose a fetch function and a non-empty label`);
+  } else if (missingKeys.length) {
+    fail(`SEED_SOURCES registry missing expected keys: ${missingKeys.join(', ')} — keys: ${JSON.stringify(registryKeys)}`);
+  } else {
+    fail(`SEED_SOURCES registry entries malformed: ${malformed.join(', ')}`);
+  }
+
+  // Every registered source must be reachable through the generic entry point.
+  // parseSeedEntries defaults unknown sources to the YC parser, which returns []
+  // for HTML — the failure mode is silence, so it is asserted explicitly.
+  const unroutedHtmlSources = ['a16z', 'index'].filter(src => parseSeedEntries(
+    src === 'index' ? indexHtml : a16zHtml,
+    src,
+  ).length === 0);
+  if (unroutedHtmlSources.length === 0) {
+    pass('parseSeedEntries: every HTML-payload source has an explicit route (no silent fall-through to the YC parser)');
+  } else {
+    fail(`parseSeedEntries falls through to the YC parser for HTML source(s): ${unroutedHtmlSources.join(', ')}`);
+  }
 
 } catch (e) {
   fail(`VC portfolio seed fetcher tests crashed: ${e.message}`);
@@ -6203,7 +6378,13 @@ try {
       copyFileSync(join(ROOT, 'followup-cadence.mjs'), join(e2eTmp, 'followup-cadence.mjs'));
       copyFileSync(join(ROOT, 'tracker-parse.mjs'), join(e2eTmp, 'tracker-parse.mjs'));
       copyFileSync(join(ROOT, 'tracker-aliases.json'), join(e2eTmp, 'tracker-aliases.json'));
-      symlinkSync(join(ROOT, 'node_modules'), join(e2eTmp, 'node_modules'), 'dir');
+      // 'junction', not 'dir': followup-cadence.mjs imports js-yaml, so the copy
+      // needs node_modules resolvable — but a Windows 'dir' symlink needs
+      // Developer Mode or elevation and otherwise throws EPERM, failing this
+      // check for reasons that have nothing to do with appDateSource. Junctions
+      // are unprivileged and directory-only; POSIX ignores the type argument.
+      // Same rationale as contacts.test.mjs.
+      symlinkSync(join(ROOT, 'node_modules'), join(e2eTmp, 'node_modules'), 'junction');
       mkdirSync(join(e2eTmp, 'data'), { recursive: true });
       writeFileSync(join(e2eTmp, 'data', 'applications.md'), [
         '# Applications Tracker',
@@ -9166,9 +9347,17 @@ try {
 
 // ── 13. BATCH RATE-LIMIT PAUSE ──────────────────────────────────
 
+// batch-runner.sh is a bash script; sections 13, 14 and 14b execute it. On a
+// host with no bash there is nothing to assert about it, so they skip with a
+// warning rather than reporting the missing interpreter as a code failure —
+// the same treatment section 4 gives an absent Go compiler.
+const BASH = getBash();
+const NO_BASH = BASH === null;
+
 console.log('\n13. Batch rate-limit pause');
 
-try {
+if (NO_BASH) warn('Batch rate-limit pause skipped — no working bash in env');
+else try {
   const tmp = mkdtempSync(join(tmpdir(), 'co-batch-rate-'));
   const batchDir = join(tmp, 'batch');
   const fakeBin = join(tmp, 'bin');
@@ -9263,6 +9452,8 @@ try {
 
 console.log('\n14. Batch spend_tier model routing');
 
+if (NO_BASH) warn('Batch spend_tier model routing skipped — no working bash in env');
+
 // Helper: create a fully isolated tmp fixture for one spend_tier sub-test.
 // Each sub-test gets its own mkdtempSync so no batch-state.tsv from a prior
 // sub-test can bleed in, regardless of OS-level I/O ordering on CI runners.
@@ -9305,7 +9496,7 @@ function makeTierFixture(profileYml) {
 }
 
 // economy tier
-try {
+if (!NO_BASH) try {
   const { tmp, batchDir, fakeBin } = makeTierFixture('spend_tier: economy\n');
   const argFile = join(tmp, 'claude-argv.txt');
   const env = { ...process.env, PATH: `${fakeBin}${delimiter}${process.env.PATH}`, BATCH_ARG_FILE: argFile };
@@ -9320,7 +9511,7 @@ try {
 } catch (e) { fail(`Batch spend_tier routing test crashed (economy): ${e.message}`); }
 
 // premium tier
-try {
+if (!NO_BASH) try {
   const { tmp, batchDir, fakeBin } = makeTierFixture('spend_tier: premium\n');
   const argFile = join(tmp, 'claude-argv.txt');
   const env = { ...process.env, PATH: `${fakeBin}${delimiter}${process.env.PATH}`, BATCH_ARG_FILE: argFile };
@@ -9335,7 +9526,7 @@ try {
 } catch (e) { fail(`Batch spend_tier routing test crashed (premium): ${e.message}`); }
 
 // --model override takes precedence over spend_tier
-try {
+if (!NO_BASH) try {
   const { tmp, batchDir, fakeBin } = makeTierFixture('spend_tier: premium\n');
   const argFile = join(tmp, 'claude-argv.txt');
   const env = { ...process.env, PATH: `${fakeBin}${delimiter}${process.env.PATH}`, BATCH_ARG_FILE: argFile };
@@ -9350,7 +9541,7 @@ try {
 } catch (e) { fail(`Batch spend_tier routing test crashed (--model override): ${e.message}`); }
 
 // missing spend_tier key defaults to standard
-try {
+if (!NO_BASH) try {
   const { tmp, batchDir, fakeBin } = makeTierFixture('# no spend_tier key\nname: test\n');
   const argFile = join(tmp, 'claude-argv.txt');
   const env = { ...process.env, PATH: `${fakeBin}${delimiter}${process.env.PATH}`, BATCH_ARG_FILE: argFile };
@@ -9365,7 +9556,7 @@ try {
 } catch (e) { fail(`Batch spend_tier routing test crashed (missing key): ${e.message}`); }
 
 // invalid spend_tier value falls back to standard with a warning
-try {
+if (!NO_BASH) try {
   const { tmp, batchDir, fakeBin } = makeTierFixture('spend_tier: turbo\n');
   const argFile = join(tmp, 'claude-argv.txt');
   const env = { ...process.env, PATH: `${fakeBin}${delimiter}${process.env.PATH}`, BATCH_ARG_FILE: argFile };
@@ -9383,7 +9574,8 @@ try {
 
 console.log('\n14b. Batch pre-screen discard log (log_discard helper)');
 
-try {
+if (NO_BASH) warn('Batch pre-screen discard log skipped — no working bash in env');
+else try {
   const tmp = mkdtempSync(join(tmpdir(), 'co-batch-discard-'));
   const batchDir = join(tmp, 'batch');
   mkdirSync(batchDir, { recursive: true });
@@ -12580,6 +12772,117 @@ try {
   }
 } catch (e) {
   fail(`table-freshness wiring check: ${e.message}`);
+}
+
+// ── 70. SCAN LOOP + GMAIL SWEEP WIRING ──────────────────────────
+//
+// loop-core.mjs and gmail-sweep.mjs have their own unit suites under tests/.
+// What those cannot check is whether the *modes* still tell the agent to use
+// them: the scripts can be perfect and `/career-ops scan` still runs a single
+// pass because the mode file drifted back. These assertions pin the wiring.
+
+console.log('\n70. Scan loop + Gmail sweep wiring');
+
+try {
+  for (const f of ['loop-core.mjs', 'scan-loop.mjs', 'gmail-sweep.mjs', 'LOOP.md']) {
+    if (fileExists(f)) pass(`${f} exists`);
+    else fail(`Missing ${f} — the scan loop is not installed`);
+  }
+
+  // loop-core must stay pure: it is imported by tests and by the driver, and a
+  // single fs/network import there turns every control-law test into an
+  // integration test (the reason liveness-core.mjs exists as a sibling of
+  // check-liveness.mjs).
+  const loopCore = readFile('loop-core.mjs');
+  if (!/^import\s/m.test(loopCore)) {
+    pass('loop-core.mjs imports nothing — the control law stays unit-testable');
+  } else {
+    fail('loop-core.mjs has grown an import — keep I/O in scan-loop.mjs');
+  }
+
+  // The bar is a constant in one place. Two spellings of 3.8 is how a loop
+  // starts shortlisting things the pipeline then refuses to build a kit for.
+  if (/minScore:\s*3\.8/.test(loopCore)) {
+    pass('loop-core.mjs defaults minScore to 3.8');
+  } else {
+    fail('loop-core.mjs no longer defaults minScore to 3.8');
+  }
+  if (/target:\s*10/.test(loopCore)) {
+    pass('loop-core.mjs defaults target to 10 new qualified jobs');
+  } else {
+    fail('loop-core.mjs no longer defaults target to 10');
+  }
+
+  const scanMode = readFile('modes/scan.md');
+  if (/scan-loop\.mjs/.test(scanMode)) {
+    pass('modes/scan.md drives the loop through scan-loop.mjs');
+  } else {
+    fail('modes/scan.md does not mention scan-loop.mjs — scan has drifted back to a single pass');
+  }
+  if (/never lower.*minscore|lower.*`?minScore`?.*to hit|to reach `?target`?/i.test(scanMode)) {
+    pass('modes/scan.md forbids lowering the bar to reach target');
+  } else {
+    fail('modes/scan.md lost the "never lower minScore" rule — the 3.8 gate is only as good as that sentence');
+  }
+  if (/modes\/triage\.md/.test(scanMode)) {
+    pass('modes/scan.md routes scoring through the triage contract');
+  } else {
+    fail('modes/scan.md does not point scoring at modes/triage.md');
+  }
+
+  // Both pipeline mode sets: the user's active modes_dir may be modes/de, so a
+  // change made only to the English file never reaches them (the German set had
+  // already drifted once this way).
+  for (const modePath of ['modes/pipeline.md', 'modes/de/pipeline.md']) {
+    const src = readFile(modePath);
+    if (/gmail-sweep\.mjs/.test(src)) {
+      pass(`${modePath} runs the Gmail sweep`);
+    } else {
+      fail(`${modePath} has no Gmail sweep step`);
+    }
+    if (/set-status\.mjs/.test(src)) {
+      pass(`${modePath} writes statuses through the canonical path`);
+    } else {
+      fail(`${modePath} does not name set-status.mjs as the status write path`);
+    }
+    if (/loop\.min_score/.test(src)) {
+      pass(`${modePath} gates the application kit on loop.min_score`);
+    } else {
+      fail(`${modePath} does not define the application-kit threshold`);
+    }
+    if (/modes\/cover\.md/.test(src)) {
+      pass(`${modePath} generates a cover letter, not just a CV`);
+    } else {
+      fail(`${modePath} never generates a cover letter — half an application kit is not one`);
+    }
+  }
+
+  // The sweep is allowed to write, so its guards are load-bearing.
+  // Comment lines are stripped first: the docblock on applyUpdates() explains
+// why it must not write the tracker directly, and naming the file in that
+// explanation is not the same as writing to it (same trap as the
+// process.exit() guard above).
+const sweep = stripCommentLines(readFile('gmail-sweep.mjs'));
+  if (/set-status\.mjs/.test(sweep) && !/applications\.md/.test(sweep)) {
+    pass('gmail-sweep.mjs writes the tracker only through set-status.mjs');
+  } else {
+    fail('gmail-sweep.mjs names the tracker file directly — it must not become a second writer');
+  }
+  // The sweep reads a mailbox. It must never be the thing that sends from one.
+  const sendTokens = ['create_draft', 'sendMessage', 'messages.send', 'smtp'];
+  const found = sendTokens.filter((t) => sweep.includes(t));
+  if (found.length === 0) {
+    pass('gmail-sweep.mjs has no send path — it reads mail and writes statuses, nothing else');
+  } else {
+    fail(`gmail-sweep.mjs mentions a mail-sending API: ${found.join(', ')}`);
+  }
+  if (/TERMINAL_STATES/.test(sweep) && /confidence !== 'high'/.test(sweep)) {
+    pass('gmail-sweep.mjs keeps the terminal-state and confidence guards');
+  } else {
+    fail('gmail-sweep.mjs lost a transition guard');
+  }
+} catch (e) {
+  fail(`scan loop wiring check crashed: ${e.message}`);
 }
 
 await runDiscovered();
