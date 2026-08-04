@@ -74,11 +74,26 @@ Underscore-prefixed files are shared helpers, never loaded as providers:
 
 ## Security conventions
 
-Every provider validates the target host against an allowlist before
-fetching and passes `redirect: 'error'` so a server-side redirect cannot be
-used for SSRF (see `assertGreenhouseUrl` in `greenhouse.mjs` for the
-pattern). A shared regression test enforces this across providers:
-`tests/providers/ats-ssrf-hardening.test.mjs`.
+SSRF protection lives in the transport (`_http.mjs`), not in each provider,
+so a new provider is safe by omission:
+
+- **Every** URL is screened by `assertSafeUrl()` before the request goes out.
+  It rejects non-http(s) protocols and any host in loopback, RFC1918,
+  link-local (incl. `169.254.169.254`), IPv6 unique-local, `.internal`/`.local`
+  space, and decimal/hex IP literals.
+- `redirect` defaults to `'error'`, so a 3xx from a job board to an internal
+  address fails instead of being followed. A source that genuinely needs to
+  follow a hop must opt in with an explicit `redirect: 'follow'`.
+- Providers **may** additionally pin their own hosts by passing
+  `allowHosts: ['lever.co']`; `assertSafeUrl` accepts the host or any
+  subdomain of it. See `assertGreenhouseUrl` in `greenhouse.mjs` for the
+  in-provider validation pattern.
+
+Known gap: `assertSafeUrl` checks the URL as written, so a public hostname
+that *resolves* to a private address (DNS rebinding) is not caught. Closing
+that requires resolve-then-pin against `_dns-cache.mjs`.
+
+Regression tests: `tests/providers/ats-ssrf-hardening.test.mjs`.
 
 ## Adding a provider
 

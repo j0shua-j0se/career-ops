@@ -11,6 +11,17 @@ console.log('\nProvider — _http timeout');
 
 const { fetchJson, fetchText } = await import(pathToFileURL(join(ROOT, 'providers/_http.mjs')).href);
 
+// The SSRF guard in _http.mjs blocks loopback by default, so this suite's local
+// server is only reachable with an explicit per-call opt-in. Passing it is what
+// makes the timeout assertions below test the timeout instead of the guard.
+const LOOPBACK = { allowPrivateHosts: true };
+
+// A guard rejection is instant; a real abort takes ~the request timeout. Without
+// a lower bound, any error at all satisfies "it rejected" and the stalled-body
+// regression this suite exists to catch goes unnoticed — which is exactly what
+// happened when the guard first landed and these checks passed in 0ms.
+const MIN_ABORT_MS = 200;
+
 // Independent upper bound: if the mechanism under test regresses and the call
 // never settles, this makes the test fail fast (hitting the elapsed assertion)
 // instead of reintroducing the very silent hang this suite guards against.
@@ -47,11 +58,12 @@ const base = `http://127.0.0.1:${server.address().port}`;
 {
   const t0 = Date.now();
   try {
-    await hardTimeout(fetchJson(`${base}/stall`, { timeoutMs: 300 }), 8_000, 'fetchJson /stall');
+    await hardTimeout(fetchJson(`${base}/stall`, { timeoutMs: 300, ...LOOPBACK }), 8_000, 'fetchJson /stall');
     fail('fetchJson resolved on a stalled body');
-  } catch {
+  } catch (e) {
     const elapsed = Date.now() - t0;
-    if (elapsed < MAX_ABORT_MS) pass(`fetchJson aborted stalled body read in ${elapsed}ms`);
+    if (elapsed < MIN_ABORT_MS) fail(`fetchJson rejected in ${elapsed}ms — too fast to be the abort timer: ${e.message}`);
+    else if (elapsed < MAX_ABORT_MS) pass(`fetchJson aborted stalled body read in ${elapsed}ms`);
     else fail(`fetchJson took ${elapsed}ms to abort a stalled body (timeout not covering body read)`);
   }
 }
@@ -60,20 +72,40 @@ const base = `http://127.0.0.1:${server.address().port}`;
 {
   const t0 = Date.now();
   try {
-    await hardTimeout(fetchText(`${base}/stall`, { timeoutMs: 300 }), 8_000, 'fetchText /stall');
+    await hardTimeout(fetchText(`${base}/stall`, { timeoutMs: 300, ...LOOPBACK }), 8_000, 'fetchText /stall');
     fail('fetchText resolved on a stalled body');
-  } catch {
+  } catch (e) {
     const elapsed = Date.now() - t0;
-    if (elapsed < MAX_ABORT_MS) pass(`fetchText aborted stalled body read in ${elapsed}ms`);
+    if (elapsed < MIN_ABORT_MS) fail(`fetchText rejected in ${elapsed}ms — too fast to be the abort timer: ${e.message}`);
+    else if (elapsed < MAX_ABORT_MS) pass(`fetchText aborted stalled body read in ${elapsed}ms`);
     else fail(`fetchText took ${elapsed}ms to abort a stalled body`);
   }
 }
 
 // 3. Happy path still works after the refactor.
 {
-  const ok = await fetchJson(`${base}/ok`, { timeoutMs: 2_000 });
-  if (ok && ok.ok === true) pass('fetchJson still parses a completed body');
-  else fail(`fetchJson happy path broken: ${JSON.stringify(ok)}`);
+  try {
+    const ok = await fetchJson(`${base}/ok`, { timeoutMs: 2_000, ...LOOPBACK });
+    if (ok && ok.ok === true) pass('fetchJson still parses a completed body');
+    else fail(`fetchJson happy path broken: ${JSON.stringify(ok)}`);
+  } catch (e) {
+    // Never let this throw out of the module: discovered suites are imported
+    // in-process by test-all.mjs, so an unhandled rejection here kills the
+    // whole run and every later section silently never executes.
+    fail(`fetchJson happy path threw: ${e.message}`);
+  }
+}
+
+// 4. The opt-in is the ONLY thing making the above reachable — without it the
+//    SSRF guard must still refuse loopback.
+{
+  try {
+    await fetchJson(`${base}/ok`, { timeoutMs: 2_000 });
+    fail('fetchJson reached a loopback address without allowPrivateHosts — the SSRF guard is not firing');
+  } catch (e) {
+    if (/private, loopback or link-local/.test(e.message)) pass('fetchJson still blocks loopback when allowPrivateHosts is not passed');
+    else fail(`fetchJson loopback rejection had the wrong cause: ${e.message}`);
+  }
 }
 
 for (const s of sockets) s.destroy();
