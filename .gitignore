@@ -113,6 +113,13 @@ package-lock.json
 # Planning (local scratchpad)
 plan/
 
+# graphify knowledge-graph artifacts (machine-local, regenerable, can be tens of
+# MB). Unanchored so it is caught wherever graphify is run — it defaults to the
+# cwd, which is how a graphify-out/ ended up nested under providers/. That
+# location matters: SYSTEM_PATHS covers `providers/`, so anything committed
+# there is treated as system layer and shipped to every user on update.
+graphify-out/
+
 # Web — runtime cache/history the dashboard writes locally; nothing here is tracked.
 .career-ops-web/
 
