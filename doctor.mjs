@@ -7,7 +7,7 @@
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import yaml from 'js-yaml';
 import dotenv from 'dotenv';
 import { discoverPlugins, pluginRoots, pluginStatus } from './plugins/_engine.mjs';
@@ -262,6 +262,77 @@ function checkPrereq({ path, fix }) {
   return { warn: true, label: `${path} not found (user setup required)`, fix };
 }
 
+// `config/profile.yml` ships with placeholder values annotated by a `# CONFIRM:`
+// comment (the header block says so in prose). Existence checks alone report the
+// file as present and healthy while the phone number is still someone else's
+// LinkedIn export, so the placeholders need their own check.
+//
+// Pure function of the text so the human checklist and `--json` both read one
+// implementation, the same way the prereq list is shared above.
+/**
+ * @param {string} text - Contents of a YAML config file.
+ * @returns {{field: string|null, note: string}[]}
+ */
+export function findConfirmFields(text) {
+  const found = [];
+  let pending = null;
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    // A `# CONFIRM:` comment annotates the next key. The header block's
+    // `ITEMS MARKED "CONFIRM:"` prose is not matched — CONFIRM must open the
+    // comment, not appear inside it.
+    const opener = /^\s*#\s*CONFIRM:\s*(.*)$/i.exec(line);
+    if (opener) { pending = opener[1].trim(); continue; }
+    // Wrapped comment lines continue the note rather than ending it.
+    if (/^\s*#/.test(line)) continue;
+
+    const key = /^\s*([A-Za-z_][\w-]*)\s*:/.exec(line);
+    if (key) {
+      const inline = /:\s*["']?CONFIRM:\s*(.*?)["']?\s*$/i.exec(line);
+      if (inline) found.push({ field: key[1], note: inline[1].trim() });
+      else if (pending !== null) found.push({ field: key[1], note: pending });
+      pending = null;
+      continue;
+    }
+    // A blank line, list item or anything else breaks the association. Report a
+    // dangling note anyway — an unfilled placeholder that lost its key is still
+    // unfilled, and silently dropping it is the failure mode this check exists for.
+    if (pending !== null) { found.push({ field: null, note: pending }); pending = null; }
+  }
+  if (pending !== null) found.push({ field: null, note: pending });
+  return found;
+}
+
+function confirmFieldsFor(root) {
+  const path = join(root, 'config', 'profile.yml');
+  if (!existsSync(path)) return [];
+  try {
+    return findConfirmFields(readFileSync(path, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function checkConfirmFields() {
+  // A missing profile.yml is already reported by the prereq check above; saying
+  // it twice buries the one message that matters.
+  if (!prereqPresent(projectRoot, 'config/profile.yml')) return null;
+
+  const fields = confirmFieldsFor(projectRoot);
+  if (fields.length === 0) {
+    return { pass: true, label: 'config/profile.yml has no unfilled CONFIRM: placeholders' };
+  }
+  const names = fields.map((f) => f.field ?? '(unnamed)').join(', ');
+  return {
+    warn: true,
+    label: `config/profile.yml still has ${fields.length} CONFIRM: placeholder${fields.length === 1 ? '' : 's'}: ${names}`,
+    fix: [
+      ...fields.map((f) => `${f.field ?? '(unnamed)'} — ${f.note}`),
+      'Tell the agent the real values and it will update the file.',
+      'Already correct? Delete the `# CONFIRM:` comment so this stops warning.',
+    ],
+  };
+}
+
 function checkFonts() {
   const fontsDir = join(projectRoot, 'fonts');
   if (!existsSync(fontsDir)) {
@@ -405,6 +476,7 @@ async function main() {
     checkPlaywrightMcp(projectRoot, activeCli),
     checkScanExtractor(projectRoot),
     ...USER_LAYER_PREREQS.map(checkPrereq),
+    checkConfirmFields(),
     checkFonts(),
     checkAutoDir('data'),
     checkPipelineFile(),
@@ -512,6 +584,10 @@ function onboardingState(root) {
     missing,
     warnings,
     autoCopied,
+    // Present-but-unfilled placeholders. Deliberately NOT folded into `missing`:
+    // `missing` drives `onboardingNeeded`, and a stale phone number must not
+    // block every mode the way an absent cv.md does.
+    confirmFields: confirmFieldsFor(root),
     plugins,
     playwright_mcp: playwrightMcp,
     active_cli: activeCli,
@@ -519,12 +595,18 @@ function onboardingState(root) {
   };
 }
 
-if (JSON_OUT) {
-  console.log(JSON.stringify(onboardingState(projectRoot)));
-  process.exit(0);
-} else {
-  main().catch((err) => {
-    console.error('doctor.mjs failed:', err.message);
-    process.exit(1);
-  });
+// Entry-point guard, matching every other dual-purpose script in the repo
+// (browser-extract.mjs, discover-ats.mjs, …). Without it, `import`ing this file
+// to unit-test findConfirmFields would run the whole doctor and call
+// process.exit — which is exactly what tests/ forbids.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (JSON_OUT) {
+    console.log(JSON.stringify(onboardingState(projectRoot)));
+    process.exit(0);
+  } else {
+    main().catch((err) => {
+      console.error('doctor.mjs failed:', err.message);
+      process.exit(1);
+    });
+  }
 }
