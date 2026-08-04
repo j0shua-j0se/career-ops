@@ -21,6 +21,7 @@
  * Zero Claude API tokens — pure HTTP + JSON.
  *
  * Usage:
+ *   node scan.mjs --help           # full flag list (unknown flags are a hard error)
  *   node scan.mjs                  # scan all enabled companies
  *   node scan.mjs --dry-run        # preview without writing files
  *   node scan.mjs --company Cohere # scan a single company
@@ -1851,8 +1852,61 @@ function guardStatusFor(code) {
   return 'skipped_invalid_url';
 }
 
+const USAGE = `scan.mjs — zero-token portal scanner
+
+Usage: node scan.mjs [options]
+
+  --dry-run                 preview without writing files
+  --company <name>          scan a single company
+  --verify                  Playwright-check each new URL; drop expired postings
+  --headed-fallback         retry anti-bot-blocked URLs in a headed browser (needs a display)
+  --throttle[=<ms>]         jittered gap between --verify checks (default base 5000)
+  --rediscover-404          on a 404/410, search for the moved role before expiring it
+  --include-blacklisted     let data/blacklist.md matches through (annotated)
+  --posted-after <date>     only postings published on/after YYYY-MM-DD
+  --posted-before <date>    only postings published on/before YYYY-MM-DD
+  --quiet                   suppress the TTY manifesto note
+  -h, --help                show this message
+
+Running with no options scans every enabled company in portals.yml and WRITES
+results. Use --dry-run first if you are testing configuration changes.`;
+
+// Flags that consume the following argument as their value.
+const VALUE_FLAGS = new Set(['--company', '--posted-after', '--posted-before']);
+const BOOLEAN_FLAGS = new Set([
+  '--dry-run', '--verify', '--headed-fallback', '--throttle',
+  '--rediscover-404', '--include-blacklisted', '--quiet', '--help', '-h',
+]);
+
 async function main() {
   const args = process.argv.slice(2);
+
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+
+  // Unknown arguments are a hard error. Previously every flag was read with
+  // `args.includes(...)`, so anything unrecognized — `--help` included — fell
+  // through to a full live scan that wrote hundreds of rows nobody asked for.
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const bare = arg.split('=')[0];
+    if (VALUE_FLAGS.has(bare)) {
+      if (args[i + 1] === undefined || args[i + 1].startsWith('-')) {
+        console.error(`Error: ${bare} expects a value\n`);
+        console.error(USAGE);
+        process.exit(1);
+      }
+      i++; // consume the value
+      continue;
+    }
+    if (BOOLEAN_FLAGS.has(bare)) continue;
+    console.error(`Error: unknown argument "${arg}"\n`);
+    console.error(USAGE);
+    process.exit(1);
+  }
+
   const dryRun = args.includes('--dry-run');
   const verify = args.includes('--verify');
   // Opt-in: on an anti-bot challenge (e.g. pracuj.pl Cloudflare wall), retry the
