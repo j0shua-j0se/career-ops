@@ -17,7 +17,7 @@
  *
  * Typical usage (via scan-ats-full.mjs --seeds flag):
  *   node scan-ats-full.mjs --seeds yc
- *   node scan-ats-full.mjs --seeds yc,a16z,index --since 7 --dry-run
+ *   node scan-ats-full.mjs --seeds yc,a16z,index,sequoia --since 7 --dry-run
  *
  * Direct usage:
  *   import { fetchYCCompanies, fetchA16zCompanies } from './seeds/vc-portfolios.mjs';
@@ -73,6 +73,45 @@ const A16Z_PORTFOLIO_URL = 'https://a16z.com/portfolio/';
  */
 const INDEX_PORTFOLIO_URL = 'https://www.indexventures.com/companies/';
 
+/**
+ * Sequoia's public job board, which is a Consider-hosted board.
+ *
+ * Unlike the other three rungs this page is NOT server-rendered: a GET returns a
+ * 20 KB shell with a spinner and two anchors, so an HTML parser would silently
+ * return zero companies. The board's own client calls a public, unauthenticated
+ * JSON endpoint, and that is what this rung uses.
+ *
+ * It earns its place for a reason none of the others can match: each company
+ * carries a `jobSources` array naming the ATS vendor outright (Greenhouse,
+ * Ashby, Lever, ...). YC's dataset has a partial hint; a16z and Index have
+ * none, so `toPortalEntry` falls back to guessing Greenhouse for every company
+ * and quietly misses everyone on Ashby or Lever. Here the vendor is known, so
+ * the guess is right first time.
+ *
+ * `board.id` is the board slug from the page's own bootstrap JSON. `isParent`
+ * is required by the API; omitting the whole board object 422s.
+ */
+const SEQUOIA_BOARD_URL = 'https://jobs.sequoiacap.com/api-boards/search-companies';
+const SEQUOIA_BOARD_ID = 'sequoia-capital';
+/** Server caps the page size; 25 is what the board's own client requests. */
+const SEQUOIA_PAGE_SIZE = 25;
+/** Safety rail on the cursor walk (~254 companies today, so 40 pages is ample). */
+const SEQUOIA_MAX_PAGES = 40;
+
+/**
+ * Consider `jobSources[].value` -> the ATS vendor names toPortalEntry understands.
+ *
+ * Deliberately partial. Vendors career-ops has no provider for (comeet, gem,
+ * rippling, workday, ...) are left unmapped so the entry falls through to the
+ * slug guess rather than being handed a board URL nothing can read.
+ */
+const SEQUOIA_ATS_VENDORS = {
+  greenhouse: 'greenhouse',
+  lever: 'lever',
+  ashbyhq: 'ashby',
+  ashby: 'ashby',
+};
+
 // ── HTTP helper (local — avoids importing providers/_http.mjs to keep seeds/ self-contained) ──
 
 /**
@@ -82,12 +121,18 @@ const INDEX_PORTFOLIO_URL = 'https://www.indexventures.com/companies/';
  * @param {{ timeoutMs?: number }} [opts]
  * @returns {Promise<Response>}
  */
-async function fetchWithTimeout(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+async function fetchWithTimeout(url, { timeoutMs = DEFAULT_TIMEOUT_MS, method, headers, body } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
-      headers: { 'user-agent': DEFAULT_USER_AGENT },
+      // The three GET rungs pass none of these and keep their exact previous
+      // request shape; the Sequoia rung needs a POST with a JSON body. Caller
+      // headers are merged over the default UA rather than replacing it, so a
+      // POST still identifies itself the same way a GET does.
+      ...(method ? { method } : {}),
+      ...(body === undefined ? {} : { body }),
+      headers: { 'user-agent': DEFAULT_USER_AGENT, ...(headers || {}) },
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -351,6 +396,89 @@ export function parseIndexPayload(html) {
   return [...seen.values()];
 }
 
+/**
+ * Parse a Consider `search-companies` response into SeedCompany entries.
+ *
+ * This is the testable unit — pure, no network, no side effects. Accepts either
+ * the parsed object or the raw JSON string, so a fixture can be stored as text.
+ *
+ * Three choices worth stating, because they differ from the sibling parsers:
+ *
+ *  - **The ATS vendor is recorded when it is known.** `jobSources[]` names the
+ *    vendor outright. Only vendors career-ops can actually read are mapped
+ *    (see SEQUOIA_ATS_VENDORS); everything else is left unset so the entry
+ *    falls through to the slug guess instead of getting an unreadable board URL.
+ *  - **The slug is derived from the NAME, not from Consider's `slug`.** Same
+ *    reasoning as the Index rung: Consider's slug is its own routing
+ *    identifier. It usually agrees with the name-derived one, and where it does
+ *    not, the name is the better guess at an ATS board token.
+ *  - **The real company website IS recorded.** Index deliberately stores an
+ *    empty url because the only href on offer points back at the VC. Consider
+ *    carries `website.url` / `domain`, so toPortalEntry's last-resort fallback
+ *    lands on the company's own site rather than a VC marketing page.
+ *
+ * @param {unknown} payload  Parsed Consider response, or the raw JSON string.
+ * @returns {SeedCompany[]}
+ */
+export function parseSequoiaPayload(payload) {
+  let data = payload;
+  if (typeof data === 'string') {
+    if (!data.trim()) return [];
+    try {
+      data = JSON.parse(data);
+    } catch {
+      return [];
+    }
+  }
+  const companies = data && typeof data === 'object' ? data.companies : null;
+  if (!Array.isArray(companies)) return [];
+
+  /** @type {Map<string, SeedCompany>} */
+  const seen = new Map();
+
+  for (const raw of companies) {
+    if (!raw || typeof raw !== 'object') continue;
+
+    const name = stripLegalSuffix(
+      decodeNameEntities(String(raw.name ?? '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim(),
+    );
+    if (!name || name.length > 60) continue;
+
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (!slug || !SLUG_RE.test(slug) || seen.has(slug)) continue;
+
+    // `website` is an object ({url, label}); `domain` is a bare hostname. Prefer
+    // the explicit url, fall back to the domain, and never emit a bare hostname
+    // as if it were a URL.
+    let url = '';
+    const site = raw.website;
+    if (site && typeof site === 'object' && typeof site.url === 'string') url = site.url.trim();
+    else if (typeof site === 'string') url = site.trim();
+    else if (typeof raw.domain === 'string' && raw.domain.trim()) url = `https://${raw.domain.trim()}`;
+    if (url && !/^https?:\/\//i.test(url)) url = '';
+
+    /** @type {SeedCompany} */
+    const entry = { name, slug, url, source: 'sequoia' };
+
+    // Vendor hint. Consider lists the busiest source first; take the first one
+    // career-ops actually has a provider for rather than blindly the first.
+    const sources = Array.isArray(raw.jobSources) ? raw.jobSources : [];
+    for (const js of sources) {
+      const value = typeof js === 'string' ? js : js && typeof js === 'object' ? js.value ?? js.id : null;
+      const vendor = value ? SEQUOIA_ATS_VENDORS[String(value).toLowerCase()] : null;
+      if (vendor) {
+        entry.ats = vendor;
+        entry.ats_id = slug;
+        break;
+      }
+    }
+
+    seen.set(slug, entry);
+  }
+
+  return [...seen.values()];
+}
+
 // ── Generic pure parser (entry point for test-all.mjs) ───────────────
 
 /**
@@ -370,6 +498,11 @@ export function parseSeedEntries(payload, source) {
   }
   if (source === 'index') {
     return parseIndexPayload(typeof payload === 'string' ? payload : '');
+  }
+  // Sequoia is JSON, not HTML: pass the payload through untouched so an already
+  // parsed object and a raw JSON string both work.
+  if (source === 'sequoia') {
+    return parseSequoiaPayload(payload);
   }
   // Default: YC (also used for unknown sources — parse defensively).
   return parseYCPayload(payload);
@@ -515,6 +648,65 @@ export async function fetchIndexCompanies({ timeoutMs = DEFAULT_TIMEOUT_MS } = {
   return parseIndexPayload(html);
 }
 
+/**
+ * Fetch Sequoia's Consider-hosted board and return parsed SeedCompany entries.
+ *
+ * The board renders client-side, so this posts to the same public JSON endpoint
+ * its own client uses. Paging is a base64 cursor echoed back as `meta.sequence`;
+ * the walk stops when a page returns no companies, repeats a cursor, or hits
+ * `maxPages`. Cursor loops are the failure mode that turns a seed fetch into an
+ * infinite one, so a repeated cursor is treated as end-of-list, not as an error.
+ *
+ * Partial results are kept: a mid-walk failure returns what was already
+ * collected rather than throwing away several successful pages, which matches
+ * how fetchYCCompanies treats its own pagination.
+ *
+ * @param {{ timeoutMs?: number, maxPages?: number }} [opts]
+ * @returns {Promise<SeedCompany[]>}
+ */
+export async function fetchSequoiaCompanies({ timeoutMs = DEFAULT_TIMEOUT_MS, maxPages = SEQUOIA_MAX_PAGES } = {}) {
+  /** @type {Map<string, SeedCompany>} */
+  const collected = new Map();
+  const seenCursors = new Set();
+  let sequence = null;
+
+  for (let page = 0; page < maxPages; page++) {
+    const meta = sequence ? { size: SEQUOIA_PAGE_SIZE, sequence } : { size: SEQUOIA_PAGE_SIZE };
+    let body;
+    try {
+      const res = await fetchWithTimeout(SEQUOIA_BOARD_URL, {
+        timeoutMs,
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          query: { promoteFeatured: true },
+          meta,
+          board: { id: SEQUOIA_BOARD_ID, isParent: true },
+        }),
+      });
+      body = await res.json();
+    } catch (err) {
+      // First page failing means the rung produced nothing — that is a real
+      // error. A later page failing still leaves usable companies behind.
+      if (page === 0) throw new Error(`vc-portfolios: Sequoia board fetch failed — ${err.message}`);
+      break;
+    }
+
+    const batch = parseSequoiaPayload(body);
+    for (const company of batch) {
+      if (!collected.has(company.slug)) collected.set(company.slug, company);
+    }
+    if (batch.length === 0) break;
+
+    const next = body && body.meta ? body.meta.sequence : null;
+    if (!next || typeof next !== 'string' || seenCursors.has(next)) break;
+    seenCursors.add(next);
+    sequence = next;
+  }
+
+  return [...collected.values()];
+}
+
 // ── SEED_SOURCES registry ────────────────────────────────────────────
 
 /**
@@ -539,5 +731,9 @@ export const SEED_SOURCES = {
   index: {
     fetch: fetchIndexCompanies,
     label: 'Index Ventures Portfolio',
+  },
+  sequoia: {
+    fetch: fetchSequoiaCompanies,
+    label: 'Sequoia Capital Portfolio',
   },
 };
