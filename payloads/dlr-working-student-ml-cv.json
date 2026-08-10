@@ -9,7 +9,11 @@
       "url": "https://linkedin.com/in/j0shuaj0se",
       "display": "linkedin.com/in/j0shuaj0se"
     },
-    "location": "Erlangen, Germany"
+    "location": "Erlangen, Germany",
+    "portfolio": {
+      "url": "https://joshua-jose-portfolio-2a9njtk8j.vercel.app",
+      "display": "joshua-jose-portfolio.vercel.app"
+    }
   },
   "summary": "MSc Data Science student at FAU Erlangen-Nürnberg whose strongest work is the evaluation and validation of machine learning and deep learning methods against datasets and benchmarks. Built and evaluated 10+ production-ready models during an AI and ML internship, including supervised forecasting on temporally ordered sales data with XGBoost at 96.1% R² and an 18% cut in forecast error, and implemented full training, validation and inference pipelines in PyTorch. Co-author of a peer-reviewed deep-learning paper in the ICISD 2025 proceedings, Atlantis Press (Springer Nature), benchmarked at 95.79% mAP@0.5. Solid statistics, Python and Git; English at full professional proficiency.",
   "competencies": [

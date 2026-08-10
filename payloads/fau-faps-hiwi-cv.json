@@ -9,7 +9,11 @@
       "url": "https://linkedin.com/in/j0shuaj0se",
       "display": "linkedin.com/in/j0shuaj0se"
     },
-    "location": "Erlangen, Germany"
+    "location": "Erlangen, Germany",
+    "portfolio": {
+      "url": "https://joshua-jose-portfolio-2a9njtk8j.vercel.app",
+      "display": "joshua-jose-portfolio.vercel.app"
+    }
   },
   "summary": "MSc Data Science student at FAU Erlangen-Nürnberg (Apr 2026 - Aug 2028) with applied computer vision and deep learning experience: object detection, face recognition and Convolutional Neural Network training in PyTorch. Co-author of a peer-reviewed paper on deep-learning video surveillance published in the ICISD 2025 proceedings by Atlantis Press (Springer Nature), reporting 95.79% mAP@0.5 for weapon detection. Four applied AI and machine learning roles before the degree, the most recent recognised as Best Performer with 10+ production-ready models delivered. Comfortable owning data preparation, model training and model evaluation end to end. Based in Erlangen.",
   "competencies": [

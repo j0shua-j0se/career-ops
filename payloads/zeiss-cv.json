@@ -9,7 +9,11 @@
       "url": "https://linkedin.com/in/j0shuaj0se",
       "display": "linkedin.com/in/j0shuaj0se"
     },
-    "location": "Erlangen, Germany"
+    "location": "Erlangen, Germany",
+    "portfolio": {
+      "url": "https://joshua-jose-portfolio-2a9njtk8j.vercel.app",
+      "display": "joshua-jose-portfolio.vercel.app"
+    }
   },
   "summary": "MSc Data Science student at FAU Erlangen-Nürnberg with deep learning and computer vision work that has been through peer review. Co-author of PrisonSecure (ICISD 2025, Atlantis Press / Springer Nature), a deep-learning surveillance system on live CCTV feeds: weapon detection with YOLOv11 at 95.79% mAP@0.5, precision and recall both at 0.93, and face recognition at 93.75% accuracy. Trained a convolutional neural network in PyTorch end to end for American Sign Language image recognition, and delivered 10+ production-ready models in Python during an AI & ML internship where I was recognised as Best Performer. Python and Git across every role, plus cloud operations experience from VMware infrastructure.",
   "competencies": [
