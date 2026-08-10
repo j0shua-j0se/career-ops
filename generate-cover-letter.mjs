@@ -78,7 +78,11 @@ function buildContactLine(candidate) {
 function buildCredentialsBlock(candidate) {
   const credentials = candidate.credentials || [];
   if (!credentials.length) return "";
-  return `<div class="credentials">${credentials.map(escapeHtml).join(" &nbsp;|&nbsp; ")}</div>`;
+  // Each credential is wrapped so it cannot break mid-token. A portfolio URL
+  // that wraps at one of its own hyphens renders as a DIFFERENT, dead address
+  // in the PDF — "joshua-jose-portfolio..." came out as "joshuajose-portfolio..."
+  // on the two longest letters. A link a recruiter cannot copy is worse than none.
+  return `<div class="credentials">${credentials.map((c) => `<span class="cred">${escapeHtml(c)}</span>`).join(" &nbsp;|&nbsp; ")}</div>`;
 }
 
 /** Build the escaped company, city, and date line for the letter. */

@@ -138,3 +138,7 @@ graphify-out/
 *.bak-*
 .tmp-script-test-*/
 article-digest.md
+
+# Per-application CV/cover payloads: user-layer artifacts carrying personal
+# data (name, email, phone, tailored claims). Same class as output/.
+payloads/
