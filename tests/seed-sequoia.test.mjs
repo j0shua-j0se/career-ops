@@ -261,13 +261,59 @@ try {
       }
       if (urlOk) pass('extractAtsFromJobUrl recovers the board token from Greenhouse (US+EU), Ashby and Lever URLs');
 
+      // Workday and Rippling are a different KIND of hit: their board root cannot
+      // be rebuilt from a slug, so the extractor returns it verbatim and
+      // toPortalEntry uses it as-is. Without careersUrl these fall through to a
+      // Greenhouse guess that is wrong by construction.
+      const wd = extractAtsFromJobUrl('https://cohesity.wd5.myworkdayjobs.com/Cohesity_Careers/job/Denver/Sr_R04195');
+      if (eq(wd, { ats: 'workday', ats_id: 'cohesity', careersUrl: 'https://cohesity.wd5.myworkdayjobs.com/Cohesity_Careers' })) {
+        pass('a Workday posting yields tenant + an explicit board root');
+      } else {
+        fail(`Workday extraction gave ${JSON.stringify(wd)}`);
+      }
+
+      // The locale segment is PART of the board root — dropping it produces a URL
+      // providers/workday.mjs' own tenant pattern will not match.
+      const wdLocale = extractAtsFromJobUrl('https://23andme.wd5.myworkdayjobs.com/en-US/23andme/job/x/y');
+      if (wdLocale?.careersUrl === 'https://23andme.wd5.myworkdayjobs.com/en-US/23andme') {
+        pass('a Workday locale segment (en-US) is kept in the board root');
+      } else {
+        fail(`Workday locale handling gave ${JSON.stringify(wdLocale)}`);
+      }
+
+      const rip = extractAtsFromJobUrl('https://ats.rippling.com/acme-inc/jobs/abc-123');
+      if (eq(rip, { ats: 'rippling', ats_id: 'acme-inc', careersUrl: 'https://ats.rippling.com/acme-inc' })) {
+        pass('a Rippling posting yields its board root');
+      } else {
+        fail(`Rippling extraction gave ${JSON.stringify(rip)}`);
+      }
+
+      // toPortalEntry must PREFER the explicit URL over anything it could build.
+      const wdEntry = toPortalEntry({
+        name: 'Cohesity', slug: 'cohesity', url: 'https://cohesity.com', source: 'sequoia',
+        ats: 'workday', ats_id: 'cohesity', careersUrl: 'https://cohesity.wd5.myworkdayjobs.com/Cohesity_Careers',
+      });
+      if (wdEntry.careers_url === 'https://cohesity.wd5.myworkdayjobs.com/Cohesity_Careers') {
+        pass('toPortalEntry prefers an explicit careersUrl over the slug-derived guess');
+      } else {
+        fail(`toPortalEntry gave ${wdEntry.careers_url}`);
+      }
+
+      // A non-https careersUrl must not be trusted straight through.
+      const badUrl = toPortalEntry({ name: 'X', slug: 'x', url: '', source: 'sequoia', careersUrl: 'javascript:alert(1)' });
+      if (badUrl.careers_url !== 'javascript:alert(1)') {
+        pass('a non-https careersUrl is rejected rather than passed through');
+      } else {
+        fail('a javascript: careersUrl was passed straight through');
+      }
+
       // A custom-domain Greenhouse link proves the vendor via gh_jid but does
       // NOT contain the board token — returning the path segment there would
       // invent a token like "careers".
       const rejected = [
         ['custom-domain Greenhouse (gh_jid but no board token)', 'https://hex.tech/careers/6139389004/?gh_jid=6139389004'],
-        ['Workday', 'https://cohesity.wd5.myworkdayjobs.com/Cohesity_Careers/job/x/y'],
-        ['Rippling', 'https://ats.rippling.com/acme/jobs/123'],
+        ['Comeet (no provider path from a posting URL)', 'https://www.comeet.com/jobs-x/acme/12.345'],
+        ['BambooHR', 'https://alkira.bamboohr.com/careers/42'],
         ['not a URL', 'not a url at all'],
         ['empty string', ''],
         ['null', null],

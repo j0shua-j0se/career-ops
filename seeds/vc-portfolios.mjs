@@ -538,6 +538,30 @@ export function extractAtsFromJobUrl(url) {
   if (host === 'jobs.lever.co') {
     return { ats: 'lever', ats_id: token };
   }
+
+  // Workday and Rippling differ in kind from the three above: their board root
+  // cannot be rebuilt from a slug, so there is nothing for toPortalEntry to
+  // construct. Both carry the root inside the posting URL, so it is returned
+  // verbatim as `careersUrl` and toPortalEntry uses it as-is.
+  //
+  // Workday: https://<tenant>.<instance>.myworkdayjobs.com[/<locale>]/<site>/job/...
+  // The optional locale segment is part of the board root — dropping it gives
+  // providers/workday.mjs a URL its own tenant pattern will not match.
+  const workday = url.match(/^https:\/\/([\w-]+)\.(wd[\w-]*)\.myworkdayjobs\.com\/((?:[a-z]{2}-[A-Z]{2}\/)?[^/?#]+)/);
+  if (workday) {
+    const [, tenant, instance, sitePath] = workday;
+    return {
+      ats: 'workday',
+      ats_id: tenant,
+      careersUrl: `https://${tenant}.${instance}.myworkdayjobs.com/${sitePath}`,
+    };
+  }
+
+  // Rippling: https://ats.rippling.com/<slug>/jobs/<id>  ->  board is /<slug>.
+  if (host === 'ats.rippling.com') {
+    return { ats: 'rippling', ats_id: token, careersUrl: `https://ats.rippling.com/${token}` };
+  }
+
   return null;
 }
 
@@ -589,6 +613,13 @@ export function parseSeedEntries(payload, source) {
  */
 export function toPortalEntry(company) {
   let careers_url = '';
+
+  // An explicit board URL recovered from a live posting beats anything derived.
+  // Workday and Rippling boards cannot be rebuilt from a slug at all, so without
+  // this they fall through to a Greenhouse guess that is wrong by construction.
+  if (typeof company.careersUrl === 'string' && /^https:\/\//i.test(company.careersUrl)) {
+    return { name: company.name, careers_url: company.careersUrl, source: company.source };
+  }
 
   // Explicit ATS hint from the YC dataset.
   const atsId = company.ats_id && SLUG_RE.test(company.ats_id) ? company.ats_id : null;
@@ -876,6 +907,9 @@ export async function resolveSequoiaAtsTokens(companies, { timeoutMs = DEFAULT_T
       const changed = company.ats !== hit.ats || company.ats_id !== hit.ats_id;
       company.ats = hit.ats;
       company.ats_id = hit.ats_id;
+      // Vendors whose board root is not reconstructible from a slug hand back an
+      // explicit URL; toPortalEntry prefers it over anything it could build.
+      if (hit.careersUrl) company.careersUrl = hit.careersUrl;
       located.add(key);
       resolved++;
       if (changed) corrected++;
