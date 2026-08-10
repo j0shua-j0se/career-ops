@@ -1017,110 +1017,108 @@ const TRACKER_REPORT_MISMATCH = `# Applications Tracker
   });
 }
 
-// ── batch selectors: --row/--report accept a comma list ─────────
+// ── shared candidate resolution (#2348) ──────────────────────────
 //
-// The fan-out re-execs this script once per number, so the contract to pin
-// down is that a batch is exactly N ordinary guarded writes: every row lands,
-// a failure in the middle does not swallow the rest, the exit code still
-// reports it, and --dry-run still writes nothing.
+// The three selector paths delegate their match → narrow → refuse-to-guess
+// flow to resolveCandidates(). These pin the properties that must survive any
+// future edit to that helper: every path fails CLOSED on 2+ survivors (the
+// #1704 property, previously enforced in three separate copies), and --role
+// narrowing works from every path rather than only the two that had tests.
 {
-  const TRACKER_BATCH = `# Applications Tracker
+  // Two rows link the SAME report — reachable when a re-evaluation is filed
+  // against an existing report, or a report link is copied between rows.
+  const TRACKER_DUP_REPORT = `# Applications Tracker
 
 | # | Date | Company | Role | Score | Status | PDF | Report | Notes |
 |---|------|---------|------|-------|--------|-----|--------|-------|
-| 1 | 2026-06-01 | Acme | Backend Engineer | 4.2/5 | Evaluated | ✅ | [1](../reports/001-acme-2026-06-01.md) | — |
-| 2 | 2026-06-02 | Globex | Platform Engineer | 4.0/5 | Evaluated | ✅ | [2](../reports/002-globex-2026-06-02.md) | — |
-| 3 | 2026-06-03 | Initech | Data Engineer | 3.9/5 | Evaluated | ❌ | [3](../reports/003-initech-2026-06-03.md) | — |
+| 1 | 2026-06-01 | Acme | Backend Engineer | 4.2/5 | Evaluated | ✅ | [9](../reports/009-acme-2026-06-01.md) | — |
+| 2 | 2026-06-02 | Globex | Data Engineer | 4.0/5 | Evaluated | ✅ | [9](../reports/009-globex-2026-06-02.md) | — |
 `;
-  const boxed = fn => {
-    const sandbox = makeSandbox(TRACKER_BATCH);
+
+  const withDupReport = fn => {
+    const sandbox = makeSandbox(TRACKER_DUP_REPORT);
     try { fn(sandbox); } finally { rmSync(sandbox.dir, { recursive: true, force: true }); }
   };
 
-  boxed(sandbox => {
-    const r = runSetStatus(['--report', '1,3', 'Applied', '--note', 'batch send'], sandbox);
-    const t = readTracker(sandbox);
-    const applied = /\| 1 \|[^\n]*\| Applied \|/.test(t) && /\| 3 \|[^\n]*\| Applied \|/.test(t);
-    const untouched = /\| 2 \|[^\n]*\| Evaluated \|/.test(t);
-    if (r.code === 0 && applied && untouched && /batch send/.test(t)) {
-      pass('batch: --report 1,3 updates both rows and leaves #2 alone');
-    } else {
-      fail(`batch: --report 1,3 → code=${r.code} applied=${applied} untouched=${untouched}\n${r.stdout}${r.stderr}`);
-    }
-  });
-
-  boxed(sandbox => {
-    const r = runSetStatus(['--row', '2,3', 'Rejected', '--json'], sandbox);
+  // Previously untested: the --report path had no 2+ coverage at all, so a
+  // regression to first-match-wins there would have gone unnoticed.
+  withDupReport(sandbox => {
+    const before = readTracker(sandbox);
+    const r = runSetStatus(['--report', '9', 'Applied', '--json'], sandbox);
     let parsed = null;
     try { parsed = JSON.parse(r.stdout); } catch {}
-    const companies = (parsed?.results ?? []).map(x => x.company);
-    if (r.code === 0 && parsed?.batch === true && companies.join(',') === 'Globex,Initech') {
-      pass('batch: --json emits one result per selector, in order');
+    if (r.code === 3 && parsed?.code === 'ambiguous' && parsed.candidates?.length === 2
+        && readTracker(sandbox) === before) {
+      pass('#2348: --report fails closed on 2+ linking rows, with candidates');
     } else {
-      fail(`batch: --json → code=${r.code} json=${r.stdout}${r.stderr}`);
+      fail(`#2348: --report dup → code=${r.code} json=${JSON.stringify(parsed)}`);
     }
   });
 
-  // A bad number in the middle must not silently abort the rest — the failure
-  // mode of the hand-written shell loop this replaces.
-  boxed(sandbox => {
-    const r = runSetStatus(['--row', '1,999,3', 'Applied', '--json'], sandbox);
+  // --role narrowing must serve the --report path too, not just the numeric
+  // and company paths that already had coverage.
+  withDupReport(sandbox => {
+    const r = runSetStatus(['--report', '9', 'Applied', '--role', 'Data Engineer', '--json'], sandbox);
     let parsed = null;
     try { parsed = JSON.parse(r.stdout); } catch {}
-    const t = readTracker(sandbox);
-    const bothEnds = /\| 1 \|[^\n]*\| Applied \|/.test(t) && /\| 3 \|[^\n]*\| Applied \|/.test(t);
-    if (r.code === 2 && bothEnds && parsed?.results?.[1]?.exitCode === 2) {
-      pass('batch: a not-found row fails loudly without stopping the others');
+    if (r.code === 0 && parsed?.company === 'Globex') {
+      pass('#2348: --role narrows a --report match to the intended row');
     } else {
-      fail(`batch: partial failure → code=${r.code} bothEnds=${bothEnds}\n${r.stdout}${r.stderr}`);
+      fail(`#2348: --report + --role → code=${r.code} company=${parsed?.company}`);
     }
   });
 
-  boxed(sandbox => {
+  // A --role that matches NEITHER candidate must not silently pick one; the
+  // helper falls through with the original list so both stay visible.
+  withDupReport(sandbox => {
     const before = readTracker(sandbox);
-    const r = runSetStatus(['--report', '1,2', 'Applied', '--dry-run'], sandbox);
-    if (r.code === 0 && readTracker(sandbox) === before) {
-      pass('batch: --dry-run reaches every child and writes nothing');
-    } else {
-      fail(`batch: --dry-run → code=${r.code} changed=${readTracker(sandbox) !== before}`);
-    }
-  });
-
-  // --role breaks a tie for ONE selector; applied across a list it would be
-  // asserting the same title for every row, which is never what was meant.
-  boxed(sandbox => {
-    const before = readTracker(sandbox);
-    const r = runSetStatus(['--report', '1,2', 'Applied', '--role', 'Backend Engineer'], sandbox);
-    if (r.code === 1 && readTracker(sandbox) === before) {
-      pass('batch: --role with a comma list is rejected before any write');
-    } else {
-      fail(`batch: --role + list → code=${r.code} changed=${readTracker(sandbox) !== before}`);
-    }
-  });
-
-  boxed(sandbox => {
-    const before = readTracker(sandbox);
-    const r = runSetStatus(['--report', '1,,2', 'Applied'], sandbox);
-    const r2 = runSetStatus(['--report', '1,x', 'Applied'], sandbox);
-    if (r.code === 1 && r2.code === 1 && readTracker(sandbox) === before) {
-      pass('batch: a malformed comma list is a usage error, not a partial run');
-    } else {
-      fail(`batch: malformed list → codes=${r.code},${r2.code} changed=${readTracker(sandbox) !== before}`);
-    }
-  });
-
-  // Deduped, so a pasted list with a repeat does not append the note twice.
-  boxed(sandbox => {
-    const r = runSetStatus(['--report', '2,2', 'Applied', '--note', 'once', '--json'], sandbox);
+    const r = runSetStatus(['--report', '9', 'Applied', '--role', 'Site Reliability Engineer', '--json'], sandbox);
     let parsed = null;
     try { parsed = JSON.parse(r.stdout); } catch {}
-    const noteCount = (readTracker(sandbox).match(/once/g) ?? []).length;
-    if (r.code === 0 && parsed?.results?.length === 1 && noteCount === 1) {
-      pass('batch: a repeated number runs once');
+    if (r.code === 3 && parsed?.candidates?.length === 2 && readTracker(sandbox) === before) {
+      pass('#2348: a --role matching neither candidate still fails closed with both listed');
     } else {
-      fail(`batch: dedup → code=${r.code} results=${parsed?.results?.length} notes=${noteCount}`);
+      fail(`#2348: --report + unmatched --role → code=${r.code} json=${JSON.stringify(parsed)}`);
     }
   });
+
+  // Parity: the fail-closed contract is now enforced in ONE place, so assert
+  // it holds identically from every entry point. This is the test that would
+  // catch a future edit to resolveCandidates() that regressed one path.
+  {
+    const TRACKER_ALL_AMBIGUOUS = `# Applications Tracker
+
+| # | Date | Company | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|------|-------|--------|-----|--------|-------|
+| 7 | 2026-06-01 | Initech | Backend Engineer | 4.2/5 | Evaluated | ✅ | [3](../reports/003-initech-2026-06-01.md) | — |
+| 7 | 2026-06-02 | Initech | Data Engineer | 4.0/5 | Evaluated | ✅ | [3](../reports/003-initech-2026-06-02.md) | — |
+`;
+    const paths = [
+      ['bare numeric', ['7', 'Applied', '--json']],
+      ['--row', ['--row', '7', 'Applied', '--json']],
+      ['--report', ['--report', '3', 'Applied', '--json']],
+      ['company', ['Initech', 'Applied', '--json']],
+    ];
+    const failures = [];
+    for (const [label, args] of paths) {
+      const sandbox = makeSandbox(TRACKER_ALL_AMBIGUOUS);
+      try {
+        const before = readTracker(sandbox);
+        const r = runSetStatus(args, sandbox);
+        let parsed = null;
+        try { parsed = JSON.parse(r.stdout); } catch {}
+        const ok = r.code === 3 && parsed?.candidates?.length === 2 && readTracker(sandbox) === before;
+        if (!ok) failures.push(`${label} (code=${r.code}, candidates=${parsed?.candidates?.length})`);
+      } finally {
+        rmSync(sandbox.dir, { recursive: true, force: true });
+      }
+    }
+    if (failures.length === 0) {
+      pass('#2348: all four selector paths fail closed on 2+ candidates, none written');
+    } else {
+      fail(`#2348: paths that did not fail closed: ${failures.join('; ')}`);
+    }
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

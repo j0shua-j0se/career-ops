@@ -58,6 +58,12 @@ export const REEXEC_BUFFER_TIMEOUT_MS = parsePositiveInt(process.env.CAREER_OPS_
 
 // System layer paths — ONLY these files get updated
 const SYSTEM_PATHS = [
+  // .gitattributes governs how every other path below is written to disk, and
+  // `apply` checks paths out one at a time in this order: if it landed later,
+  // everything before it would be written under the old core.autocrlf setting
+  // on an existing install, silently (once text=auto is live, git status stays
+  // clean and only a second update would repair it).
+  '.gitattributes',
   'modes/README.md',
   'modes/_shared.md',
   'modes/_writing.md',
@@ -66,6 +72,7 @@ const SYSTEM_PATHS = [
   'modes/_brief.template.md',
   'modes/oferta.md',
   'modes/pdf.md',
+  'modes/pdf/',
   'modes/cover.md',
   'modes/email.md',
   'modes/add.md',
@@ -139,6 +146,7 @@ const SYSTEM_PATHS = [
   'generate-latex.mjs',
   'extract-latex-content.mjs',
   'patch-latex-content.mjs',
+  'lib/cli-flags.mjs',
   'lib/latex-escape.mjs',
   'lib/latex-content.mjs',
   'lib/context-budget.mjs',
@@ -174,6 +182,23 @@ const SYSTEM_PATHS = [
   'portal-health-lock.mjs',
   'classify-tier.mjs',
   'scan-ats-full.mjs',
+
+  // ── Local-only additions, not (yet) upstream ──────────────────────────
+  // These are registered here so `update-system apply` keeps shipping them.
+  // NOTE: this whole file is itself a SYSTEM_PATH, so every update overwrites
+  // it and drops this block. Re-add after each update until these land
+  // upstream — `node validate-system-paths-coverage.mjs` is the check that
+  // catches it.
+  'triage-prefilter.mjs',
+  'gmail-sweep.mjs',
+  'loop-core.mjs',
+  'scan-loop.mjs',
+  'LOOP.md',
+  'build-application.mjs',
+  'run-core.mjs',
+  'run-all.mjs',
+  'modes/run.md',
+  // ──────────────────────────────────────────────────────────────────────
   'scan-interamt.mjs',
   'company-funded.mjs',
   'match-star.mjs',
@@ -184,6 +209,9 @@ const SYSTEM_PATHS = [
   'seeds/',
   'tests/',
   'doctor.mjs',
+  // doctor.mjs imports this one: an install that receives the new doctor
+  // without it would crash on startup.
+  'jsonc-parse.mjs',
   'check-liveness.mjs',
   'liveness-core.mjs',
   'liveness-api.mjs',
@@ -238,6 +266,7 @@ const SYSTEM_PATHS = [
   'fix-slugs.mjs',
   'updater-migration-tests.mjs',
   'validate-system-paths-coverage.mjs',
+  'validate-untrusted-content-coverage.mjs',
   'reply-matcher.mjs',
   'reply-matcher.test.mjs',
   'reply-watch.mjs',
@@ -321,12 +350,14 @@ const SYSTEM_PATHS = [
   'build-application.mjs',
   'cv-sections-core.mjs',
   'cv-templates.mjs',
+  'playwright.cv.config.mjs',
   'test/cv-templates.test.mjs',
   'test/cover-resolver.test.mjs',
   'test/pipeline-lock.test.mjs',
   'test/profile-photo.test.mjs',
   'templates/cv-template.zh-minimal.html',
   'test/zh-minimal-template.test.mjs',
+  'test/cv-visual/',
   'scaffolder/',
   'Dockerfile',
   'docker-compose.yml',
@@ -343,6 +374,7 @@ const SYSTEM_PATHS = [
   'opencode.example.json',
   'seed-fixture.mjs',
   'test-fixtures/',
+  'upgrade-tests.mjs',
 ];
 
 const BOOTSTRAP_PATHS = [

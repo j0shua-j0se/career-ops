@@ -129,3 +129,12 @@ graphify-out/
 # (see DATA_CONTRACT.md). Re-include them past the unanchored user-layer
 # patterns above (cv.md, portals.yml).
 !test-fixtures/**
+
+# ── PII safety: user-layer backups and interrupted test dirs ──────────────
+# v1.25.0 added guards for these; .gitignore is user-layer so it is never
+# auto-updated and the patterns have to be added by hand.
+*.bak
+*.bak[0-9]*
+*.bak-*
+.tmp-script-test-*/
+article-digest.md

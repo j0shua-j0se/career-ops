@@ -2,7 +2,7 @@
 
 import { pass, fail, NODE, ROOT } from './helpers.mjs';
 import { join } from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 
@@ -33,19 +33,15 @@ function runSync() {
   try {
     const tracker = join(work, 'applications.md');
     const pdfIndex = join(work, 'pdf-index.tsv');
-    // Empty reports dir: the header audit must not read the real reports/
-    // here, or this test's output depends on the user's own pipeline state.
-    const reports = join(work, 'reports');
     writeFileSync(tracker, TRACKER_HEADER);
     writeFileSync(pdfIndex, PDF_MANIFEST);
-    mkdirSync(reports);
-
+    
     execFileSync(NODE, [join(ROOT, 'sync-pdf-flags.mjs')], {
       encoding: 'utf-8',
       timeout: 30000,
-      env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_PDF_INDEX: pdfIndex, CAREER_OPS_REPORTS_DIR: reports },
+      env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_PDF_INDEX: pdfIndex },
     });
-
+    
     return readFileSync(tracker, 'utf-8');
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -87,79 +83,27 @@ try {
   fail(`sync-pdf-flags.mjs tests crashed: ${e.message}`);
 }
 
-// --- Report header audit ---------------------------------------------------
-// A report header asserting a PDF that was never built (or was deleted with the
-// rest of gitignored output/) kept asserting it forever, because nothing
-// re-checked the claim after the report was written.
-console.log('\nsync-pdf-flags.mjs — report **PDF:** header audit');
-
-try {
-  const work = mkdtempSync(join(tmpdir(), 'cops-sync-audit-'));
+{
+  const work = mkdtempSync(join(tmpdir(), 'cops-sync-unknown-flag-'));
   try {
     const tracker = join(work, 'applications.md');
     const pdfIndex = join(work, 'pdf-index.tsv');
-    const reports = join(work, 'reports');
-    const realPdf = join(work, 'real-cv.pdf');
     writeFileSync(tracker, TRACKER_HEADER);
     writeFileSync(pdfIndex, PDF_MANIFEST);
-    writeFileSync(realPdf, '%PDF-1.4 stub');
-    mkdirSync(reports);
 
-    const report = (num, slug, pdfLine) => writeFileSync(
-      join(reports, `${String(num).padStart(3, '0')}-${slug}.md`),
-      `# Evaluation: ${slug}\n\n**Date:** 2026-01-0${num}\n**Score:** 4.0/5\n**URL:** https://example.com/${slug}\n${pdfLine}\n`,
-    );
-    report(1, 'acme', `**PDF:** ${realPdf}`);
-    report(2, 'globex', '**PDF:** output/never-generated-2026-01-02.pdf');
-    report(3, 'initech', '**Legitimacy:** verified');
+    const result = spawnSync(NODE, [join(ROOT, 'sync-pdf-flags.mjs'), '--dry-rn', '--json'], {
+      encoding: 'utf-8',
+      timeout: 30000,
+      env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_PDF_INDEX: pdfIndex },
+    });
+    const unchanged = readFileSync(tracker, 'utf-8') === TRACKER_HEADER;
 
-    const env = { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_PDF_INDEX: pdfIndex, CAREER_OPS_REPORTS_DIR: reports };
-    const out = execFileSync(NODE, [join(ROOT, 'sync-pdf-flags.mjs'), '--json'], { encoding: 'utf-8', timeout: 30000, env });
-    const parsed = JSON.parse(out);
-    const byNum = Object.fromEntries((parsed.reports ?? []).map(r => [r.report, r.status]));
-
-    if (byNum[1] === 'ok') pass('audit: a header whose PDF is on disk is ok');
-    else fail(`audit: existing PDF should be ok, got ${byNum[1]}`);
-
-    if (byNum[2] === 'file-missing') pass('audit: a header naming a PDF that was never built is flagged');
-    else fail(`audit: missing PDF should be file-missing, got ${byNum[2]}`);
-
-    // Report 3 has no **PDF:** line but IS in the manifest — the header
-    // understates what exists, which is drift in the other direction.
-    if (byNum[3] === 'header-missing') pass('audit: a manifest PDF with no header line is flagged');
-    else fail(`audit: report 3 should be header-missing, got ${byNum[3]}`);
-
-    // Exit 0 by default: merge-tracker.mjs shells out with execFileSync, which
-    // throws on non-zero, and it neither caused nor can fix report drift.
-    let defaultCode = 0;
-    try {
-      execFileSync(NODE, [join(ROOT, 'sync-pdf-flags.mjs')], { encoding: 'utf-8', timeout: 30000, env, stdio: 'pipe' });
-    } catch (e) {
-      defaultCode = e.status ?? 1;
-    }
-    if (defaultCode === 0) pass('audit: drift alone does not change the default exit code');
-    else fail(`audit: default run should exit 0 on drift, got ${defaultCode}`);
-
-    let strictCode = 0;
-    try {
-      execFileSync(NODE, [join(ROOT, 'sync-pdf-flags.mjs'), '--strict'], { encoding: 'utf-8', timeout: 30000, env, stdio: 'pipe' });
-    } catch (e) {
-      strictCode = e.status ?? 1;
-    }
-    if (strictCode === 3) pass('audit: --strict exits 3 when a header disagrees with the filesystem');
-    else fail(`audit: --strict should exit 3, got ${strictCode}`);
-
-    // The audit must never touch user-layer reports.
-    const before = readFileSync(join(reports, '002-globex.md'), 'utf-8');
-    execFileSync(NODE, [join(ROOT, 'sync-pdf-flags.mjs')], { encoding: 'utf-8', timeout: 30000, env });
-    if (readFileSync(join(reports, '002-globex.md'), 'utf-8') === before) {
-      pass('audit: reports/ is left byte-identical (user layer is never rewritten)');
+    if (result.status === 1 && /unknown option.*--dry-rn/i.test(result.stderr) && unchanged) {
+      pass('sync-pdf-flags rejects unknown options before changing the tracker');
     } else {
-      fail('audit: a report file was modified');
+      fail(`unknown option changed the tracker or returned the wrong result: status=${result.status}, stderr=${JSON.stringify(result.stderr)}, unchanged=${unchanged}`);
     }
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
-} catch (e) {
-  fail(`sync-pdf-flags.mjs report audit tests crashed: ${e.message}`);
 }

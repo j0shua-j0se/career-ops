@@ -159,6 +159,13 @@ const SECTION_ALIASES = new Map([
   ['education', 'education'],
   ['education & certifications', 'education'],
   ['certifications', 'certifications'],
+  ['awards', 'awards'],
+  ['honors', 'awards'],
+  ['honours', 'awards'],
+  ['awards & honors', 'awards'],
+  ['awards and honors', 'awards'],
+  ['honors & awards', 'awards'],
+  ['awards & honours', 'awards'],
   ['skills', 'skills'],
   ['technical skills', 'skills'],
   // Polish — the vocabulary documented in modes/pl/README.md, plus the word-order
@@ -182,6 +189,9 @@ const SECTION_ALIASES = new Map([
   ['certyfikaty', 'certifications'],
   ['certyfikaty i szkolenia', 'certifications'],
   ['szkolenia i certyfikaty', 'certifications'],
+  ['nagrody', 'awards'],
+  ['wyróżnienia', 'awards'],
+  ['nagrody i wyróżnienia', 'awards'],
   ['umiejętności', 'skills'],
   ['umiejętności techniczne', 'skills'],
 ].map(([alias, key]) => [foldDiacritics(alias), key]));

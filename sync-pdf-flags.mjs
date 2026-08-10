@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * sync-pdf-flags.mjs — Reconciles the tracker PDF column against data/pdf-index.tsv,
- * and audits the `**PDF:**` header line of every report against the filesystem.
+ * sync-pdf-flags.mjs — Reconciles the tracker PDF column against data/pdf-index.tsv.
  *
  * When a PDF is generated AFTER the initial evaluation, the tracker's PDF column
  * might still show ❌ (or '—'). This script reads the canonical pdf manifest and
@@ -10,94 +9,35 @@
  *
  * Runs under the shared tracker lock and replaces the file atomically.
  *
- * Report headers are AUDITED, NEVER REWRITTEN. Two reasons, and the second is
- * the binding one:
- *   1. reports/ is user layer — the system does not edit it (see DATA_CONTRACT).
- *   2. The correct value is not derivable anyway. pdf-index.tsv keeps ONE row
- *      per report, last write wins, and it does not distinguish a CV from a
- *      cover letter — generating a cover overwrites the CV's manifest row. So
- *      "the manifest path for report N" is not "the CV for report N", and
- *      writing it into the header would replace a correct CV path with a cover
- *      path. Existence on disk is the only fact this script can check, so
- *      checking it is all it does.
- *
- * Exit stays 0 on drift by default — merge-tracker.mjs shells out to this
- * script with execFileSync, where a non-zero exit throws. Pass --strict to opt
- * into exit 3 when a report header claims a PDF that is not on disk.
- *
  * Usage:
- *   node sync-pdf-flags.mjs [--dry-run] [--json] [--strict] [--skip-reports]
+ *   node sync-pdf-flags.mjs [--dry-run] [--json]
  */
 
-import { readFileSync, existsSync, readdirSync } from 'fs';
-import { join, dirname, isAbsolute } from 'path';
+import { readFileSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { extractTrackerReportNumbers, resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
-import { rebuildRow, resolveTrackerPath, openTrackerTransaction } from './tracker-utils.mjs';
+import { rebuildRow, resolveTrackerPath, resolvePdfIndexPath, openTrackerTransaction } from './tracker-utils.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const APPS_FILE = resolveTrackerPath(CAREER_OPS);
-const PDF_MANIFEST = process.env.CAREER_OPS_PDF_INDEX || join(CAREER_OPS, 'data', 'pdf-index.tsv');
-const REPORTS_DIR = process.env.CAREER_OPS_REPORTS_DIR || join(CAREER_OPS, 'reports');
+// Derived from the TRACKER, not from this script's location, so a redirected
+// CAREER_OPS_TRACKER moves the whole workspace together (#2471).
+const PDF_MANIFEST = resolvePdfIndexPath(APPS_FILE);
 
-const flags = { dryRun: false, json: false, strict: false, skipReports: false };
+const flags = { dryRun: false, json: false };
+const unknownOptions = [];
 for (const arg of process.argv.slice(2)) {
   if (arg === '--dry-run') flags.dryRun = true;
   else if (arg === '--json') flags.json = true;
-  else if (arg === '--strict') flags.strict = true;
-  else if (arg === '--skip-reports') flags.skipReports = true;
+  else unknownOptions.push(arg);
 }
 
-/**
- * Audit each report's `**PDF:**` header line against the filesystem.
- *
- * A report header is a claim about an artifact that was supposed to be
- * produced. Nothing re-checked that claim after the fact, so a header could
- * name a PDF that was never generated, or that was deleted with the rest of
- * gitignored output/, and the report kept asserting it indefinitely.
- *
- * Read-only by construction — see the header comment for why a correct value
- * cannot be derived from the manifest.
- *
- * @param {Set<number>} manifestNums - Report numbers with at least one PDF in the manifest.
- * @returns {{report: number, file: string, status: string, claimed: string|null}[]}
- */
-function auditReportHeaders(manifestNums) {
-  if (!existsSync(REPORTS_DIR)) return [];
-  const findings = [];
-  for (const name of readdirSync(REPORTS_DIR).sort()) {
-    if (!name.endsWith('.md')) continue;
-    const numMatch = name.match(/^(\d+)-/);
-    if (!numMatch) continue;
-    const report = parseInt(numMatch[1], 10);
-
-    let text;
-    try {
-      text = readFileSync(join(REPORTS_DIR, name), 'utf-8');
-    } catch {
-      findings.push({ report, file: name, status: 'unreadable', claimed: null });
-      continue;
-    }
-
-    const claimed = text.match(/^\*\*PDF:\*\*\s*(\S.*?)\s*$/m)?.[1] ?? null;
-    if (!claimed) {
-      // Only interesting when something else says a PDF exists — most reports
-      // legitimately have no PDF because the role was never applied to.
-      if (manifestNums.has(report)) findings.push({ report, file: name, status: 'header-missing', claimed: null });
-      continue;
-    }
-    // A header may carry a note rather than a path ("pending", "—"); only a
-    // path-shaped claim is checkable.
-    if (!/[/\\]|\.pdf$/i.test(claimed)) {
-      findings.push({ report, file: name, status: 'not-a-path', claimed });
-      continue;
-    }
-    // Headers normally carry a project-relative "output/..." path, but an
-    // absolute one is a legitimate claim too and must not be re-rooted.
-    const abs = isAbsolute(claimed) ? claimed : join(CAREER_OPS, claimed);
-    findings.push({ report, file: name, status: existsSync(abs) ? 'ok' : 'file-missing', claimed });
-  }
-  return findings;
+if (unknownOptions.length > 0) {
+  const error = `unknown option(s): ${unknownOptions.join(', ')}`;
+  if (flags.json) console.error(JSON.stringify({ error, code: 'unknown-option' }));
+  else console.error(`Error: ${error}\nUsage: node sync-pdf-flags.mjs [--dry-run] [--json]`);
+  process.exit(1);
 }
 
 if (!existsSync(APPS_FILE)) {
@@ -189,33 +129,12 @@ if (updated > 0 && !flags.dryRun) {
 
 transaction.close();
 
-// Outside the lock: the audit reads reports/ and output/, neither of which the
-// tracker lock covers, and it writes nothing.
-const reportFindings = flags.skipReports ? [] : auditReportHeaders(manifestReports);
-const drift = reportFindings.filter(f => f.status !== 'ok');
-
-const result = { updated, unchanged, dryRun: flags.dryRun, reports: reportFindings };
+const result = { updated, unchanged, dryRun: flags.dryRun };
 if (flags.json) {
   console.log(JSON.stringify(result, null, 2));
 } else {
   console.log(`\n📊 Summary: ${updated} PDF flags synced, ${unchanged} unchanged`);
   if (flags.dryRun) console.log('(dry-run — no changes written)');
-
-  if (drift.length > 0) {
-    const LABELS = {
-      'file-missing': 'header names a PDF that is not on disk',
-      'header-missing': 'PDF exists for this report but the header has no **PDF:** line',
-      'not-a-path': '**PDF:** line is not a path',
-      unreadable: 'report could not be read',
-    };
-    console.log(`\n⚠️  ${drift.length} report header(s) disagree with the filesystem:`);
-    for (const f of drift) {
-      console.log(`   ${f.file}: ${LABELS[f.status] ?? f.status}${f.claimed ? ` — "${f.claimed}"` : ''}`);
-    }
-    console.log('   reports/ is user layer and is never rewritten here — fix the header or rebuild the PDF.');
-  }
 }
 
-// Advisory by default so merge-tracker.mjs's execFileSync call does not throw
-// on drift it did not cause and cannot fix.
-process.exit(flags.strict && drift.length > 0 ? 3 : 0);
+process.exit(0);
