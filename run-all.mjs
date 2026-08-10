@@ -144,12 +144,25 @@ function trackerRows() {
   return lines.map((line) => parseTrackerRow(line, colmap)).filter(Boolean);
 }
 
+/**
+ * Observe only what the current stage's decision actually depends on.
+ *
+ * The naive version gathered all three every call, which meant every `next` and
+ * every `status` spawned a `scan-loop.mjs` subprocess and re-parsed the tracker
+ * even when the scan stage had been complete for hours. The control law only
+ * reads the fact belonging to the stage it is deciding, so gathering the rest is
+ * pure cost — and the subprocess was the expensive part.
+ *
+ * The `stage-complete` path still needs the NEXT stage's fact on the following
+ * call, which it gets because `cmdNext` re-gathers after advancing.
+ */
 function gatherFacts(state) {
-  return {
-    loop: loopFacts(),
-    pendingUrls: pendingUrlCount(),
-    kitCandidates: kitCandidates(trackerRows(), state.config.kitThreshold),
-  };
+  const stage = currentStage(state);
+  const facts = {};
+  if (stage === 'scan') facts.loop = loopFacts();
+  if (stage === 'pipeline') facts.pendingUrls = pendingUrlCount();
+  if (stage === 'kits') facts.kitCandidates = kitCandidates(trackerRows(), state.config.kitThreshold);
+  return facts;
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -300,7 +313,15 @@ function cmdSync(flags) {
   };
 
   if (state && !flags['dry-run']) {
-    if (!failedRequired && !state.completed.includes('sync')) state.completed.push('sync');
+    // Only consume the sync STAGE when sync is actually the stage that is due.
+    // Running `sync` early (to refresh the dashboard mid-pass, which is a
+    // reasonable thing to do) used to mark the stage complete anyway — and then
+    // once pipeline and kits finished, every stage was complete, `next` said
+    // "done", and the final reconciliation never ran. That silently skipped the
+    // one step that makes the dashboard match the artifacts just built.
+    const stageIsDue = currentStage(state) === 'sync';
+    if (!failedRequired && stageIsDue && !state.completed.includes('sync')) state.completed.push('sync');
+    result.stageConsumed = !failedRequired && stageIsDue;
     state.stats.syncedAt = new Date().toISOString();
     saveState(state);
     log(state, 'sync', `ok=${!failedRequired} steps=${steps.map((s) => `${s.id}:${s.status}`).join(' ')}`);

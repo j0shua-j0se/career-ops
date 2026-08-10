@@ -246,6 +246,48 @@ try {
     fail('sync --dry-run marked the stage complete without doing the work');
   }
 
+  // ── sync must not consume its stage out of order ───────────────────────────
+  // Running `sync` mid-pass to refresh the dashboard is reasonable. Letting it
+  // mark the sync STAGE complete is not: once pipeline and kits then finished,
+  // every stage was complete, `next` said "done", and the final reconciliation
+  // — the step that makes the dashboard match the artifacts just built — was
+  // silently skipped.
+  {
+    const fresh = cli(['start', '--skip-scan', '--reset']);
+    if (fresh.code !== 0) fail(`could not reset for the out-of-order sync check (exit ${fresh.code})`);
+
+    // pipeline is due here, not sync.
+    const early = cli(['sync', '--skip-dashboard']);
+    const st = JSON.parse(readFileSync(statePath, 'utf-8'));
+    if (early.code === 0 && !st.completed.includes('sync')) {
+      pass('running sync while an earlier stage is due does NOT consume the sync stage');
+    } else {
+      fail(`early sync left completed=${JSON.stringify(st.completed)}`);
+    }
+    if (early.json?.stageConsumed === false) {
+      pass('sync reports stageConsumed:false when it ran out of order');
+    } else {
+      fail(`stageConsumed was ${early.json?.stageConsumed}`);
+    }
+
+    // Now walk to the sync stage properly and confirm it IS consumed there.
+    cli(['advance', '--stage', 'pipeline']);
+    cli(['advance', '--stage', 'kits']);
+    const due = cli(['sync', '--skip-dashboard']);
+    const st2 = JSON.parse(readFileSync(statePath, 'utf-8'));
+    if (due.code === 0 && st2.completed.includes('sync') && due.json?.stageConsumed === true) {
+      pass('running sync when it is the due stage consumes it and finishes the pass');
+    } else {
+      fail(`in-order sync left completed=${JSON.stringify(st2.completed)}, stageConsumed=${due.json?.stageConsumed}`);
+    }
+    if (due.json?.finished === true) pass('the pass reports finished once sync completes in order');
+    else fail(`finished was ${due.json?.finished}`);
+
+    // This block walked the pass to completion; the abort checks below need a
+    // live pass, so hand them one.
+    cli(['start', '--skip-scan', '--reset']);
+  }
+
   // ── abort ──────────────────────────────────────────────────────────────────
   const aborted = cli(['abort', '--note', 'stopping here']);
   if (aborted.json?.aborted === true && aborted.json?.reason === 'stopping here') {
