@@ -93,6 +93,8 @@ const INDEX_PORTFOLIO_URL = 'https://www.indexventures.com/companies/';
  */
 const SEQUOIA_BOARD_URL = 'https://jobs.sequoiacap.com/api-boards/search-companies';
 const SEQUOIA_BOARD_ID = 'sequoia-capital';
+/** Same board API; returns postings, whose URLs carry the real ATS board token. */
+const SEQUOIA_JOBS_URL = 'https://jobs.sequoiacap.com/api-boards/search-jobs';
 /** Server caps the page size; 25 is what the board's own client requests. */
 const SEQUOIA_PAGE_SIZE = 25;
 /** Safety rail on the cursor walk (~254 companies today, so 40 pages is ample). */
@@ -459,6 +461,15 @@ export function parseSequoiaPayload(payload) {
 
     /** @type {SeedCompany} */
     const entry = { name, slug, url, source: 'sequoia' };
+    // Consider's own company id (its display-name key, e.g. "Gong"). Not part of
+    // the portal entry — it is the filter value the jobs endpoint accepts, and
+    // resolveSequoiaAtsTokens() needs it to look up a real posting URL.
+    if (typeof raw.id === 'string' && raw.id.trim()) entry.considerId = raw.id.trim();
+    // Consider's own slug, kept separately from the name-derived `slug`. The two
+    // disagree often (Consider routes "Mach Industries" as one thing, the name
+    // rule derives another), and the jobs endpoint echoes ITS slug back — so the
+    // identity guard in resolveSequoiaAtsTokens has to compare against this one.
+    if (typeof raw.slug === 'string' && raw.slug.trim()) entry.considerSlug = raw.slug.trim();
 
     // Vendor hint. Consider lists the busiest source first; take the first one
     // career-ops actually has a provider for rather than blindly the first.
@@ -477,6 +488,57 @@ export function parseSequoiaPayload(payload) {
   }
 
   return [...seen.values()];
+}
+
+/**
+ * Recover the real ATS board token from a posting URL.
+ *
+ * This is what fixes the seed's biggest weakness. Deriving a board token from a
+ * company's display name is a guess, and it is wrong often enough to matter:
+ * Gong's Greenhouse board is `gongio`, Mach Industries' Ashby board is `mach`.
+ * A posting URL is not a guess — it is where the board actually lives.
+ *
+ * Only the three vendors career-ops has providers for are recognised. A
+ * Workday, Rippling or custom-domain URL returns null so the caller keeps
+ * whatever it already had rather than storing a token nothing can read.
+ *
+ * Custom-domain Greenhouse links (`hex.tech/careers/123?gh_jid=456`) are
+ * deliberately NOT resolved: the gh_jid proves the vendor but the host is the
+ * company's own, so the board token is not present in the URL at all.
+ *
+ * @param {string} url  A posting URL from the Consider jobs endpoint.
+ * @returns {{ats: string, ats_id: string}|null}
+ */
+export function extractAtsFromJobUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) return null;
+
+  let parsed;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    return null;
+  }
+  const host = parsed.hostname.toLowerCase();
+  // Split on '/' and drop empties so a leading or doubled slash cannot shift
+  // which segment is read as the token.
+  const seg = parsed.pathname.split('/').filter(Boolean);
+  const token = seg[0] ? decodeURIComponent(seg[0]) : '';
+  if (!token || !SLUG_RE.test(token)) return null;
+
+  if (host === 'job-boards.greenhouse.io' || host === 'boards.greenhouse.io') {
+    return { ats: 'greenhouse', ats_id: token };
+  }
+  // Greenhouse's EU boards live on a separate host with the same path shape.
+  if (host === 'job-boards.eu.greenhouse.io' || host === 'boards.eu.greenhouse.io') {
+    return { ats: 'greenhouse', ats_id: token };
+  }
+  if (host === 'jobs.ashbyhq.com') {
+    return { ats: 'ashby', ats_id: token };
+  }
+  if (host === 'jobs.lever.co') {
+    return { ats: 'lever', ats_id: token };
+  }
+  return null;
 }
 
 // ── Generic pure parser (entry point for test-all.mjs) ───────────────
@@ -664,7 +726,7 @@ export async function fetchIndexCompanies({ timeoutMs = DEFAULT_TIMEOUT_MS } = {
  * @param {{ timeoutMs?: number, maxPages?: number }} [opts]
  * @returns {Promise<SeedCompany[]>}
  */
-export async function fetchSequoiaCompanies({ timeoutMs = DEFAULT_TIMEOUT_MS, maxPages = SEQUOIA_MAX_PAGES } = {}) {
+export async function fetchSequoiaCompanies({ timeoutMs = DEFAULT_TIMEOUT_MS, maxPages = SEQUOIA_MAX_PAGES, resolveAts = true } = {}) {
   /** @type {Map<string, SeedCompany>} */
   const collected = new Map();
   const seenCursors = new Set();
@@ -704,7 +766,128 @@ export async function fetchSequoiaCompanies({ timeoutMs = DEFAULT_TIMEOUT_MS, ma
     sequence = next;
   }
 
-  return [...collected.values()];
+  const companies = [...collected.values()];
+
+  // Board tokens guessed from a display name are wrong often enough that the
+  // majority of this seed's entries were unreachable without this step. It is
+  // on by default because a seed that mostly resolves to dead boards is not
+  // worth having; `resolveAts: false` keeps the fetch to a single cursor walk
+  // for callers that only want the company list.
+  if (resolveAts && companies.length) {
+    try {
+      await resolveSequoiaAtsTokens(companies, { timeoutMs });
+    } catch {
+      // Enrichment is strictly additive — never let it lose the company list.
+    }
+  }
+
+  return companies;
+}
+
+/** Jobs per page when harvesting board tokens. The API accepts 500. */
+const SEQUOIA_JOBS_PAGE_SIZE = 500;
+/** Page budget for the harvest — ~9.7k jobs today, so 24 pages covers the board. */
+const SEQUOIA_JOBS_MAX_PAGES = 24;
+
+/**
+ * Replace guessed ATS board tokens with the real ones, read from live postings.
+ *
+ * The seed's weak point is that a board token is guessed from the company's
+ * display name. Measured against the live board that guess left 168 of 254
+ * companies unreachable: Gong's Greenhouse board is `gongio`, Fireworks AI's is
+ * `fireworksai`, Ironclad's Ashby board is `ironcladhq`. The token is simply not
+ * derivable from the name, so no better slug rule fixes this — the board has to
+ * be asked.
+ *
+ * It is asked in BULK. The obvious implementation queries the jobs endpoint once
+ * per company; that is 254 requests, and it got rate-limited hard enough to
+ * truncate the company walk itself (254 companies became 200) while taking 100s.
+ * Paging the unfiltered jobs list at 500/page covers the same ground in ~20
+ * requests, because one posting is enough to locate a company's board and every
+ * page carries hundreds of companies' worth of postings.
+ *
+ * The walk stops early once every company has been located, so a board where the
+ * first pages happen to cover everything costs only those pages.
+ *
+ * Failures are non-fatal: anything unresolved keeps the name-derived guess, so
+ * this can only improve the result.
+ *
+ * @param {SeedCompany[]} companies  Entries from parseSequoiaPayload().
+ * @param {{ timeoutMs?: number, maxPages?: number }} [opts]
+ * @returns {Promise<{resolved: number, corrected: number, pages: number}>} Mutates `companies` in place.
+ */
+export async function resolveSequoiaAtsTokens(companies, { timeoutMs = DEFAULT_TIMEOUT_MS, maxPages = SEQUOIA_JOBS_MAX_PAGES } = {}) {
+  // Index by Consider's own slug: that is what the jobs records echo back. The
+  // name-derived slug disagrees for a fair number of companies, and matching on
+  // it silently drops those.
+  const byConsiderSlug = new Map();
+  for (const company of companies) {
+    const key = company?.considerSlug || company?.slug;
+    if (key && !byConsiderSlug.has(key)) byConsiderSlug.set(key, company);
+  }
+
+  const located = new Set();
+  let resolved = 0;
+  let corrected = 0;
+  let pages = 0;
+  let sequence = null;
+  const seenCursors = new Set();
+
+  for (let page = 0; page < maxPages; page++) {
+    // Everything already located — stop paying for pages that cannot teach us
+    // anything new.
+    if (located.size >= byConsiderSlug.size) break;
+
+    const meta = sequence ? { size: SEQUOIA_JOBS_PAGE_SIZE, sequence } : { size: SEQUOIA_JOBS_PAGE_SIZE };
+    let body;
+    try {
+      const res = await fetchWithTimeout(SEQUOIA_JOBS_URL, {
+        timeoutMs,
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          meta,
+          query: {},
+          board: { id: SEQUOIA_BOARD_ID, isParent: true },
+          grouped: false,
+        }),
+      });
+      body = await res.json();
+    } catch {
+      // Keep whatever has been resolved so far rather than discarding it.
+      break;
+    }
+    pages++;
+
+    const jobs = Array.isArray(body?.jobs) ? body.jobs : [];
+    if (jobs.length === 0) break;
+
+    for (const job of jobs) {
+      const key = job?.companySlug;
+      if (!key || located.has(key)) continue;
+      const company = byConsiderSlug.get(key);
+      if (!company) continue;
+
+      const hit = extractAtsFromJobUrl(job.url || job.applyUrl || '');
+      // A Workday/custom-domain posting cannot locate a board. Leave the company
+      // unlocated so a later page carrying a first-party URL can still fix it.
+      if (!hit) continue;
+
+      const changed = company.ats !== hit.ats || company.ats_id !== hit.ats_id;
+      company.ats = hit.ats;
+      company.ats_id = hit.ats_id;
+      located.add(key);
+      resolved++;
+      if (changed) corrected++;
+    }
+
+    const next = body?.meta?.sequence;
+    if (!next || typeof next !== 'string' || seenCursors.has(next)) break;
+    seenCursors.add(next);
+    sequence = next;
+  }
+
+  return { resolved, corrected, pages };
 }
 
 // ── SEED_SOURCES registry ────────────────────────────────────────────

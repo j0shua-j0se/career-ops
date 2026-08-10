@@ -234,6 +234,73 @@ try {
       fail(`Cyera resolved to ${cyeraUrl}`);
     }
   }
+
+    // ── extractAtsFromJobUrl: recovering the REAL board token ───────────────
+    // The seed's original weakness was guessing a board token from a display
+    // name. It is wrong often: Gong's Greenhouse board is `gongio`, Ironclad's
+    // Ashby board is `ironcladhq`. A posting URL is not a guess, so these
+    // assertions protect the mechanism that reads it.
+    const { extractAtsFromJobUrl } = mod;
+    if (typeof extractAtsFromJobUrl !== 'function') {
+      fail('seeds/vc-portfolios.mjs does not export extractAtsFromJobUrl');
+    } else {
+      const urlCases = [
+        ['https://job-boards.greenhouse.io/gongio/jobs/4702757006', { ats: 'greenhouse', ats_id: 'gongio' }],
+        ['https://boards.greenhouse.io/spacex/jobs/8691749002?gh_jid=8691749002', { ats: 'greenhouse', ats_id: 'spacex' }],
+        // Greenhouse's EU host has the same path shape and must not be missed.
+        ['https://job-boards.eu.greenhouse.io/navvis/jobs/4941329101', { ats: 'greenhouse', ats_id: 'navvis' }],
+        ['https://jobs.ashbyhq.com/mach/a0a53e10-7535-4196', { ats: 'ashby', ats_id: 'mach' }],
+        ['https://jobs.lever.co/acme/1234-5678', { ats: 'lever', ats_id: 'acme' }],
+        // A leading double slash must not shift which segment is read as the token.
+        ['https://jobs.ashbyhq.com//vanta/abc', { ats: 'ashby', ats_id: 'vanta' }],
+      ];
+      let urlOk = true;
+      for (const [input, want] of urlCases) {
+        const got = extractAtsFromJobUrl(input);
+        if (!eq(got, want)) { urlOk = false; fail(`extractAtsFromJobUrl(${input}) gave ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`); }
+      }
+      if (urlOk) pass('extractAtsFromJobUrl recovers the board token from Greenhouse (US+EU), Ashby and Lever URLs');
+
+      // A custom-domain Greenhouse link proves the vendor via gh_jid but does
+      // NOT contain the board token — returning the path segment there would
+      // invent a token like "careers".
+      const rejected = [
+        ['custom-domain Greenhouse (gh_jid but no board token)', 'https://hex.tech/careers/6139389004/?gh_jid=6139389004'],
+        ['Workday', 'https://cohesity.wd5.myworkdayjobs.com/Cohesity_Careers/job/x/y'],
+        ['Rippling', 'https://ats.rippling.com/acme/jobs/123'],
+        ['not a URL', 'not a url at all'],
+        ['empty string', ''],
+        ['null', null],
+        ['undefined', undefined],
+        ['host with no path', 'https://jobs.ashbyhq.com/'],
+      ];
+      let rejOk = true;
+      for (const [label, input] of rejected) {
+        let got;
+        try { got = extractAtsFromJobUrl(input); } catch (e) { rejOk = false; fail(`extractAtsFromJobUrl(${label}) threw: ${e.message}`); continue; }
+        if (got !== null) { rejOk = false; fail(`extractAtsFromJobUrl(${label}) returned ${JSON.stringify(got)}, expected null`); }
+      }
+      if (rejOk) pass('unsupported hosts, custom domains and malformed input all return null rather than inventing a token');
+    }
+
+    // ── considerId / considerSlug are carried for the resolver ──────────────
+    // The jobs endpoint filters on Consider's company *id* and echoes back
+    // Consider's *slug*. Both differ from the name-derived slug, and losing
+    // either breaks the resolver silently.
+    const idFixture = parseSequoiaPayload({
+      companies: [{ id: 'Gong', name: 'Gong', slug: 'gong-consider-slug', domain: 'gong.io', jobSources: [] }],
+    })[0];
+    if (idFixture?.considerId === 'Gong' && idFixture?.considerSlug === 'gong-consider-slug') {
+      pass("Consider's own id and slug are carried through, distinct from the name-derived slug");
+    } else {
+      fail(`considerId/considerSlug were ${idFixture?.considerId}/${idFixture?.considerSlug}`);
+    }
+
+    if (typeof mod.resolveSequoiaAtsTokens === 'function') {
+      pass('resolveSequoiaAtsTokens is exported');
+    } else {
+      fail('seeds/vc-portfolios.mjs does not export resolveSequoiaAtsTokens');
+    }
 } catch (e) {
   fail(`Sequoia seed tests crashed: ${e.message}`);
 }
