@@ -87,15 +87,21 @@
       "authors": "B. Athul Krishna, R. P. Aakash, Joshua Jose, S. Anubha Pearline",
       "venue": "Proceedings of the International Conference on Intelligent Systems and Digital Transformation (ICISD 2025), Atlantis Highlights in Intelligent Systems, Atlantis Press (Springer Nature), pp. 1015-1033",
       "year": "Oct 2025",
-      "description": "Computer-vision system on live CCTV feeds: weapon detection with YOLOv11 and hard negative mining to suppress false positives from visually similar objects; face recognition via a ResNet-based detector, FaceNet embeddings and an SVM classifier, with real-time alerting on detection. Reported 95.79% mAP@0.5 with precision and recall both at 0.93.",
+      "description": "Computer-vision system on live CCTV feeds: weapon detection with YOLOv11 and hard negative mining to suppress false positives from visually similar objects; face recognition via a ResNet-based detector, FaceNet embeddings and an SVM classifier, with real-time alerting on detection. Reported 95.79% mAP@0.5 with precision and recall both at 0.93. Led as team leader; personally optimised the object-detection model for real-time inference on standard hardware, integrated the face-recognition pipeline with privacy and ethical considerations in the design, and tuned the system to cut false alarms while holding accuracy. Awarded Best Paper at ICISD 2025.",
       "url": "https://doi.org/10.2991/978-94-6463-866-0_82",
       "doi": "10.2991/978-94-6463-866-0_82"
     }
   ],
   "certifications": [
-    { "title": "Oracle Cloud Infrastructure 2025 Certified Data Science Professional" },
-    { "title": "Introduction to Cloud Computing" },
-    { "title": "Machine Learning Specialization" }
+    {
+      "title": "Oracle Cloud Infrastructure 2025 Certified Data Science Professional"
+    },
+    {
+      "title": "Introduction to Cloud Computing"
+    },
+    {
+      "title": "Machine Learning Specialization"
+    }
   ],
   "skills": [
     {
@@ -125,6 +131,13 @@
     {
       "category": "Languages",
       "items": "English (full professional), Hindi (full professional), Malayalam (full professional), German (A2)"
+    }
+  ],
+  "awards": [
+    {
+      "title": "Best Paper Award — International Conference on Intelligent Systems and Digital Transformation (ICISD 2025)",
+      "org": "ICISD 2025, Chennai",
+      "year": "2025"
     }
   ]
 }

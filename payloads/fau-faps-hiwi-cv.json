@@ -94,13 +94,20 @@
       "venue": "Proceedings of the International Conference on Intelligent Systems and Digital Transformation (ICISD 2025), Atlantis Highlights in Intelligent Systems, Atlantis Press (Springer Nature), pp. 1015-1033",
       "year": "Oct 2025",
       "url": "https://doi.org/10.2991/978-94-6463-866-0_82",
-      "doi": "10.2991/978-94-6463-866-0_82"
+      "doi": "10.2991/978-94-6463-866-0_82",
+      "description": " Led as team leader; personally optimised the object-detection model for real-time inference on standard hardware, integrated the face-recognition pipeline with privacy and ethical considerations in the design, and tuned the system to cut false alarms while holding accuracy. Awarded Best Paper at ICISD 2025."
     }
   ],
   "certifications": [
-    { "title": "Machine Learning Specialization" },
-    { "title": "IBM Data Science Professional Certificate" },
-    { "title": "Oracle Cloud Infrastructure 2025 Certified Data Science Professional" }
+    {
+      "title": "Machine Learning Specialization"
+    },
+    {
+      "title": "IBM Data Science Professional Certificate"
+    },
+    {
+      "title": "Oracle Cloud Infrastructure 2025 Certified Data Science Professional"
+    }
   ],
   "skills": [
     {
@@ -130,6 +137,13 @@
     {
       "category": "Languages",
       "items": "English (full professional), Hindi (full professional), Malayalam (full professional), German (A2)"
+    }
+  ],
+  "awards": [
+    {
+      "title": "Best Paper Award — International Conference on Intelligent Systems and Digital Transformation (ICISD 2025)",
+      "org": "ICISD 2025, Chennai",
+      "year": "2025"
     }
   ]
 }
