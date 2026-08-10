@@ -136,6 +136,27 @@ try {
   // proves it held; assert it explicitly so the reason is recorded.
   if (typeof mod.rankEntry === 'function') pass('importing triage-prefilter.mjs exports its API without running the CLI');
   else fail('triage-prefilter.mjs does not export rankEntry');
+
+  // An uninformative location must never be read as evidence a role is abroad.
+  // 'abroad' scores 1.0 and hard-skips the posting, so a location cell nobody
+  // filled in silently discards it. A DLR (German Aerospace Center) working
+  // student ML posting was dropped as "outside Germany" purely because its cell
+  // read "?". Not knowing where a role is is not knowing.
+  const { classifyReach, rankEntry } = mod;
+  for (const placeholder of ['', '?', '-', 'N/A', 'n/a', 'none', 'unknown', 'TBD', 'various']) {
+    const got = classifyReach(placeholder);
+    if (got === 'unknown') pass(`classifyReach(${JSON.stringify(placeholder)}) is "unknown", not "abroad"`);
+    else fail(`classifyReach(${JSON.stringify(placeholder)}) returned "${got}"`);
+  }
+  // Real locations must be unaffected by the placeholder rule.
+  for (const [loc, want] of [['Erlangen', 'home'], ['Cologne', 'germany'], ['Bangalore', 'abroad']]) {
+    const got = classifyReach(loc);
+    if (got === want) pass(`classifyReach("${loc}") is still "${want}"`);
+    else fail(`classifyReach("${loc}") returned "${got}", expected "${want}"`);
+  }
+  const dlr = rankEntry({ url: 'https://jobs.dlr.de/job/x', company: 'DLR', title: 'Working student (f/m/d) Machine Learning', location: '?' });
+  if (dlr.bucket === 'look') pass('a student ML posting with a placeholder location survives the pre-screen gate');
+  else fail(`the DLR-shaped row bucketed as "${dlr.bucket}" (${dlr.reason})`);
 } catch (e) {
   fail(`triage-prefilter drift guards crashed: ${e.message}`);
 }

@@ -185,6 +185,12 @@ const OTHER_DE_CITY_RE = /(?<![a-zäöüß])(berlin|hamburg|k[öo]ln|cologne|fra
  * @param {string} [title] - Title, read only for a remote marker.
  * @returns {'home'|'munich'|'remote'|'germany'|'abroad'|'unknown'}
  */
+/**
+ * A location cell that says nothing: empty, or a placeholder standing in for a
+ * value nobody recorded. Matched before the abroad fallback.
+ */
+export const UNINFORMATIVE_LOCATION_RE = /^\s*(|\?+|-+|—+|n\/?a|na|none|null|undefined|unknown|tbd|tba|various|multiple|remote\?)\s*$/i;
+
 export function classifyReach(location, title = '') {
   const loc = typeof location === 'string' ? location : '';
   const both = `${loc} ${typeof title === 'string' ? title : ''}`;
@@ -198,7 +204,14 @@ export function classifyReach(location, title = '') {
   if (HOME_CITY_RE.test(loc)) return 'home';
   if (MUNICH_CITY_RE.test(loc)) return 'munich';
   if (!REMOTE_NEGATED_RE.test(both) && REMOTE_RE.test(both)) return 'remote';
-  if (loc.trim() === '') return 'unknown';
+  // A location that carries no information is 'unknown', not 'abroad'. Falling
+  // through to 'abroad' scores 1.0 and hard-skips the posting, so a scanner row
+  // whose location cell was never captured — or was filled with a placeholder —
+  // is silently discarded. That dropped a DLR (German Aerospace Center) working
+  // student ML posting as "outside Germany" purely because its cell read "?".
+  // 'unknown' scores 2.5 and lets the title decide, which is the honest default:
+  // not knowing where a role is must never be evidence that it is abroad.
+  if (UNINFORMATIVE_LOCATION_RE.test(loc)) return 'unknown';
   if (GERMANY_RE.test(loc) || OTHER_DE_CITY_RE.test(loc)) return 'germany';
   return 'abroad';
 }
