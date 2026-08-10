@@ -1,0 +1,316 @@
+// tests/run-core.test.mjs — unit tests for the /career-ops run control law.
+//
+// run-core.mjs decides which of the four end-to-end stages happens next. Its
+// whole reason for existing separately from run-all.mjs is that this question
+// must be answerable without a live job board, a Playwright launch, or a model
+// call — so every observation arrives as a plain `facts` object and every
+// decision is a pure function of (state, facts).
+//
+// What is pinned here is mostly *ordering and refusal*: that stages cannot run
+// out of dependency order, that a stage which cannot clear halts instead of
+// looping forever, and that kit selection never rebuilds an artifact the user
+// has already sent. Those are the properties that go wrong silently.
+//
+// NOTE: no process.exit() anywhere — test-all.mjs runs discovered suites
+// in-process and greps for it.
+import { pass, fail, ROOT } from './helpers.mjs';
+import { join } from 'path';
+import { pathToFileURL } from 'url';
+
+console.log('\nUtility - run-core (end-to-end run control law)');
+
+/** Deep-equality good enough for the plain JSON these functions return. */
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+try {
+  const mod = await import(pathToFileURL(join(ROOT, 'run-core.mjs')).href);
+  const {
+    STAGES, DEFAULT_RUN_CONFIG, resolveRunConfig, newRun, normalizeRun,
+    decideNextStage, currentStage, isFinished, kitCandidates, summarize,
+    renderRunLogEntry,
+  } = mod;
+
+  // ── Stage order ────────────────────────────────────────────────────────────
+  // The order encodes a data dependency: each stage consumes what the previous
+  // produced. Reordering it would produce a dashboard describing a state that
+  // never existed, so the sequence is asserted literally.
+  if (eq(STAGES, ['scan', 'pipeline', 'kits', 'sync'])) {
+    pass('the stage order is scan -> pipeline -> kits -> sync');
+  } else {
+    fail(`unexpected stage order: ${JSON.stringify(STAGES)}`);
+  }
+
+  // ── resolveRunConfig ───────────────────────────────────────────────────────
+  const defaults = resolveRunConfig({});
+  if (defaults.target === 10 && defaults.minScore === 3.8 && defaults.kitThreshold === 3.8) {
+    pass('an empty profile yields the documented defaults');
+  } else {
+    fail(`empty profile yielded ${JSON.stringify(defaults)}`);
+  }
+
+  const tuned = resolveRunConfig({ loop: { target: 25, min_score: 4.2 } });
+  if (tuned.target === 25 && tuned.minScore === 4.2) {
+    pass('loop.target and loop.min_score are read from the profile');
+  } else {
+    fail(`loop config not read: ${JSON.stringify(tuned)}`);
+  }
+
+  // The precedence modes/pipeline.md documents: a role the loop shortlisted must
+  // not arrive at the kits stage and be skipped for being below a second bar.
+  if (tuned.kitThreshold === 4.2) {
+    pass('loop.min_score wins over auto_pdf_score_threshold for the kit threshold');
+  } else {
+    fail(`kitThreshold was ${tuned.kitThreshold}, expected it to follow loop.min_score`);
+  }
+
+  const legacy = resolveRunConfig({ auto_pdf_score_threshold: 3.0 });
+  if (legacy.kitThreshold === 3.0) {
+    pass('auto_pdf_score_threshold is the fallback when there is no loop: block');
+  } else {
+    fail(`legacy fallback gave kitThreshold ${legacy.kitThreshold}, expected 3.0`);
+  }
+
+  // A profile is user-edited YAML: a garbage value must fall back, not poison
+  // the run with NaN (every score comparison against NaN is false, which would
+  // silently qualify nothing).
+  const junk = resolveRunConfig({ loop: { target: 'lots', min_score: 'high' } });
+  if (junk.target === 10 && junk.minScore === 3.8) {
+    pass('non-numeric loop values fall back to the defaults instead of becoming NaN');
+  } else {
+    fail(`non-numeric loop values produced ${JSON.stringify(junk)}`);
+  }
+
+  const nonPositive = resolveRunConfig({ loop: { target: 0 } });
+  if (nonPositive.target === 10) pass('a target of 0 is rejected in favour of the default');
+  else fail(`target 0 produced ${nonPositive.target}`);
+
+  // ── newRun / currentStage / isFinished ─────────────────────────────────────
+  const fresh = newRun(DEFAULT_RUN_CONFIG, { now: '2026-08-10T09:00:00.000Z' });
+  if (currentStage(fresh) === 'scan') pass('a fresh run starts at the scan stage');
+  else fail(`a fresh run started at ${currentStage(fresh)}`);
+
+  if (fresh.run_id === 'run-20260810T090000') pass('the run id is derived from the start timestamp');
+  else fail(`unexpected run id ${fresh.run_id}`);
+
+  if (isFinished(fresh) === false) pass('a fresh run is not finished');
+  else fail('a fresh run reported itself finished');
+
+  const skipped = newRun(DEFAULT_RUN_CONFIG, { skip: ['scan'], now: '2026-08-10T09:00:00.000Z' });
+  if (currentStage(skipped) === 'pipeline') pass('--skip-scan moves the first stage to pipeline');
+  else fail(`skipping scan left the stage at ${currentStage(skipped)}`);
+
+  const allSkipped = newRun(DEFAULT_RUN_CONFIG, { skip: [...STAGES], now: '2026-08-10T09:00:00.000Z' });
+  if (isFinished(allSkipped) && currentStage(allSkipped) === null) {
+    pass('skipping every stage yields a finished run with no current stage');
+  } else {
+    fail('skipping every stage did not finish the run');
+  }
+
+  // An unknown stage name in --skip must not silently become part of the state.
+  const bogusSkip = newRun(DEFAULT_RUN_CONFIG, { skip: ['nonsense'], now: '2026-08-10T09:00:00.000Z' });
+  if (eq(bogusSkip.skipped, [])) pass('an unrecognised stage name is not accepted as skipped');
+  else fail(`unrecognised skip retained: ${JSON.stringify(bogusSkip.skipped)}`);
+
+  // ── normalizeRun ───────────────────────────────────────────────────────────
+  // Run state survives across processes and across career-ops upgrades. An
+  // unreadable run is indistinguishable, to the user, from losing the work it
+  // was tracking, so older/damaged shapes must be repaired rather than rejected.
+  const repaired = normalizeRun({ completed: ['pipeline', 'bogus'], skipped: null }, DEFAULT_RUN_CONFIG);
+  if (eq(repaired.completed, ['pipeline']) && eq(repaired.skipped, [])) {
+    pass('normalizeRun drops unknown stage names and repairs a null skipped list');
+  } else {
+    fail(`normalizeRun produced ${JSON.stringify({ c: repaired.completed, s: repaired.skipped })}`);
+  }
+
+  const fromNothing = normalizeRun(null, DEFAULT_RUN_CONFIG);
+  if (eq(fromNothing.completed, []) && fromNothing.stats && fromNothing.halted_reason === null) {
+    pass('normalizeRun(null) yields a usable empty run instead of throwing');
+  } else {
+    fail('normalizeRun(null) did not produce a usable run');
+  }
+
+  // ── kitCandidates ──────────────────────────────────────────────────────────
+  const rows = [
+    { num: 1, company: 'Acme', role: 'AI Eng', score: '4.4/5', status: 'Evaluated', pdf: '❌', report: '[1](r.md)' },
+    { num: 2, company: 'Beta', role: 'ML Eng', score: '3.0/5', status: 'Evaluated', pdf: '❌', report: '' },
+    { num: 3, company: 'Gamma', role: 'PM', score: '4.9/5', status: 'Evaluated', pdf: '✅', report: '' },
+    { num: 4, company: 'Delta', role: 'MLE', score: '4.5/5', status: 'Applied', pdf: '❌', report: '' },
+    { num: 5, company: 'Eps', role: 'DS', score: '4.7/5', status: 'Rejected', pdf: '❌', report: '' },
+    { num: 6, company: 'Zeta', role: 'RS', score: 'N/A', status: 'Evaluated', pdf: '❌', report: '' },
+    { num: 7, company: 'Eta', role: 'AI', score: '3.8/5', status: 'Evaluated', pdf: '—', report: '' },
+  ];
+  const picked = kitCandidates(rows, 3.8);
+  if (eq(picked.map((c) => c.num), [1, 7])) {
+    pass('kitCandidates selects only Evaluated rows at or above the threshold with no PDF');
+  } else {
+    fail(`kitCandidates picked ${JSON.stringify(picked.map((c) => c.num))}, expected [1, 7]`);
+  }
+
+  // The PDF cell is the idempotency key. Without it a resumed pass rebuilds
+  // every kit it already built, at a Playwright launch each.
+  if (!picked.some((c) => c.num === 3)) pass('a row whose PDF is already ✅ is not a kit candidate');
+  else fail('a row with an existing PDF was selected for rebuilding');
+
+  // Rebuilding a kit for a sent application would replace the PDF the user
+  // actually submitted with a regenerated near-copy.
+  if (!picked.some((c) => c.num === 4)) pass('an Applied row is not a kit candidate');
+  else fail('an already-applied row was selected for a kit');
+
+  if (!picked.some((c) => c.num === 5)) pass('a Rejected row is not a kit candidate');
+  else fail('a rejected row was selected for a kit');
+
+  if (!picked.some((c) => c.num === 6)) pass('a row with a non-numeric score sentinel is not a kit candidate');
+  else fail('an N/A-scored row was selected for a kit');
+
+  // The threshold is inclusive: a role scoring exactly at the bar qualifies, or
+  // the loop could shortlist a posting the kits stage then refuses.
+  if (picked.some((c) => c.num === 7)) pass('a score exactly at the threshold qualifies (inclusive bar)');
+  else fail('a row scoring exactly at the threshold was excluded');
+
+  if (eq(kitCandidates([], 3.8), []) && eq(kitCandidates(undefined, 3.8), [])) {
+    pass('kitCandidates handles an empty or absent row list');
+  } else {
+    fail('kitCandidates did not handle an empty row list');
+  }
+
+  // ── decideNextStage ────────────────────────────────────────────────────────
+  const run = newRun(DEFAULT_RUN_CONFIG, { now: '2026-08-10T09:00:00.000Z' });
+
+  const scanPending = decideNextStage(run, { loop: { done: false, phase: 'scanning' } });
+  if (scanPending.stage === 'scan' && scanPending.action === 'scan') {
+    pass('an unfinished scan loop keeps the run on the scan stage');
+  } else {
+    fail(`scan stage decided ${JSON.stringify(scanPending)}`);
+  }
+  if (scanPending.agent === false) pass('the scan stage is marked zero-token, not an agent stage');
+  else fail('the scan stage was marked as an agent stage');
+
+  const scanDone = decideNextStage(run, { loop: { done: true, qualified: 12 } });
+  if (scanDone.action === 'stage-complete' && /12 qualified/.test(scanDone.reason)) {
+    pass('a finished scan loop reports the scan stage complete, with the qualified count');
+  } else {
+    fail(`finished scan loop decided ${JSON.stringify(scanDone)}`);
+  }
+
+  // Dependency order: with the scan stage still open, a full inbox must NOT pull
+  // the run forward to evaluation.
+  const outOfOrder = decideNextStage(run, { loop: { done: false }, pendingUrls: 9, kitCandidates: picked });
+  if (outOfOrder.stage === 'scan') {
+    pass('a full inbox does not pull the run past an unfinished scan stage');
+  } else {
+    fail(`stage order violated — decided stage ${outOfOrder.stage} while scan was open`);
+  }
+
+  const atPipeline = normalizeRun({ ...run, completed: ['scan'] }, DEFAULT_RUN_CONFIG);
+  const evaluate = decideNextStage(atPipeline, { pendingUrls: 3 });
+  if (evaluate.stage === 'pipeline' && evaluate.action === 'evaluate' && evaluate.pending === 3) {
+    pass('a non-empty inbox puts the run on the pipeline stage with a pending count');
+  } else {
+    fail(`pipeline stage decided ${JSON.stringify(evaluate)}`);
+  }
+  if (evaluate.agent === true && typeof evaluate.instructions === 'string' && evaluate.instructions.length > 0) {
+    pass('the pipeline stage is an agent stage and carries instructions');
+  } else {
+    fail('the pipeline stage did not hand back instructions');
+  }
+
+  const drained = decideNextStage(atPipeline, { pendingUrls: 0 });
+  if (drained.action === 'stage-complete') pass('an empty inbox reports the pipeline stage complete');
+  else fail(`empty inbox decided ${JSON.stringify(drained)}`);
+
+  const atKits = normalizeRun({ ...run, completed: ['scan', 'pipeline'] }, DEFAULT_RUN_CONFIG);
+  const kits = decideNextStage(atKits, { kitCandidates: picked });
+  if (kits.stage === 'kits' && kits.action === 'build-kits' && kits.candidates.length === 2) {
+    pass('outstanding kit candidates put the run on the kits stage');
+  } else {
+    fail(`kits stage decided ${JSON.stringify(kits)}`);
+  }
+  // The kit instruction must route through build-application.mjs, which runs the
+  // liveness check first — going straight to generate-pdf would skip that gate.
+  if (/build-application\.mjs/.test(kits.instructions)) {
+    pass('the kits instruction routes through build-application.mjs (liveness-first)');
+  } else {
+    fail('the kits instruction does not name build-application.mjs');
+  }
+
+  const noKits = decideNextStage(atKits, { kitCandidates: [] });
+  if (noKits.action === 'stage-complete') pass('no candidates reports the kits stage complete');
+  else fail(`empty candidate list decided ${JSON.stringify(noKits)}`);
+
+  const atSync = normalizeRun({ ...run, completed: ['scan', 'pipeline', 'kits'] }, DEFAULT_RUN_CONFIG);
+  const sync = decideNextStage(atSync, {});
+  if (sync.stage === 'sync' && sync.action === 'sync' && sync.agent === false) {
+    pass('the last stage is sync, and it is zero-token');
+  } else {
+    fail(`sync stage decided ${JSON.stringify(sync)}`);
+  }
+
+  const finished = normalizeRun({ ...run, completed: [...STAGES] }, DEFAULT_RUN_CONFIG);
+  const done = decideNextStage(finished, {});
+  if (done.action === 'done' && done.stage === null) pass('a fully completed run decides "done"');
+  else fail(`completed run decided ${JSON.stringify(done)}`);
+
+  // ── Circuit breaker ────────────────────────────────────────────────────────
+  // Without this a stage whose exit condition never clears re-emits the same
+  // instruction on every call, and an agent following `next` in a loop keeps
+  // paying for it.
+  const stuck = normalizeRun(
+    { ...run, completed: ['scan'], attempts: { pipeline: DEFAULT_RUN_CONFIG.maxStageAttempts } },
+    DEFAULT_RUN_CONFIG
+  );
+  const halted = decideNextStage(stuck, { pendingUrls: 5 });
+  if (halted.action === 'halt' && /attempted/.test(halted.reason)) {
+    pass('a stage that exhausts its attempt budget halts instead of looping');
+  } else {
+    fail(`exhausted stage decided ${JSON.stringify(halted)}`);
+  }
+  if (halted.action === 'halt' && /advance|abort/.test(halted.reason)) {
+    pass('the halt reason names the way out (advance or abort)');
+  } else {
+    fail('the halt reason does not tell the user how to recover');
+  }
+
+  // One attempt below the limit must still run — an off-by-one here would cut a
+  // stage short of its last allowed try.
+  const nearlyStuck = normalizeRun(
+    { ...run, completed: ['scan'], attempts: { pipeline: DEFAULT_RUN_CONFIG.maxStageAttempts - 1 } },
+    DEFAULT_RUN_CONFIG
+  );
+  if (decideNextStage(nearlyStuck, { pendingUrls: 5 }).action === 'evaluate') {
+    pass('a stage one attempt below the limit still runs');
+  } else {
+    fail('the attempt budget is off by one — the final allowed attempt was refused');
+  }
+
+  const explicitlyHalted = normalizeRun({ ...run, halted_reason: 'aborted by the user' }, DEFAULT_RUN_CONFIG);
+  const abortDecision = decideNextStage(explicitlyHalted, { loop: { done: false } });
+  if (abortDecision.action === 'halt' && abortDecision.reason === 'aborted by the user') {
+    pass('a recorded halt reason short-circuits every later decision');
+  } else {
+    fail(`halted run decided ${JSON.stringify(abortDecision)}`);
+  }
+
+  // ── summarize / log rendering ──────────────────────────────────────────────
+  const mid = normalizeRun({ ...run, completed: ['scan'], skipped: [], attempts: { pipeline: 2 } }, DEFAULT_RUN_CONFIG);
+  const s = summarize(mid);
+  if (s.stage === 'pipeline' && s.completed === 1 && s.total === 4) {
+    pass('summarize reports the active stage and completion count');
+  } else {
+    fail(`summarize produced ${JSON.stringify({ stage: s.stage, completed: s.completed, total: s.total })}`);
+  }
+  const states = s.stages.map((x) => x.state);
+  if (eq(states, ['done', 'active', 'pending', 'pending'])) {
+    pass('summarize labels each stage done/active/pending');
+  } else {
+    fail(`stage labels were ${JSON.stringify(states)}`);
+  }
+
+  const line = renderRunLogEntry(mid, 'start', 'detail here', '2026-08-10T09:00:00.000Z');
+  if (line.startsWith('- 2026-08-10T09:00:00.000Z · ') && /· start ·/.test(line) && /stage=pipeline/.test(line)) {
+    pass('the run-log line carries timestamp, event and stage');
+  } else {
+    fail(`unexpected run-log line: ${line}`);
+  }
+} catch (e) {
+  fail(`run-core tests crashed: ${e.message}`);
+}

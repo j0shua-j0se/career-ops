@@ -679,10 +679,10 @@ version: 1.0.0
     {{EDUCATION}}
   </div>
 
-  <!-- CERTIFICATIONS -->
+  <!-- PUBLICATIONS -->
   <div class="section">
-    <div class="section-title">{{SECTION_CERTIFICATIONS}}</div>
-    <div class="cert-table">{{CERTIFICATIONS}}</div>
+    <div class="section-title">{{SECTION_PUBLICATIONS}}</div>
+    {{PUBLICATIONS}}
   </div>
 
   <!-- SKILLS -->
@@ -690,6 +690,22 @@ version: 1.0.0
     <div class="section-title">{{SECTION_SKILLS}}</div>
     {{SKILLS}}
   </div>
+
+  <!-- CERTIFICATIONS -->
+  <div class="section">
+    <div class="section-title">{{SECTION_CERTIFICATIONS}}</div>
+    <div class="cert-table">{{CERTIFICATIONS}}</div>
+  </div>
+
+  <!-- Do not remove the END marker below. cv-sections-core.mjs delimits an
+       optional section by "everything up to the next ALL-CAPS marker, or end of
+       input". Without a trailing marker, stripping an empty last section (now
+       Certifications) would run to end of input and swallow the closing tags.
+       Section order here mirrors cv-template.html, which follows cv.md, so
+       generate-pdf.mjs's section-order guard passes without --allow-reorder.
+       Keep the two templates in the same order: a payload rendered through this
+       one must not need a flag the default template does not. -->
+  <!-- END -->
 
 </div>
 </body>

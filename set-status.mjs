@@ -67,6 +67,7 @@
  * tracker remains the source of truth for state. Read by funnel-velocity.mjs.
  */
 
+import { spawnSync } from 'child_process';
 import { readFileSync, existsSync, appendFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -87,11 +88,14 @@ const { OK: EXIT_OK, USAGE: EXIT_USAGE, NOT_FOUND: EXIT_NOT_FOUND, AMBIGUOUS: EX
 const USAGE = `Usage: node set-status.mjs <report#|company> <state> [--note "..."] [--role "..."] [--on YYYY-MM-DD] [--force] [--dry-run] [--json]
        node set-status.mjs --row N <state> [...]        (explicit tracker row ID)
        node set-status.mjs --report N <state> [...]     (explicit report ID)
+       node set-status.mjs --report 3,5,6 <state> [...] (batch: one write per row)
 
   <report#|company>  Row selector: tracker # (exact) or company name (normalized match)
   <state>            Canonical state from templates/states.yml (aliases accepted)
-  --row N            Select by tracker # explicitly (unambiguous; skips the mismatch guard)
-  --report N         Select the row whose Report cell links report #N
+  --row N[,N...]     Select by tracker # explicitly (unambiguous; skips the mismatch guard)
+  --report N[,N...]  Select the row whose Report cell links report #N
+                     Either flag accepts a comma list — "--report 3,5,6" applies the same
+                     state (and --note) to each, one guarded atomic write per row
   --note "..."       Append to the Notes cell ("; "-separated, idempotent)
   --role "..."       Disambiguate when several rows share the company (fuzzy match)
   --on YYYY-MM-DD    Real event date for the status-log entry (defaults to today —
@@ -121,10 +125,11 @@ for (let i = 0; i < rawArgs.length; i++) {
     if (value === undefined || value.startsWith('--')) {
       failUsage(`Missing value for ${a}`);
     }
-    // --row/--report name a row by number; a non-numeric value is a typo, and
-    // silently treating it as "no match" would hide the mistake.
-    if ((a === '--row' || a === '--report') && !/^\d+$/.test(value)) {
-      failUsage(`${a} expects a positive integer, got "${value}"`);
+    // --row/--report name rows by number; a non-numeric value is a typo, and
+    // silently treating it as "no match" would hide the mistake. A comma list
+    // is the batch form ("--report 3,5,6") and fans out below.
+    if ((a === '--row' || a === '--report') && !/^\d+(,\d+)*$/.test(value)) {
+      failUsage(`${a} expects a positive integer or a comma list of them, got "${value}"`);
     }
     flags[VALUE_FLAGS[a]] = value;
     i++;
@@ -213,12 +218,105 @@ if (!newStatus) {
   failWith(EXIT_USAGE, 'invalid-state', `"${stateInput}" is not a canonical state. Valid states: ${valid}`);
 }
 
+// ── batch fan-out (--row 3,5 / --report 3,5,6) ──────────────────
+//
+// Marking five applications Applied meant five invocations, which in practice
+// means a hand-written shell loop that swallows exit codes (PowerShell does not
+// halt a command chain on non-zero) — so a row that failed its guard looked
+// exactly like a row that succeeded.
+//
+// The fan-out re-execs THIS script once per number rather than looping over
+// rows inside the write path. Every child therefore runs the full guard set
+// (#1704 duplicate-#, #1799 report-less rows, #2009 role mismatch) and takes
+// the tracker lock for its own atomic read-modify-write, so a batch is exactly
+// N independent correct writes and cannot be a new class of partial write.
+// Children are forced into --json so their results can be aggregated instead of
+// interleaved; one failure does not stop the rest, because each write already
+// stands alone and stopping halfway is no less partial than continuing.
+const listFlag = (flags.row ?? '').includes(',') ? '--row'
+  : (flags.report ?? '').includes(',') ? '--report'
+    : null;
+
+if (listFlag) {
+  const raw = listFlag === '--row' ? flags.row : flags.report;
+  const nums = [...new Set(raw.split(',').filter(Boolean))];
+  if (flags.role) {
+    failUsage(`--role narrows ONE ambiguous selector; it cannot apply to the ${nums.length} rows in ${listFlag} ${raw}`);
+  }
+
+  const results = [];
+  let firstFailure = 0;
+  for (const num of nums) {
+    // Replace only the list value, so every other flag (--note, --on, --force,
+    // --dry-run) reaches the child exactly as the caller wrote it.
+    const childArgs = [...rawArgs];
+    for (let i = 0; i < childArgs.length - 1; i++) {
+      if (childArgs[i] === listFlag) childArgs[i + 1] = num;
+    }
+    if (!childArgs.includes('--json')) childArgs.push('--json');
+
+    const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...childArgs], { encoding: 'utf-8' });
+    const code = child.status ?? 1;
+    // Both the success payload and every failWith/failUsage payload are the
+    // ONLY thing a --json child puts on stdout (warnings and the ❌ line go to
+    // stderr), so the whole stream parses — success is pretty-printed across
+    // several lines, so it cannot be read a line at a time.
+    let payload;
+    try {
+      payload = JSON.parse(child.stdout.trim());
+    } catch {
+      payload = { error: (child.stderr || child.stdout || 'no output').trim(), code: 'unparseable-output' };
+    }
+    results.push({ selector: `${listFlag} ${num}`, exitCode: code, ...payload });
+    if (code !== EXIT_OK && firstFailure === 0) firstFailure = code;
+  }
+
+  if (flags.json) {
+    console.log(JSON.stringify({ batch: true, status: newStatus, results }));
+  } else {
+    for (const r of results) {
+      if (r.exitCode !== EXIT_OK) console.log(`❌ ${r.selector} — ${r.error ?? r.code ?? 'failed'}`);
+      else if (r.changed === false) console.log(`= ${r.selector} — #${r.num} ${r.company} already ${newStatus}`);
+      else console.log(`✅ ${r.selector} — #${r.num} ${r.company} → ${newStatus}`);
+    }
+    const failed = results.filter(r => r.exitCode !== EXIT_OK).length;
+    console.log(`\n${results.length - failed}/${results.length} updated${failed ? ` · ${failed} failed` : ''}${flags.dryRun ? ' (dry run)' : ''}`);
+  }
+  process.exit(firstFailure);
+}
+
 // ── tracker access ───────────────────────────────────────────────
 
 const APPS_FILE = resolveTrackerPath(CAREER_OPS);
 if (!existsSync(APPS_FILE)) {
   failWith(EXIT_NOT_FOUND, 'no-tracker', `No tracker found at ${APPS_FILE}`);
 }
+
+/**
+ * Reconstruct the command the caller should run instead of the one they ran.
+ *
+ * An error that only names the flag ("pass --role") leaves the caller to
+ * retype the state and every other flag by hand, which is where the wrong
+ * --note gets pasted onto the right row. Echo their own invocation back with
+ * the selector fixed so the remedy is copy-paste.
+ */
+function commandFor(selectorArgs) {
+  const parts = ['node set-status.mjs', selectorArgs, stateInput];
+  if (flags.note) parts.push(`--note "${flags.note}"`);
+  if (flags.on) parts.push(`--on ${flags.on}`);
+  if (flags.force) parts.push('--force');
+  if (flags.dryRun) parts.push('--dry-run');
+  if (flags.json) parts.push('--json');
+  return parts.join(' ');
+}
+
+/** "#12 Siemens — ML Engineer", or an explicit statement that nothing matches. */
+const describeRow = row => (row ? `#${row.num} ${row.company} — ${row.role}` : null);
+
+/** Candidate list with a runnable --role command per line. */
+const listCandidates = (matches, selectorArgs) => matches
+  .map(r => `  ${describeRow(r)}\n    ${commandFor(`${selectorArgs} --role "${r.role}"`)}`)
+  .join('\n');
 
 /**
  * Find the tracker row matching the CLI selector.
@@ -243,9 +341,8 @@ function resolveRow(rows) {
     }
     if (matches.length > 1) {
       const candidates = matches.map(r => ({ num: r.num, company: r.company, role: r.role }));
-      const listing = candidates.map(c => `#${c.num}\t${c.company}\t${c.role}`).join('\n');
       failWith(EXIT_AMBIGUOUS, 'ambiguous',
-        `Report #${num} is linked by ${matches.length} tracker rows — pass --role to disambiguate:\n${listing}`,
+        `Report #${num} is linked by ${matches.length} tracker rows. Run one of:\n${listCandidates(matches, `--report ${num}`)}`,
         { candidates });
     }
     return matches[0];
@@ -271,9 +368,8 @@ function resolveRow(rows) {
       // company gets edited. Refuse to guess; require --role or the company
       // selector instead.
       const candidates = matches.map(r => ({ num: r.num, company: r.company, role: r.role }));
-      const listing = candidates.map(c => `#${c.num}\t${c.company}\t${c.role}`).join('\n');
       failWith(EXIT_AMBIGUOUS, 'ambiguous',
-        `#${num} is a duplicate tracker number shared by ${matches.length} rows (see #1704) — pass --role to disambiguate, or use the company name instead:\n${listing}`,
+        `#${num} is a duplicate tracker number shared by ${matches.length} rows (see #1704). Run one of:\n${listCandidates(matches, `--row ${num}`)}`,
         { candidates });
     }
     return matches[0];
@@ -293,9 +389,8 @@ function resolveRow(rows) {
   }
   if (matches.length > 1) {
     const candidates = matches.map(r => ({ num: r.num, company: r.company, role: r.role }));
-    const listing = candidates.map(c => `#${c.num}\t${c.company}\t${c.role}`).join('\n');
     failWith(EXIT_AMBIGUOUS, 'ambiguous',
-      `Company "${selector}" matches ${matches.length} rows — pass the # or narrow with --role:\n${listing}`,
+      `Company "${selector}" matches ${matches.length} rows. Run one of:\n${matches.map(r => `  ${describeRow(r)}\n    ${commandFor(`--row ${r.num}`)}`).join('\n')}`,
       { candidates });
   }
   return matches[0];
@@ -343,14 +438,26 @@ if (isBareNumericSelector && !flags.force) {
   const reportNums = extractTrackerReportNumbers(target.report);
   const mismatched = reportNums.filter(num => num !== target.num);
   if (mismatched.length > 0) {
+    // Name the DESTINATION of each reading, not just the flag. The number the
+    // caller typed means one of two different applications, and which one is
+    // not deducible from the flag name — an earlier version of this message
+    // suggested `--report ${reportNums[0]}`, which resolves back to this very
+    // row and so disambiguated nothing. What actually differs is `--report
+    // ${num}` (whatever links the number as typed) versus `--row ${num}`.
+    const num = parseInt(selector, 10);
+    const reportRow = rows.find(r => extractTrackerReportNumbers(r.report).includes(num));
+    const reportLine = reportRow
+      ? `  --report ${num} → ${describeRow(reportRow)}\n    ${commandFor(`--report ${num}`)}`
+      : `  --report ${num} → no tracker row links report #${num}`;
     failWith(
       EXIT_AMBIGUOUS,
       'report-number-mismatch',
-      `Tracker #${target.num} points to report ID(s) ${reportNums.map(num => `#${num}`).join(', ')}. ` +
-        `Say which you meant: --row ${target.num} (tracker row) or ` +
-        `--report ${reportNums[0]} (report ID). ` +
+      `"${num}" is ambiguous: tracker row #${target.num} links report ID(s) ${reportNums.map(n => `#${n}`).join(', ')}, ` +
+        'so the two number spaces have diverged here. Say which you meant:\n' +
+        `  --row ${target.num} → ${describeRow(target)}\n    ${commandFor(`--row ${target.num}`)}\n` +
+        `${reportLine}\n` +
         'The company selector also works; --force overrides the check instead of answering it.',
-      { trackerNum: target.num, reportNums },
+      { trackerNum: target.num, reportNums, reportRow: reportRow ? { num: reportRow.num, company: reportRow.company, role: reportRow.role } : null },
     );
   }
 
@@ -368,13 +475,15 @@ if (isBareNumericSelector && !flags.force) {
     const num = parseInt(selector, 10);
     const linkers = rows.filter(r => r !== target && extractTrackerReportNumbers(r.report).includes(num));
     if (linkers.length > 0) {
-      const listing = linkers.map(r => `#${r.num}\t${r.company}\t${r.role}`).join('\n');
+      const listing = linkers.map(r => `    ${describeRow(r)}`).join('\n');
       failWith(
         EXIT_AMBIGUOUS,
         'report-number-ambiguous',
         `"${num}" is ambiguous: tracker row #${num} (${target.company} — ${target.role}) has no report, ` +
           `but report #${num} is linked by:\n${listing}\n` +
-          `Say which you meant: --row ${num} (the row) or --report ${num} (the report).`,
+          'Say which you meant:\n' +
+          `  --row ${num} → ${describeRow(target)}\n    ${commandFor(`--row ${num}`)}\n` +
+          `  --report ${num} → ${describeRow(linkers[0])}\n    ${commandFor(`--report ${num}`)}`,
         { trackerNum: target.num, reportNum: num, linkedBy: linkers.map(r => ({ num: r.num, company: r.company, role: r.role })) },
       );
     }

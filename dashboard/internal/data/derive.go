@@ -29,11 +29,31 @@ var (
 	// "City ST" / "City, ST" with a strict two-letter US state code so prose like
 	// "Sams AI" or "Kerin Colby DONE" can't false-positive.
 	reCityState = regexp.MustCompile(`\b([A-Z][A-Za-z.'-]+(?: [A-Z][A-Za-z.'-]+){0,2}),? (A[KLRZ]|C[AOT]|D[CE]|FL|GA|HI|I[ADLN]|K[SY]|LA|M[ADEINOST]|N[CDEHJMVY]|O[HKR]|PA|RI|S[CD]|T[NX]|UT|V[AT]|W[AIVY])\b`)
-	// International cities, checked only when no US "City, ST" matches, so
+	// A place in the syntactic position the tracker actually writes it in:
+	// immediately before a work-mode word ("Erlangen hybrid", "Nuremberg
+	// on-site"). This identifies a location by its position in the sentence
+	// rather than by membership in a list, so a city nobody thought to enumerate
+	// still resolves — reCityIntl below had no entry for Erlangen, Nuremberg or
+	// Fürth, which between them account for most of the home market, and every
+	// such row rendered a blank Location. Checked before reCityIntl for that
+	// reason. Not (?i): the leading capital is what distinguishes a place name
+	// from prose, so the mode words spell out both cases instead.
+	rePlaceWithMode = regexp.MustCompile(`\b(\p{Lu}[\p{L}.'-]+(?: \p{Lu}[\p{L}.'-]+){0,2})[ ,(]+(?:[Hh]ybrid|[Oo]n-?site|[Ii]n-office|[Rr]emote)\b`)
+	// A conditional cue in the clause immediately preceding a candidate match.
+	// "Verify the remote option is still on offer - if it becomes Munich on-site
+	// the score drops" describes a hypothetical relocation; reading it as the
+	// job's location contradicted the same note's opening words ("Remote within
+	// Germany"). Anchored to the end and stopping at sentence punctuation so
+	// only the SAME clause is inspected — an "if" two sentences earlier is
+	// unrelated to the match.
+	reConditional = regexp.MustCompile(`(?i)\b(if|unless|should|were|in case)\b[^.;!?]*$`)
+	// International cities, checked only when neither of the above matches, so
 	// European/other non-US roles still surface a Location. Cities only (not bare
 	// country names) to avoid prose false-positives like "Portugal eligible" or
 	// "remote in Germany", which describe eligibility, not the job's location.
-	reCityIntl = regexp.MustCompile(`(?i)\b(Porto|Lisbon|London|Berlin|Munich|Hamburg|Frankfurt|Cologne|D(?:ü|u)sseldorf|Stuttgart|Z(?:ü|u)rich|Geneva|Lausanne|Basel|Dublin|Cork|Amsterdam|Rotterdam|Eindhoven|Utrecht|Paris|Lyon|Madrid|Barcelona|Valencia|Stockholm|Gothenburg|Malm(?:ö|o)|Copenhagen|Oslo|Helsinki|Milan|Rome|Turin|Vienna|Brussels|Ghent|Antwerp|Luxembourg|Warsaw|Krak(?:ó|o)w|Wroc(?:ł|l)aw|Tallinn|Riga|Vilnius|Prague|Brno|Budapest|Bucharest|Sofia|Athens|Bengaluru|Bangalore|Singapore|Sydney|Toronto|Vancouver|Tel Aviv|S(?:ã|a)o Paulo)\b`)
+	// This list is a fallback for notes that name a city with no work-mode word
+	// attached; rePlaceWithMode is what keeps an unlisted city from vanishing.
+	reCityIntl = regexp.MustCompile(`(?i)\b(Porto|Lisbon|London|Berlin|Munich|M(?:ü|u)nchen|Hamburg|Frankfurt|Cologne|K(?:ö|o)ln|D(?:ü|u)sseldorf|Stuttgart|Erlangen|N(?:ü|u)rnberg|Nuremberg|F(?:ü|u)rth|Bamberg|Bayreuth|W(?:ü|u)rzburg|Regensburg|Ingolstadt|Augsburg|Darmstadt|Karlsruhe|Mannheim|Heidelberg|Freiburg|Ulm|T(?:ü|u)bingen|Kassel|G(?:ö|o)ttingen|Hannover|Braunschweig|Bremen|Kiel|L(?:ü|u)beck|Rostock|Magdeburg|Leipzig|Dresden|Chemnitz|Jena|Erfurt|Potsdam|Bonn|Aachen|Essen|Dortmund|Bochum|Duisburg|M(?:ü|u)nster|Paderborn|Bielefeld|Wuppertal|Mainz|Wiesbaden|Saarbr(?:ü|u)cken|Koblenz|Trier|Kaiserslautern|Konstanz|Passau|Linz|Graz|Innsbruck|Salzburg|Z(?:ü|u)rich|Geneva|Lausanne|Basel|Bern|Dublin|Cork|Amsterdam|Rotterdam|Eindhoven|Utrecht|Paris|Lyon|Madrid|Barcelona|Valencia|Stockholm|Gothenburg|Malm(?:ö|o)|Copenhagen|Oslo|Helsinki|Milan|Rome|Turin|Vienna|Brussels|Ghent|Antwerp|Luxembourg|Warsaw|Krak(?:ó|o)w|Wroc(?:ł|l)aw|Tallinn|Riga|Vilnius|Prague|Brno|Budapest|Bucharest|Sofia|Athens|Bengaluru|Bangalore|Singapore|Sydney|Toronto|Vancouver|Tel Aviv|S(?:ã|a)o Paulo)\b`)
 	// Individual amounts inside an already-matched span: "140", "210K", "209,983"
 	reMoneyPart = regexp.MustCompile(`(\d[\d,]*(?:\.\d+)?)\s*([KkMmBb]?)`)
 	// Estimate markers: "(est)", "(est;", "market est)" or "market" as its own
@@ -126,24 +146,102 @@ func payCeiling(span string) float64 {
 	return top
 }
 
+// notAPlace holds capitalised words that never name anywhere, but that do turn
+// up in the syntactic position a place would occupy. Two groups:
+//
+//   - Degree adverbs in front of a work-mode word ("Fully Remote", "Mostly
+//     Hybrid"), which rePlaceWithMode would otherwise report as the location.
+//   - Identifier labels in front of a two-letter token, which reCityState reads
+//     as a US state code: "Job ID 516133" parses as the city "Job" in Idaho.
+//     AGENTS.md tells the user to put exactly that in the notes column to
+//     disambiguate two same-title requisitions, so it is the common case, not a
+//     corner one — "Req OR", "Posting IN", "Ref DE" fail the same way.
+//
+// Only the word directly adjacent to the marker is checked, since that is the
+// one the pattern would report.
+var notAPlace = map[string]bool{
+	"Fully": true, "Mostly": true, "Partially": true, "Full": true,
+	"Part": true, "Semi": true, "Flexible": true, "Mainly": true,
+	"Primarily": true, "Largely": true, "Now": true, "All": true,
+	"Some": true, "And": true, "Or": true, "The": true, "Is": true,
+	"Was": true, "Also": true, "Plus": true, "With": true, "Not": true,
+	"Job": true, "Jobs": true, "Req": true, "Requisition": true,
+	"Posting": true, "Post": true, "Ref": true, "Reference": true,
+	"Order": true, "Case": true, "Ticket": true, "Vacancy": true,
+	"Position": true, "Role": true, "Application": true, "Employee": true,
+}
+
+// isPlaceLike rejects a capture whose word adjacent to the marker is a known
+// non-place. Used as the accept filter for the reCityState and rePlaceWithMode
+// tiers, both of which capture the candidate place in group 1.
+func isPlaceLike(groups []string) bool {
+	fields := strings.Fields(groups[1])
+	return len(fields) > 0 && !notAPlace[fields[len(fields)-1]]
+}
+
+// findUnconditional returns the submatches of the first match of re in s that is
+// NOT sitting inside a conditional clause and that accept approves, or nil if
+// there is no such match. Group 0 is the whole match, mirroring
+// FindStringSubmatch. A nil accept takes every match.
+//
+// The conditional skip exists because a tracker note records both what the job
+// is and what would change the assessment, in the same sentence stream. A
+// pattern that takes the first match anywhere cannot tell the two apart.
+func findUnconditional(re *regexp.Regexp, s string, accept func([]string) bool) []string {
+	for _, idx := range re.FindAllStringSubmatchIndex(s, -1) {
+		if reConditional.MatchString(s[:idx[0]]) {
+			continue
+		}
+		groups := make([]string, len(idx)/2)
+		for g := range groups {
+			if idx[2*g] >= 0 {
+				groups[g] = strings.TrimSpace(s[idx[2*g]:idx[2*g+1]])
+			}
+		}
+		if accept != nil && !accept(groups) {
+			continue
+		}
+		return groups
+	}
+	return nil
+}
+
+// deriveLocation resolves the Location column from the tracker's free text.
+//
+// Tiers run most-specific first, and each tier checks Notes before Role — some
+// rows carry the city only in the role title ("... — Charlotte, NC"):
+//
+//  1. US "City, ST" — a near-unambiguous shape, so it wins outright, once
+//     notAPlace has ruled out the label phrases that mimic it ("Job ID").
+//  2. A place immediately before a work-mode word ("Erlangen hybrid"). Position
+//     in the sentence, not a list, so an unlisted city still resolves.
+//  3. The curated international city list, for notes that name a city with no
+//     work-mode word attached.
+func deriveLocation(app *model.CareerApplication) string {
+	for _, text := range []string{app.Notes, app.Role} {
+		if m := findUnconditional(reCityState, text, isPlaceLike); m != nil {
+			return m[1] + ", " + m[2]
+		}
+	}
+	for _, text := range []string{app.Notes, app.Role} {
+		if m := findUnconditional(rePlaceWithMode, text, isPlaceLike); m != nil {
+			return m[1]
+		}
+	}
+	for _, text := range []string{app.Notes, app.Role} {
+		if m := findUnconditional(reCityIntl, text, nil); m != nil {
+			return m[0]
+		}
+	}
+	return ""
+}
+
 // deriveNoteFields populates Location, WorkMode, PayRange, PaySource and
 // LastContact from the application's Notes (plus Role for work-mode keywords).
 func deriveNoteFields(app *model.CareerApplication) {
 	lower := strings.ToLower(app.Role + " " + app.Notes)
 
-	// Location: first "City, ST" in the notes, falling back to the role title
-	// (some tracker rows carry the city there, e.g. "... — Charlotte, NC"). When
-	// no US "City, ST" is present, fall back to an international city/country so
-	// European and other non-US roles still show a Location.
-	if m := reCityState.FindStringSubmatch(app.Notes); m != nil {
-		app.Location = m[1] + ", " + m[2]
-	} else if m := reCityState.FindStringSubmatch(app.Role); m != nil {
-		app.Location = m[1] + ", " + m[2]
-	} else if m := reCityIntl.FindString(app.Notes); m != "" {
-		app.Location = m
-	} else if m := reCityIntl.FindString(app.Role); m != "" {
-		app.Location = m
-	}
+	app.Location = deriveLocation(app)
 
 	// Work mode: hybrid beats remote ("Remote/hybrid" means office days exist);
 	// "remote-first" / "remote + flex" is softer than fully remote;

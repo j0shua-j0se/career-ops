@@ -307,6 +307,47 @@
     line-height: 1.5;
   }
 
+  /* === PUBLICATIONS === */
+  .pub-item {
+    margin-bottom: 10px;
+  }
+
+  .pub-title {
+    font-weight: 600;
+    font-size: var(--font-size);
+    color: #333;
+  }
+
+  .pub-authors {
+    font-size: 10px;
+    color: #555;
+    margin-top: 1px;
+  }
+
+  .pub-venue {
+    font-size: 10px;
+    color: hsl(270, 70%, 45%);
+    font-weight: 500;
+    margin-top: 1px;
+  }
+
+  .pub-desc {
+    font-size: 10px;
+    color: #666;
+    margin-top: 2px;
+    line-height: 1.5;
+  }
+
+  .pub-link {
+    font-size: 9.5px;
+    margin-top: 2px;
+  }
+
+  .pub-link a {
+    color: #777;
+    text-decoration: none;
+  }
+
   /* === CERTIFICATIONS === */
   .cert-table {
     display: table;
@@ -571,10 +612,10 @@
     {{EDUCATION}}
   </div>
 
-  <!-- CERTIFICATIONS -->
+  <!-- PUBLICATIONS -->
   <div class="section">
-    <div class="section-title">{{SECTION_CERTIFICATIONS}}</div>
-    <div class="cert-table">{{CERTIFICATIONS}}</div>
+    <div class="section-title">{{SECTION_PUBLICATIONS}}</div>
+    {{PUBLICATIONS}}
   </div>
 
   <!-- SKILLS -->
@@ -583,6 +624,19 @@
     {{SKILLS}}
   </div>
 
+  <!-- CERTIFICATIONS -->
+  <div class="section">
+    <div class="section-title">{{SECTION_CERTIFICATIONS}}</div>
+    <div class="cert-table">{{CERTIFICATIONS}}</div>
+  </div>
+
+  <!-- Do not remove the END marker below. cv-sections-core.mjs delimits an
+       optional section by "everything up to the next ALL-CAPS marker, or end of
+       input". Without a trailing marker, stripping an empty last section (now
+       Certifications) would run to end of input and swallow the closing tags.
+       Section order here follows cv.md so generate-pdf.mjs's section-order guard
+       passes without --allow-reorder. -->
+  <!-- END -->
 </div>
 </body>
 </html>

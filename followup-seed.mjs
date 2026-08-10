@@ -29,7 +29,14 @@
  *
  * Usage:
  *   node followup-seed.mjs <appNum> [--date YYYY-MM-DD] [--force] [--dry-run] [--json]
+ *   node followup-seed.mjs 3,5,6 [--date YYYY-MM-DD] [--force] [--dry-run] [--json]
  *   node followup-seed.mjs --backfill [--dry-run] [--json]
+ *
+ * The comma list is for the ordinary case of marking several applications
+ * Applied at once. It seeds only the rows named (unlike --backfill, which
+ * sweeps the whole tracker) in a single lock and a single write, and every
+ * named row that is missing or not Applied is reported rather than skipped
+ * silently — the exit code is non-zero when any of them was.
  *
  * Exit codes:
  *   0 success or idempotent no-op
@@ -470,71 +477,44 @@ export async function seedFollowup(appNum, options = {}) {
   }
 }
 
-// --- Core: backfill all Applied rows ---------------------------------------
+// --- Core: seed a set of rows in one lock, one write ------------------------
 
 /**
- * Seed every tracker row whose status normalizes to `applied` that doesn't
- * already have a pin or follow-up table row. Non-Applied rows are skipped
- * silently. Idempotent — re-running seeds nothing new.
+ * Seed an already-chosen set of tracker rows: one lock, one atomic write, one
+ * pin per eligible row. Shared by `--backfill` (the whole tracker) and by an
+ * explicit appNum list, which differ only in how a non-Applied row is treated.
  *
- * @param {object} [options] - Same shape as seedFollowup's options (minus `date`/appNum).
- * @returns {Promise<{seeded: object[], skipped: object[]}>}
+ * `strict` is that difference. A sweep across the tracker never sees a
+ * non-Applied row (it filters first), but a row the caller NAMED and that is
+ * not Applied must be reported rather than silently dropped — the caller
+ * asserted it was applied, and the tracker disagrees.
+ *
+ * @param {object[]} rows - Tracker rows to seed, already selected.
+ * @param {object} [options] - Same shape as seedFollowup's options.
+ * @param {{strict?: boolean}} [mode]
+ * @returns {Promise<{seeded: object[], skipped: object[], dryRun?: boolean}>}
  */
-export async function seedBackfill(options = {}) {
-  const trackerPath = resolveTrackerPath(options.trackerPath);
+async function seedRows(rows, options = {}, { strict = false } = {}) {
   const followupsPath = resolveFollowupsPath(options.followupsPath);
-
-  if (!existsSync(trackerPath)) {
-    throw new SeedError('ROW_NOT_FOUND', `Tracker not found at ${trackerPath}`);
-  }
-  const rows = readTrackerRows(trackerPath);
-  const appliedRows = rows.filter(r => normalizeStatus(r.status) === 'applied');
   const cadence = resolveCadenceConfig({ profilePath: options.profilePath });
   const setDate = todayStr();
 
   function planFor(row) {
-    const appliedDate = resolveAppliedDate(row, null);
+    const appliedDate = resolveAppliedDate(row, options.date ?? null);
     const nextDate = addDays(parseDate(appliedDate), cadence.applied_first);
     return { appNum: row.num, pin: formatPinLine(row.num, nextDate, setDate), nextDate, appliedDate, setDate };
   }
 
-  if (options.dryRun) {
-    const existingContent = existsSync(followupsPath) ? readFileSync(followupsPath, 'utf-8') : '';
-    const seeded = [];
-    const skipped = [];
-    for (const row of appliedRows) {
-      if (isAlreadySeeded(existingContent, row.num) && !options.force) {
-        skipped.push({ appNum: row.num, reason: 'already-seeded' });
-        continue;
-      }
-      try {
-        seeded.push({ ...planFor(row), dryRun: true });
-      } catch (err) {
-        if (err instanceof SeedError && err.code === 'INVALID_DATE') {
-          skipped.push({ appNum: row.num, reason: 'invalid-notes-date', detail: err.message });
-        } else {
-          throw err;
-        }
-      }
-    }
-    return { seeded, skipped, dryRun: true };
-  }
-
-  const lockDir = resolveLockDir(options.lockDir, followupsPath);
-  const lock = await acquireFollowupsLock(lockDir, followupsPath, {
-    timeoutMs: options.lockTimeoutMs ?? envInt('CAREER_OPS_FOLLOWUPS_LOCK_TIMEOUT_MS', 60_000),
-    retryMs: options.lockRetryMs ?? envInt('CAREER_OPS_FOLLOWUPS_LOCK_RETRY_MS', 75),
-    staleMs: options.lockStaleMs ?? envInt('CAREER_OPS_FOLLOWUPS_LOCK_STALE_MS', 10 * 60_000),
-  });
-
-  try {
-    const existingContent = existsSync(followupsPath) ? readFileSync(followupsPath, 'utf-8') : null;
-    const checkContent = existingContent ?? '';
+  function collect(existingContent) {
     const seeded = [];
     const skipped = [];
     const newPins = [];
-    for (const row of appliedRows) {
-      if (isAlreadySeeded(checkContent, row.num) && !options.force) {
+    for (const row of rows) {
+      if (strict && normalizeStatus(row.status) !== 'applied' && !options.force) {
+        skipped.push({ appNum: row.num, reason: 'not-applied', detail: `status: "${String(row.status).trim()}"` });
+        continue;
+      }
+      if (isAlreadySeeded(existingContent, row.num) && !options.force) {
         skipped.push({ appNum: row.num, reason: 'already-seeded' });
         continue;
       }
@@ -551,6 +531,25 @@ export async function seedBackfill(options = {}) {
       seeded.push(plan);
       newPins.push(plan.pin);
     }
+    return { seeded, skipped, newPins };
+  }
+
+  if (options.dryRun) {
+    const existingContent = existsSync(followupsPath) ? readFileSync(followupsPath, 'utf-8') : '';
+    const { seeded, skipped } = collect(existingContent);
+    return { seeded: seeded.map(s => ({ ...s, dryRun: true })), skipped, dryRun: true };
+  }
+
+  const lockDir = resolveLockDir(options.lockDir, followupsPath);
+  const lock = await acquireFollowupsLock(lockDir, followupsPath, {
+    timeoutMs: options.lockTimeoutMs ?? envInt('CAREER_OPS_FOLLOWUPS_LOCK_TIMEOUT_MS', 60_000),
+    retryMs: options.lockRetryMs ?? envInt('CAREER_OPS_FOLLOWUPS_LOCK_RETRY_MS', 75),
+    staleMs: options.lockStaleMs ?? envInt('CAREER_OPS_FOLLOWUPS_LOCK_STALE_MS', 10 * 60_000),
+  });
+
+  try {
+    const existingContent = existsSync(followupsPath) ? readFileSync(followupsPath, 'utf-8') : null;
+    const { seeded, skipped, newPins } = collect(existingContent ?? '');
 
     if (newPins.length > 0) {
       mkdirSync(dirname(followupsPath), { recursive: true });
@@ -563,10 +562,63 @@ export async function seedBackfill(options = {}) {
   }
 }
 
+/**
+ * Seed every tracker row whose status normalizes to `applied` that doesn't
+ * already have a pin or follow-up table row. Non-Applied rows are skipped
+ * silently. Idempotent — re-running seeds nothing new.
+ *
+ * @param {object} [options] - Same shape as seedFollowup's options (minus `date`/appNum).
+ * @returns {Promise<{seeded: object[], skipped: object[]}>}
+ */
+export async function seedBackfill(options = {}) {
+  const trackerPath = resolveTrackerPath(options.trackerPath);
+  if (!existsSync(trackerPath)) {
+    throw new SeedError('ROW_NOT_FOUND', `Tracker not found at ${trackerPath}`);
+  }
+  const appliedRows = readTrackerRows(trackerPath).filter(r => normalizeStatus(r.status) === 'applied');
+  return seedRows(appliedRows, options, { strict: false });
+}
+
+/**
+ * Seed an explicit list of applications (`node followup-seed.mjs 3,5,6`).
+ *
+ * Marking a batch Applied previously meant one invocation per row, i.e. a
+ * shell loop — and every pin was a separate read-check-append under its own
+ * lock. This is one lock and one write for the whole list, and unlike
+ * `--backfill` it does not touch rows the caller did not name.
+ *
+ * A named row that is missing or not Applied is REPORTED, never dropped: the
+ * caller asserted something about it, so silence would be the wrong answer.
+ *
+ * @param {number[]} appNums
+ * @param {object} [options] - Same shape as seedFollowup's options.
+ * @returns {Promise<{seeded: object[], skipped: object[], dryRun?: boolean}>}
+ */
+export async function seedMany(appNums, options = {}) {
+  if (options.date != null && !isValidCalendarDate(options.date)) {
+    throw new SeedError('INVALID_DATE', `--date must be a real calendar date in YYYY-MM-DD form: ${options.date}`);
+  }
+  const trackerPath = resolveTrackerPath(options.trackerPath);
+  if (!existsSync(trackerPath)) {
+    throw new SeedError('ROW_NOT_FOUND', `Tracker not found at ${trackerPath}`);
+  }
+  const all = readTrackerRows(trackerPath);
+  const rows = [];
+  const missing = [];
+  for (const appNum of appNums) {
+    const row = all.find(r => r.num === appNum);
+    if (row) rows.push(row);
+    else missing.push({ appNum, reason: 'not-found' });
+  }
+
+  const result = await seedRows(rows, options, { strict: true });
+  return { ...result, skipped: [...missing, ...result.skipped] };
+}
+
 // --- CLI ---------------------------------------------------------------
 
 function parseCliArgs(argv) {
-  const opts = { force: false, dryRun: false, json: false, backfill: false, date: null, appNum: null };
+  const opts = { force: false, dryRun: false, json: false, backfill: false, date: null, appNum: null, appNums: null };
   const positionals = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -598,14 +650,22 @@ function parseCliArgs(argv) {
     }
   } else {
     if (positionals.length !== 1) {
-      throw new SeedError('USAGE', 'Usage: node followup-seed.mjs <appNum> [--date YYYY-MM-DD] [--force] [--dry-run] [--json]');
+      throw new SeedError('USAGE', 'Usage: node followup-seed.mjs <appNum[,appNum...]> [--date YYYY-MM-DD] [--force] [--dry-run] [--json]');
     }
     const raw = positionals[0];
-    const n = parseInt(raw, 10);
-    if (isNaN(n) || n <= 0 || String(n) !== raw.trim()) {
-      throw new SeedError('USAGE', `Invalid appNum: ${raw}`);
+    const toNum = part => {
+      const n = parseInt(part, 10);
+      if (isNaN(n) || n <= 0 || String(n) !== part.trim()) {
+        throw new SeedError('USAGE', `Invalid appNum: ${part}`);
+      }
+      return n;
+    };
+    if (raw.includes(',')) {
+      // Deduped so a pasted list with a repeat seeds one pin, not two.
+      opts.appNums = [...new Set(raw.split(',').map(toNum))];
+    } else {
+      opts.appNum = toNum(raw);
     }
-    opts.appNum = n;
   }
 
   return opts;
@@ -638,15 +698,27 @@ function reportSingle(result, json) {
   }
 }
 
-function reportBackfill(result, json) {
+function reportBackfill(result, json, label = 'Backfill') {
   if (json) {
     console.log(JSON.stringify(result));
     return;
   }
   const dryTag = result.dryRun ? ' [dry-run]' : '';
-  console.log(`✅ Backfill${dryTag}: seeded ${result.seeded.length}, skipped ${result.skipped.length}`);
+  console.log(`✅ ${label}${dryTag}: seeded ${result.seeded.length}, skipped ${result.skipped.length}`);
   for (const s of result.seeded) console.log(`  + #${s.appNum}: next ${s.nextDate}`);
-  for (const s of result.skipped) console.log(`  - #${s.appNum}: ${s.reason}`);
+  for (const s of result.skipped) console.log(`  - #${s.appNum}: ${s.reason}${s.detail ? ` (${s.detail})` : ''}`);
+}
+
+/**
+ * Exit code for an explicit list. `already-seeded` is a success (the single-row
+ * path exits 0 for it too — the pin exists, which is what was asked for), but a
+ * row that was named and could not be seeded must not exit 0: a shell loop
+ * swallowing exactly this is why the list form exists.
+ */
+function exitCodeForList(result) {
+  if (result.skipped.some(s => s.reason === 'not-found')) return EXIT_CODES.ROW_NOT_FOUND;
+  if (result.skipped.some(s => s.reason === 'not-applied' || s.reason === 'invalid-notes-date')) return 1;
+  return 0;
 }
 
 async function main() {
@@ -664,6 +736,10 @@ async function main() {
     if (opts.backfill) {
       const result = await seedBackfill({ dryRun: opts.dryRun, force: opts.force });
       reportBackfill(result, opts.json);
+    } else if (opts.appNums) {
+      const result = await seedMany(opts.appNums, { date: opts.date, force: opts.force, dryRun: opts.dryRun });
+      reportBackfill(result, opts.json, `List of ${opts.appNums.length}`);
+      process.exit(exitCodeForList(result));
     } else {
       const result = await seedFollowup(opts.appNum, { date: opts.date, force: opts.force, dryRun: opts.dryRun });
       reportSingle(result, opts.json);

@@ -67,6 +67,7 @@ AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluat
 |------|----------|
 | `data/applications.md` | Application tracker |
 | `data/pipeline.md` | Inbox of pending URLs |
+| `data/run-state.json` | End-to-end pass state, written only by `run-all.mjs` |
 | `data/scan-history.tsv` | Scanner dedup history |
 | `data/scan-runs.tsv` | Per-run scan counters (appended by `scan.mjs`, read by `stats.mjs`) |
 | `data/follow-ups.md` | Follow-up history tracker |
@@ -86,16 +87,18 @@ AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluat
 | `scan-interamt.mjs` | Playwright browser scanner for Interamt.de (German public sector portal — Apache Wicket, no REST API) |
 | `scan-loop.mjs` / `loop-core.mjs` | The scan loop: `/career-ops scan` keeps widening the search until it has 10 NEW postings scoring >= `loop.min_score` (3.8) or a budget stops it. `loop-core.mjs` is the pure control law (no I/O, unit-tested); `scan-loop.mjs` is the only thing that touches disk. State in `data/loop-state.json`, audit trail in `data/loop-run-log.md`, human review gate in `data/loop-shortlist.md`. See `LOOP.md` |
 | `gmail-sweep.mjs` | Non-interactive reply sweep run as Step 0 of `/career-ops pipeline`: `query` scopes a Gmail search to companies actually in flight, `plan` classifies + matches fetched messages, `apply` writes the high-confidence, forward-only transitions through `set-status.mjs`. Never touches the mailbox itself and never sends anything |
+| `run-all.mjs` / `run-core.mjs` | **The end-to-end pass** behind `/career-ops run`: deep search -> evaluate the inbox -> a tailored CV **and** cover letter per qualifying row -> reconcile the tracker/PDF index/follow-ups/dashboard. `run-core.mjs` is the pure stage control law (no I/O, unit-tested); `run-all.mjs` is the only thing that touches disk. Durable state in `data/run-state.json` so a crashed pass resumes where it stopped; audit trail in `data/run-log.md`. Stages 1 and 4 are zero-token; 2 and 3 are handed back to the agent with an explicit contract. Never submits anything. See `modes/run.md` |
 | `LOOP.md` | Loop design: budgets, escalation ladder, dedup, the L1/L2/L3 autonomy ladder, and what the loop is not allowed to do |
 | `check-liveness.mjs` / `liveness-core.mjs` | Job posting liveness checker + shared logic (expired signals win over generic Apply text) |
-| `set-status.mjs` | Canonical tracker-row update: `node set-status.mjs <report#\|company> <State> [--note] [--force]` — strict states.yml validation, report-link mismatch guard, shared lock, atomic write |
+| `set-status.mjs` | Canonical tracker-row update: `node set-status.mjs <report#\|company> <State> [--note] [--force]` — strict states.yml validation, report-link mismatch guard, shared lock, atomic write. `--row`/`--report` accept a comma list (`--report 3,5,6`) and fan out to one guarded atomic write per row |
 | `invite-match.mjs` | Fuzzy-match a pasted interview invite (company, date, req ID) against the tracker, ranking candidates when a company has multiple entries (JSON or `--summary`) |
 | `paste-reply.mjs` | Manual/no-Gmail input into reply-watch classification — normalizes a pasted/file email (subject/from/body) and appends to `data/reply-candidates.json`; never overwrites entries, never classifies, never touches the tracker |
 | `analyze-patterns.mjs` | Pattern analysis incl. per-ATS-vendor advance rate (JSON) |
 | `upskill.mjs` | Weighted skill-gap map from tracked reports; known skills from `cv.md`/`config/profile.yml` excluded (JSON) |
 | `stats.mjs` | Lifetime pipeline stats: tracker roll-up, canonical `ever*` funnel, scan totals, portal coverage, follow-up compliance, scan-run trends (JSON or `--summary`) |
 | `followup-cadence.mjs` | Follow-up cadence calculator (JSON) |
-| `followup-seed.mjs` | Seeds `data/follow-ups.md` with a pinned first follow-up date when a row turns Applied (JSON) |
+| `followup-seed.mjs` | Seeds `data/follow-ups.md` with a pinned first follow-up date when a row turns Applied. Takes one appNum, a comma list (`3,5,6` — only those rows, one lock, one write), or `--backfill` for the whole tracker (JSON) |
+| `build-application.mjs` | One command per application: liveness check → `build-cv-html.mjs` → `verify-cv-facts.mjs` → `generate-pdf.mjs` → `generate-cover-letter.mjs`, aborting on the first failure. The liveness check runs FIRST and logs to `data/liveness-log.tsv`, so a closed posting costs one HTTP round trip instead of two PDFs. Never submits anything |
 | `detect-reposts.mjs` | Flags roles re-listed 2+ times in 90 days from `scan-history.tsv` (JSON or `--summary`) |
 | `check-table-freshness.mjs` | Staleness validator for jurisdiction data tables — flags `expired` rows (past `next_effective` without re-verification, exit 1) and `review-due` rows (`as_of` older than 12 months, soft); discovers any `templates/*.yml` with `as_of` rows automatically (JSON or `--summary` table output) |
 | `process-quality.mjs` | Per-company recruiting-friction rate from `[process-friction]` tags in `data/active-interviews.md` Notes (JSON or `--summary`) |
@@ -263,6 +266,7 @@ Two separate axes:
 
 | If the user... | Mode |
 |----------------|------|
+| Wants the whole arc in one command (search -> evaluate -> CVs + letters -> dashboard) | `run` — the end-to-end pass; driver-led and resumable (`run-all.mjs`) |
 | Pastes JD or URL | auto-pipeline (evaluate + report + PDF + tracker) |
 | Asks to evaluate offer | `oferta` |
 | Asks to compare offers | `ofertas` |
@@ -352,6 +356,7 @@ Headless worker command per CLI:
 | Qwen | `qwen -p "prompt"` |
 | Antigravity CLI | `agy -p "prompt"` |
 | Grok Build CLI | `grok -p "prompt"` |
+| Prime Agent | `prime-agent --mode json "prompt"` (macOS/Linux only — the installer has no Windows path) |
 
 **Parallel fan-outs — reserve report numbers first.** Before spawning N parallel evaluators, reserve the range: `node reserve-report-num.mjs --count N` (prints e.g. `042-049`); hand each worker its own number. The allocator treats report files, sentinels, tracker row IDs, and tracker report links as occupied; each slot claim is individually atomic (on collision, claimed slots are released and the reservation restarts past it — permanent, harmless gaps). Release with `node reserve-report-num.mjs --release 042-049` when done; stale sentinels are GC'd after 4h, so reserve right before spawning. Never let parallel workers compute `max+1` themselves — that is the #749 race.
 
@@ -386,7 +391,7 @@ One TSV file per evaluation at `batch/tracker-additions/{num}-{company-slug}.tsv
 ### Pipeline Integrity
 
 1. **NEVER edit applications.md to ADD new entries** -- write TSV in `batch/tracker-additions/` and let `merge-tracker.mjs` merge.
-2. **UPDATE status/notes of existing entries via `node set-status.mjs <report#|company> <State> [--note]`** — the canonical (locked, validated, atomic) write path. Do not hand-edit the table.
+2. **UPDATE status/notes of existing entries via `node set-status.mjs <report#|company> <State> [--note]`** — the canonical (locked, validated, atomic) write path. Do not hand-edit the table, and do not write a shell loop over it: `--row`/`--report` take a comma list (`--report 3,5,6 Applied --note "..."`), which reports per-row results and a non-zero exit code that a loop would swallow.
 3. All reports MUST include `**URL:**` in the header (between Score and PDF), and `**Legitimacy:** {tier}` (see Block G in `modes/oferta.md`).
 4. All statuses MUST be canonical (see `templates/states.yml`).
 5. Health check: `node verify-pipeline.mjs` · Normalize statuses: `node normalize-statuses.mjs` · Dedup: `node dedup-tracker.mjs`

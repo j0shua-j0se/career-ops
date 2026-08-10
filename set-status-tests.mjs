@@ -1017,5 +1017,111 @@ const TRACKER_REPORT_MISMATCH = `# Applications Tracker
   });
 }
 
+// ── batch selectors: --row/--report accept a comma list ─────────
+//
+// The fan-out re-execs this script once per number, so the contract to pin
+// down is that a batch is exactly N ordinary guarded writes: every row lands,
+// a failure in the middle does not swallow the rest, the exit code still
+// reports it, and --dry-run still writes nothing.
+{
+  const TRACKER_BATCH = `# Applications Tracker
+
+| # | Date | Company | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|------|-------|--------|-----|--------|-------|
+| 1 | 2026-06-01 | Acme | Backend Engineer | 4.2/5 | Evaluated | ✅ | [1](../reports/001-acme-2026-06-01.md) | — |
+| 2 | 2026-06-02 | Globex | Platform Engineer | 4.0/5 | Evaluated | ✅ | [2](../reports/002-globex-2026-06-02.md) | — |
+| 3 | 2026-06-03 | Initech | Data Engineer | 3.9/5 | Evaluated | ❌ | [3](../reports/003-initech-2026-06-03.md) | — |
+`;
+  const boxed = fn => {
+    const sandbox = makeSandbox(TRACKER_BATCH);
+    try { fn(sandbox); } finally { rmSync(sandbox.dir, { recursive: true, force: true }); }
+  };
+
+  boxed(sandbox => {
+    const r = runSetStatus(['--report', '1,3', 'Applied', '--note', 'batch send'], sandbox);
+    const t = readTracker(sandbox);
+    const applied = /\| 1 \|[^\n]*\| Applied \|/.test(t) && /\| 3 \|[^\n]*\| Applied \|/.test(t);
+    const untouched = /\| 2 \|[^\n]*\| Evaluated \|/.test(t);
+    if (r.code === 0 && applied && untouched && /batch send/.test(t)) {
+      pass('batch: --report 1,3 updates both rows and leaves #2 alone');
+    } else {
+      fail(`batch: --report 1,3 → code=${r.code} applied=${applied} untouched=${untouched}\n${r.stdout}${r.stderr}`);
+    }
+  });
+
+  boxed(sandbox => {
+    const r = runSetStatus(['--row', '2,3', 'Rejected', '--json'], sandbox);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch {}
+    const companies = (parsed?.results ?? []).map(x => x.company);
+    if (r.code === 0 && parsed?.batch === true && companies.join(',') === 'Globex,Initech') {
+      pass('batch: --json emits one result per selector, in order');
+    } else {
+      fail(`batch: --json → code=${r.code} json=${r.stdout}${r.stderr}`);
+    }
+  });
+
+  // A bad number in the middle must not silently abort the rest — the failure
+  // mode of the hand-written shell loop this replaces.
+  boxed(sandbox => {
+    const r = runSetStatus(['--row', '1,999,3', 'Applied', '--json'], sandbox);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch {}
+    const t = readTracker(sandbox);
+    const bothEnds = /\| 1 \|[^\n]*\| Applied \|/.test(t) && /\| 3 \|[^\n]*\| Applied \|/.test(t);
+    if (r.code === 2 && bothEnds && parsed?.results?.[1]?.exitCode === 2) {
+      pass('batch: a not-found row fails loudly without stopping the others');
+    } else {
+      fail(`batch: partial failure → code=${r.code} bothEnds=${bothEnds}\n${r.stdout}${r.stderr}`);
+    }
+  });
+
+  boxed(sandbox => {
+    const before = readTracker(sandbox);
+    const r = runSetStatus(['--report', '1,2', 'Applied', '--dry-run'], sandbox);
+    if (r.code === 0 && readTracker(sandbox) === before) {
+      pass('batch: --dry-run reaches every child and writes nothing');
+    } else {
+      fail(`batch: --dry-run → code=${r.code} changed=${readTracker(sandbox) !== before}`);
+    }
+  });
+
+  // --role breaks a tie for ONE selector; applied across a list it would be
+  // asserting the same title for every row, which is never what was meant.
+  boxed(sandbox => {
+    const before = readTracker(sandbox);
+    const r = runSetStatus(['--report', '1,2', 'Applied', '--role', 'Backend Engineer'], sandbox);
+    if (r.code === 1 && readTracker(sandbox) === before) {
+      pass('batch: --role with a comma list is rejected before any write');
+    } else {
+      fail(`batch: --role + list → code=${r.code} changed=${readTracker(sandbox) !== before}`);
+    }
+  });
+
+  boxed(sandbox => {
+    const before = readTracker(sandbox);
+    const r = runSetStatus(['--report', '1,,2', 'Applied'], sandbox);
+    const r2 = runSetStatus(['--report', '1,x', 'Applied'], sandbox);
+    if (r.code === 1 && r2.code === 1 && readTracker(sandbox) === before) {
+      pass('batch: a malformed comma list is a usage error, not a partial run');
+    } else {
+      fail(`batch: malformed list → codes=${r.code},${r2.code} changed=${readTracker(sandbox) !== before}`);
+    }
+  });
+
+  // Deduped, so a pasted list with a repeat does not append the note twice.
+  boxed(sandbox => {
+    const r = runSetStatus(['--report', '2,2', 'Applied', '--note', 'once', '--json'], sandbox);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch {}
+    const noteCount = (readTracker(sandbox).match(/once/g) ?? []).length;
+    if (r.code === 0 && parsed?.results?.length === 1 && noteCount === 1) {
+      pass('batch: a repeated number runs once');
+    } else {
+      fail(`batch: dedup → code=${r.code} results=${parsed?.results?.length} notes=${noteCount}`);
+    }
+  });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

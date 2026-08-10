@@ -16,7 +16,9 @@ data/parser-output/**
 !data/parser-output/**/
 !data/parser-output/.gitkeep
 !data/parser-output/**/.gitkeep
-reports/*.md
+# `reports/*.md` alone stops at the top level: a subdirectory such as
+# reports/scan-digests/ was left tracked, which is user-layer job-search data.
+reports/**/*.md
 !reports/.gitkeep
 output/*
 !output/.gitkeep

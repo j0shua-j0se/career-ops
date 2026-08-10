@@ -257,6 +257,106 @@ func TestDeriveNoteFields(t *testing.T) {
 			payRange: "",
 			last:     "2026-04-11",
 		},
+		{
+			// Erlangen is not in reCityIntl and deliberately stays out of it:
+			// the work-mode word behind it is what identifies it as a place.
+			name: "unlisted city resolves from the work-mode word after it",
+			app: model.CareerApplication{
+				Date:  "2026-08-05",
+				Notes: "Erlangen hybrid, 15-20h/w, English only. Gaps: embedded AI + Docker.",
+			},
+			location: "Erlangen",
+			workMode: "Hybrid",
+			last:     "2026-08-05",
+		},
+		{
+			name: "city is found in a later sentence, not just the first",
+			app: model.CareerApplication{
+				Date:  "2026-08-05",
+				Notes: "Job ID 516133. Erlangen hybrid, min 1 year commitment.",
+			},
+			location: "Erlangen",
+			workMode: "Hybrid",
+			last:     "2026-08-05",
+		},
+		{
+			name: "a req-ID label is not a US city and state",
+			app: model.CareerApplication{
+				Date:  "2026-08-05",
+				Notes: "Job ID 516133. Awaiting reply.",
+			},
+			location: "",
+			last:     "2026-08-05",
+		},
+		{
+			name: "a real US city and state still resolves",
+			app: model.CareerApplication{
+				Date:  "2026-08-05",
+				Notes: "Boise, ID — on-site 3 days.",
+			},
+			location: "Boise, ID",
+			workMode: "Full",
+			last:     "2026-08-05",
+		},
+		{
+			name: "on-site spelling is recognised as a work-mode word",
+			app: model.CareerApplication{
+				Date:  "2026-08-05",
+				Notes: "Erlangen on-site, 8-20h/w, English. Thesis pathway.",
+			},
+			location: "Erlangen",
+			workMode: "Full",
+			last:     "2026-08-05",
+		},
+		{
+			// The rule is positional, not merely a longer list: a city that
+			// appears in no regex at all still resolves.
+			name: "a city in no list at all still resolves",
+			app: model.CareerApplication{
+				Date:  "2026-08-05",
+				Notes: "Kulmbach hybrid, 20h/w.",
+			},
+			location: "Kulmbach",
+			workMode: "Hybrid",
+			last:     "2026-08-05",
+		},
+		{
+			// The note names Munich only to say what would happen if the job
+			// moved there. Reading it as the location contradicted the note's
+			// own opening words.
+			name: "a city inside a conditional clause is not the location",
+			app: model.CareerApplication{
+				Date:  "2026-08-05",
+				Notes: "Remote within Germany, 15-20h/w, English-language posting. Verify the remote option is still on offer - if it becomes Munich on-site the score drops to ~2.6.",
+			},
+			location: "",
+			workMode: "Remote",
+			last:     "2026-08-05",
+		},
+		{
+			// The conditional skip must not leak across sentences: the "if"
+			// here belongs to a clause that has already ended.
+			name: "a conditional in an earlier sentence does not suppress the location",
+			app: model.CareerApplication{
+				Date:  "2026-08-05",
+				Notes: "Ask if the hours are flexible. Nuremberg hybrid, 20h/w.",
+			},
+			location: "Nuremberg",
+			workMode: "Hybrid",
+			last:     "2026-08-05",
+		},
+		{
+			// "Fully" sits exactly where a city would; only the stop-list keeps
+			// it out of the Location column.
+			name: "an adverb in front of a work-mode word is not a place",
+			app: model.CareerApplication{
+				Date:  "2026-08-05",
+				Notes: "Fully Remote, 20h/w.",
+			},
+			location: "",
+			workMode: "Remote",
+			last:     "2026-08-05",
+		},
 	}
 
 	for _, tc := range cases {

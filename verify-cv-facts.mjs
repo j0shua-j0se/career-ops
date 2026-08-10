@@ -54,6 +54,11 @@ const SIMPLE_CLAIM_PATTERNS = [
   /(?<![\w$€£])[$€£]\s?\d[\d,.]*(?:\s?[kKmMbB])?/g,
   /\b\d+(?:\.\d+)?\s?x\b/gi,
 ];
+// Cues that turn the rest of the clause into a denial rather than an assertion.
+// Deliberately does NOT include hedges ("limited", "little") — those still
+// assert the tool, just weakly, and must stay subject to the gate.
+const NEGATION_CUE_RE = /\b(?:not|never|no|none|nor|without|lacks?|lacking|rather than|instead of|yet to)\b|\w+n['’]t\b/i;
+const CLAUSE_BOUNDARIES = ['.', ';', '!', '?', '\n'];
 
 /** Read a UTF-8 file when it exists, otherwise return an empty string. */
 function readIfExists(path) {
@@ -99,6 +104,21 @@ function isLikelyTool(value) {
   return TOOL_PHRASE_PATTERN.test(value.trim());
 }
 
+/**
+ * True when the clause running up to `index` denies rather than asserts.
+ *
+ * The gate exists to catch fabrication, so an honest admission of a gap must
+ * not be read as a claim: "worked with" in "signal processing is the part I
+ * have not worked with yet" previously produced a `tool=signal processing`
+ * claim and blocked the document — the gate punished the truthful sentence and
+ * passed the boastful one. Only the current clause is inspected; negation does
+ * not carry across a sentence boundary.
+ */
+export function isNegatedAt(text, index) {
+  const clauseStart = Math.max(...CLAUSE_BOUNDARIES.map(char => text.lastIndexOf(char, index - 1)));
+  return NEGATION_CUE_RE.test(text.slice(clauseStart + 1, index));
+}
+
 /** Extract explicitly asserted employer, title, and tool claims from text. */
 export function factClaims(text) {
   const clean = stripMarkup(text);
@@ -110,6 +130,7 @@ export function factClaims(text) {
   ];
   for (const [kind, pattern] of patterns) {
     for (const match of clean.matchAll(pattern)) {
+      if (isNegatedAt(clean, match.index)) continue;
       const rawText = kind === 'tool' ? match[1].trim() : '';
       const rawValues = kind === 'tool'
         ? (/^the\s+/i.test(rawText) ? [] : rawText.split(/,|\band\b|\bwith\b|\bin\b/i))
@@ -302,6 +323,17 @@ function runSelfTest() {
     'forbidden phrase',
     auditClaims('A proven track record', source, { forbidden_phrases: ['proven track record'] }).forbidden,
     ['proven track record']
+  );
+
+  // Negation handling: an admitted gap is not a claim.
+  const facts = text => factClaims(text).map(({ kind, value }) => `${kind}=${value}`);
+  equal('asserted tool is claimed', facts('Delivered the model using audio data.'), ['tool=audio data']);
+  equal('negated tool is not claimed', facts('I have not worked with audio data.'), []);
+  equal('contracted negation is not claimed', facts("I haven't worked with audio data."), []);
+  equal(
+    'negation does not cross a sentence boundary',
+    facts('Signal processing is not mine yet. Built the pipeline using audio data.'),
+    ['tool=audio data']
   );
 
   console.log(`verify-cv-facts self-test: ${passed} passed, ${failed} failed`);

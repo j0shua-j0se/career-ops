@@ -474,5 +474,82 @@ function cleanup(sandbox) {
   cleanup(sb);
 }
 
+// ── Test 18: comma list seeds only the named rows, in one write ─────────────
+{
+  const sb = makeSandbox();
+  writeTracker(sb, [
+    trackerRow(1, '2026-05-01', 'Acme', 'Engineer', '4.0/5', 'Applied', 'Applied 2026-06-20.'),
+    trackerRow(2, '2026-05-02', 'Globex', 'Engineer', '4.2/5', 'Applied', 'Applied 2026-06-21.'),
+    trackerRow(3, '2026-05-03', 'Initech', 'Engineer', '4.1/5', 'Applied', 'Applied 2026-06-22.'),
+  ]);
+  const res = run(['1,3', '--json'], sb);
+  if (res.code === 0) pass('18. comma list exits 0');
+  else fail(`18. comma list exits 0 — got ${res.code}\n${res.stdout}${res.stderr}`);
+  try {
+    const out = JSON.parse(res.stdout);
+    const nums = out.seeded.map(s => s.appNum).sort();
+    if (nums.join(',') === '1,3') pass('18. only the named rows are seeded');
+    else fail(`18. only the named rows are seeded — got ${JSON.stringify(out.seeded)}`);
+  } catch (e) {
+    fail(`18. comma-list JSON parses — ${e.message}\n${res.stdout}`);
+  }
+  // The unnamed Applied row must be untouched — this is what separates the
+  // list form from --backfill, which would have swept #2 in too.
+  const pins = parseNextOverrides(readFileSync(sb.followups, 'utf-8'));
+  if (pins.has(1) && pins.has(3) && !pins.has(2)) pass('18. the unnamed Applied row #2 is left alone');
+  else fail(`18. unnamed row #2 leaked into the seed — pins ${[...pins.keys()].join(',')}`);
+  cleanup(sb);
+}
+
+// ── Test 19: a named row that cannot be seeded is reported, not dropped ─────
+{
+  const sb = makeSandbox();
+  writeTracker(sb, [
+    trackerRow(1, '2026-05-01', 'Acme', 'Engineer', '4.0/5', 'Applied', 'Applied 2026-06-20.'),
+    trackerRow(2, '2026-05-02', 'Globex', 'Engineer', '4.2/5', 'Evaluated', '—'),
+  ]);
+  const res = run(['1,2,99', '--json'], sb);
+  // Non-zero because two of the three named rows were not seeded; a shell loop
+  // swallowing exactly this is the failure the list form exists to remove.
+  if (res.code === 2) pass('19. a missing named row makes the run exit 2');
+  else fail(`19. missing named row → exit 2 — got ${res.code}\n${res.stdout}${res.stderr}`);
+  try {
+    const out = JSON.parse(res.stdout);
+    const reasons = Object.fromEntries(out.skipped.map(s => [s.appNum, s.reason]));
+    if (out.seeded.length === 1 && out.seeded[0].appNum === 1
+        && reasons[2] === 'not-applied' && reasons[99] === 'not-found') {
+      pass('19. eligible row still seeded; both failures named with reasons');
+    } else {
+      fail(`19. partial result wrong — seeded ${JSON.stringify(out.seeded)} skipped ${JSON.stringify(out.skipped)}`);
+    }
+  } catch (e) {
+    fail(`19. partial-failure JSON parses — ${e.message}\n${res.stdout}`);
+  }
+  cleanup(sb);
+}
+
+// ── Test 20: list form honours --dry-run, dedup, and rejects a bad element ──
+{
+  const sb = makeSandbox();
+  writeTracker(sb, [
+    trackerRow(1, '2026-05-01', 'Acme', 'Engineer', '4.0/5', 'Applied', 'Applied 2026-06-20.'),
+    trackerRow(2, '2026-05-02', 'Globex', 'Engineer', '4.2/5', 'Applied', 'Applied 2026-06-21.'),
+  ]);
+
+  const dry = run(['1,2', '--dry-run', '--json'], sb);
+  if (dry.code === 0 && !existsSync(sb.followups)) pass('20. --dry-run writes nothing');
+  else fail(`20. --dry-run writes nothing — code ${dry.code}, exists=${existsSync(sb.followups)}`);
+
+  const bad = run(['1,x', '--json'], sb);
+  if (bad.code === 1 && !existsSync(sb.followups)) pass('20. a non-numeric element is a usage error, no partial write');
+  else fail(`20. bad element → exit 1 with no write — got ${bad.code}, exists=${existsSync(sb.followups)}`);
+
+  const dup = run(['2,2', '--json'], sb);
+  const dupPins = (readFileSync(sb.followups, 'utf-8').match(/- next #2 /g) ?? []).length;
+  if (dup.code === 0 && dupPins === 1) pass('20. a repeated number seeds one pin');
+  else fail(`20. repeated number → one pin — code ${dup.code}, pins ${dupPins}`);
+  cleanup(sb);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

@@ -34,7 +34,12 @@
  *   node triage-prefilter.mjs --write-shortlist      # regenerate data/shortlist.md
  *   node triage-prefilter.mjs --max-age-days 45      # hold back entries older than N days
  *   node triage-prefilter.mjs --max-age-days 45 --prune-stale --write
+ *   node triage-prefilter.mjs --prune-stale --write  # deadline-expired only
  *   node triage-prefilter.mjs --self-test
+ *
+ * An entry whose stated `(Frist: DD.MM.YYYY)` has passed is held back with no
+ * cutoff flag at all — see parseDeadline. That is a fact the posting asserts,
+ * unlike --max-age-days, which is the user guessing at how long a listing lives.
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
@@ -79,6 +84,9 @@ export function parsePipelineLine(line) {
     title: fields[1] || '',
     location: fields[2] || '',
     postedAt,
+    // Read from the whole line, not the location field: the boards put it there
+    // today, but it is a property of the posting and not of the place.
+    deadline: parseDeadline(m[2]),
     raw: line,
   };
 }
@@ -367,6 +375,44 @@ export function ageInDays(postedAt, now = Date.now()) {
   return Math.floor((now - ms) / 86_400_000);
 }
 
+// A closing date the posting itself states. interamt.de and the public-sector
+// boards write it into the location field — "Vor Ort 50931 Köln (Frist:
+// 27.08.2026)" — and nothing read it, so entries whose window had already shut
+// stayed in Pending and kept drawing triage attention. German DD.MM.YYYY is the
+// form these boards emit; ISO is accepted too because other providers use it.
+const DEADLINE_RE = /\b(?:Bewerbungs)?(?:frist|deadline|closes?|bewerbungsschluss)\s*:?\s*(?:(\d{1,2})\.(\d{1,2})\.(\d{4})|(\d{4}-\d{2}-\d{2}))/i;
+
+/**
+ * Pull a stated application deadline out of a pipeline line.
+ * @param {string} text
+ * @returns {string|null} ISO `YYYY-MM-DD`, or null when none is stated.
+ */
+export function parseDeadline(text) {
+  const m = DEADLINE_RE.exec(String(text ?? ''));
+  if (!m) return null;
+  if (m[4]) return m[4];
+  const [, d, mo, y] = m;
+  const iso = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  // Reject impossible dates ("31.02.2026") rather than passing a string that
+  // Date.parse would silently roll forward into March.
+  const ms = Date.parse(`${iso}T00:00:00Z`);
+  if (!Number.isFinite(ms) || isoDay(ms) !== iso) return null;
+  return iso;
+}
+
+/**
+ * True when a stated deadline has already passed. The deadline day itself still
+ * counts as open — a Frist of today is the last day to apply, not a closed one.
+ * A missing deadline is never expired, matching the "don't penalize missing
+ * data" convention used for `posted:`.
+ * @param {string|null|undefined} deadline
+ * @param {number} [now]
+ */
+export function isExpired(deadline, now = Date.now()) {
+  if (typeof deadline !== 'string') return false;
+  return deadline < isoDay(now);
+}
+
 // ── Report ──────────────────────────────────────────────────────────────────
 
 /**
@@ -383,9 +429,16 @@ export function buildReport(parsed, { maxAgeDays = null, now = Date.now() } = {}
 
   for (const entry of parsed?.pending ?? []) {
     const age = ageInDays(entry.postedAt, now);
-    const isStale = Number.isInteger(maxAgeDays) && maxAgeDays > 0 && age !== null && age > maxAgeDays;
+    // A passed deadline is a fact the posting states about itself, so it retires
+    // an entry with no --max-age-days cutoff and regardless of how new it is.
+    // The age rule is a guess about whether a posting is still open; this is not.
+    const expired = isExpired(entry.deadline, now);
+    const tooOld = Number.isInteger(maxAgeDays) && maxAgeDays > 0 && age !== null && age > maxAgeDays;
     const ranked = { ...entry, ...rankEntry(entry), ageDays: age };
-    if (isStale) { stale.push(ranked); continue; }
+    if (expired || tooOld) {
+      stale.push({ ...ranked, staleReason: expired ? 'deadline' : 'age' });
+      continue;
+    }
     if (ranked.bucket === 'look') look.push(ranked);
     else if (ranked.bucket === 'maybe') maybe.push(ranked);
     else {
@@ -399,7 +452,14 @@ export function buildReport(parsed, { maxAgeDays = null, now = Date.now() } = {}
   maybe.sort(byScore);
 
   return {
-    counts: { pending: (parsed?.pending ?? []).length, look: look.length, maybe: maybe.length, skip: skip.length, stale: stale.length },
+    counts: {
+      pending: (parsed?.pending ?? []).length,
+      look: look.length,
+      maybe: maybe.length,
+      skip: skip.length,
+      stale: stale.length,
+      expired: stale.filter((x) => x.staleReason === 'deadline').length,
+    },
     look,
     maybe,
     stale,
@@ -490,13 +550,30 @@ export function renderShortlist(report, { now = Date.now() } = {}) {
   ];
 
   if (report.stale.length) {
+    const expired = report.stale.filter((x) => x.staleReason === 'deadline');
+    const aged = report.stale.length - expired.length;
+    // The two reasons are reported apart because they carry different weight: an
+    // age cutoff is a guess the user chose, a passed Frist is the posting's own
+    // closing date and is not a judgement call.
     out.push(
       '### Stale',
       '',
-      `${report.stale.length} entries are past the age cutoff and were not ranked.`,
+      `${report.stale.length} entries were not ranked`
+        + `${expired.length ? ` — ${expired.length} past a stated deadline` : ''}`
+        + `${aged ? `${expired.length ? ',' : ' —'} ${aged} past the age cutoff` : ''}.`,
       'Move them out with `node triage-prefilter.mjs --prune-stale --write`.',
       '',
     );
+    if (expired.length) {
+      out.push(
+        '| Deadline | Company | Title |',
+        '|----------|---------|-------|',
+        ...expired
+          .sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)))
+          .map((x) => `| ${x.deadline} | ${x.company} | ${x.title} |`),
+        '',
+      );
+    }
   }
   return out.join('\n');
 }
@@ -628,6 +705,39 @@ function selfTest() {
   check(report.stale[0].url === 'u2', 'the older entry is the stale one');
   check(report.look.some((x) => x.url === 'u3'), 'an entry with no posted: date is never stale');
 
+  // ── deadlines ──
+  check(parseDeadline('Vor Ort 50931 Köln (Frist: 27.08.2026)') === '2026-08-27', 'parseDeadline reads the German DD.MM.YYYY form the boards emit');
+  check(parseDeadline('Hybrid 60431 Frankfurt am Main (Frist: 09.08.2026)') === '2026-08-09', 'a single-digit day and month pad to ISO');
+  check(parseDeadline('deadline: 2026-09-01') === '2026-09-01', 'an ISO deadline is taken as written');
+  check(parseDeadline('Bewerbungsfrist 31.12.2026') === '2026-12-31', 'the Bewerbungsfrist spelling is recognised');
+  check(parseDeadline('Erlangen, 20h/w') === null, 'a line with no deadline yields null');
+  check(parseDeadline('(Frist: 31.02.2026)') === null, 'an impossible date is rejected rather than rolled into March');
+  // A five-digit postal code must not be mistaken for a date, and the reach
+  // stage still needs the location text intact.
+  const withFrist = parsePipelineLine('- [ ] https://x/1 | Uni Köln | Data Engineer | Vor Ort 50931 Köln (Frist: 27.08.2026) | posted: 2026-07-31');
+  check(withFrist?.deadline === '2026-08-27', 'parsePipelineLine lifts the deadline off the line');
+  check(withFrist?.location === 'Vor Ort 50931 Köln (Frist: 27.08.2026)', 'the location field is left intact for the reach stage');
+  check(withFrist?.postedAt === '2026-07-31', 'a deadline does not disturb the posted: field');
+
+  check(isExpired('2026-08-01', now) === true, 'a deadline before today is expired');
+  check(isExpired('2026-08-02', now) === false, 'the deadline day itself is still open');
+  check(isExpired('2026-08-03', now) === false, 'a future deadline is not expired');
+  check(isExpired(null, now) === false, 'a missing deadline is never expired');
+
+  // Freshly posted, well inside any age cutoff, but the window has shut.
+  const deadlined = buildReport({ pending: [
+    { url: 'd1', company: 'A', title: 'Werkstudent Data Science', location: 'Erlangen', postedAt: '2026-08-01', deadline: '2026-07-15' },
+    { url: 'd2', company: 'B', title: 'Werkstudent Data Science', location: 'Erlangen', postedAt: '2026-08-01', deadline: '2026-09-15' },
+  ] }, { now });
+  check(deadlined.counts.stale === 1 && deadlined.counts.expired === 1, 'a passed deadline retires an entry with no --max-age-days set');
+  check(deadlined.stale[0].url === 'd1' && deadlined.stale[0].staleReason === 'deadline', 'the expired entry records why it was held back');
+  check(deadlined.look.some((x) => x.url === 'd2'), 'an open deadline leaves the entry rankable');
+
+  const aged = buildReport({ pending: [
+    { url: 'a1', company: 'A', title: 'Werkstudent Data Science', location: 'Erlangen', postedAt: '2026-01-01' },
+  ] }, { maxAgeDays: 45, now });
+  check(aged.stale[0].staleReason === 'age' && aged.counts.expired === 0, 'an age-cutoff entry is not counted as deadline-expired');
+
   // ── prune ──
   const pruned = pruneStale('## Pending\n\n- [ ] u1 | A | T | Erlangen\n- [ ] u2 | B | T | Erlangen\n', ['u2']);
   check(pruned.moved === 1, 'pruneStale moves exactly the named entry');
@@ -684,8 +794,12 @@ function main() {
   const report = buildReport(parsePipeline(md), { maxAgeDays });
 
   if (argv.includes('--prune-stale')) {
-    if (maxAgeDays === null) {
-      console.error('triage-prefilter: --prune-stale needs --max-age-days N, otherwise nothing is stale.');
+    // --max-age-days is only required when the age rule is the ONLY thing that
+    // could make anything stale. Entries past a stated Frist are retired without
+    // it, so demanding a cutoff the user has no opinion about would be a
+    // pointless gate.
+    if (maxAgeDays === null && report.counts.expired === 0) {
+      console.error('triage-prefilter: --prune-stale needs --max-age-days N — nothing is past a stated deadline, so nothing is stale.');
       process.exit(1);
     }
     const { text, moved } = pruneStale(md, report.stale.map((x) => x.url));
@@ -711,7 +825,7 @@ function main() {
     console.log(`  worth a look  ${counts.look}`);
     console.log(`  maybe         ${counts.maybe}`);
     console.log(`  skip          ${counts.skip}`);
-    if (counts.stale) console.log(`  stale         ${counts.stale}`);
+    if (counts.stale) console.log(`  stale         ${counts.stale}${counts.expired ? ` (${counts.expired} past a stated deadline)` : ''}`);
     console.log('\nTop drop reasons:');
     for (const { reason, count } of report.skipReasons.slice(0, 12)) {
       console.log(`  ${String(count).padStart(4)}  ${reason}`);

@@ -1,17 +1,18 @@
 // Shared optional-section stripping for the CV builders (build-cv-html.mjs,
 // build-cv-latex.mjs).
 //
-// Projects, education, and certifications are the genuinely optional CV
-// sections: a candidate's projects are often already covered under Work
-// Experience, not every candidate has a degree, and not every application
-// carries a certification worth listing. The templates wrap all three
-// unconditionally, so a payload with no entries renders a bare section header
-// with nothing under it. The builders' buildProjects()/buildEducation()/
-// buildCertifications() correctly return '' — nothing removes the surrounding
-// wrapper, which is what this module does.
+// Projects, education, publications, and certifications are the genuinely
+// optional CV sections: a candidate's projects are often already covered under
+// Work Experience, not every candidate has a degree, most candidates have
+// published nothing, and not every application carries a certification worth
+// listing. The templates wrap all four unconditionally, so a payload with no
+// entries renders a bare section header with nothing under it. The builders'
+// buildProjects()/buildEducation()/buildPublications()/buildCertifications()
+// correctly return '' — nothing removes the surrounding wrapper, which is what
+// this module does.
 //
-// Certifications has no marker in the LaTeX template (cv-template.tex has no
-// Certifications section at all), so PATTERNS.tex has no `certifications` key
+// Certifications and publications have no marker in the LaTeX template
+// (cv-template.tex has neither section), so PATTERNS.tex has no key for either
 // — stripEmptySections skips a section silently when the active format has no
 // pattern for it, rather than trying to match against `undefined`.
 //
@@ -40,6 +41,7 @@ const PATTERNS = {
   html: {
     projects: new RegExp(String.raw`<!--\s+PROJECTS\s+-->[\s\S]*?` + HTML_BOUNDARY),
     education: new RegExp(String.raw`<!--\s+EDUCATION\s+-->[\s\S]*?` + HTML_BOUNDARY),
+    publications: new RegExp(String.raw`<!--\s+PUBLICATIONS\s+-->[\s\S]*?` + HTML_BOUNDARY),
     certifications: new RegExp(String.raw`<!--\s+CERTIFICATIONS\s+-->[\s\S]*?` + HTML_BOUNDARY),
   },
   tex: {
@@ -48,7 +50,7 @@ const PATTERNS = {
   },
 };
 
-export const OPTIONAL_SECTIONS = ['projects', 'education', 'certifications'];
+export const OPTIONAL_SECTIONS = ['projects', 'education', 'publications', 'certifications'];
 
 export function isEmptySection(payload, section) {
   const entries = payload?.[section];

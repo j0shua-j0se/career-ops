@@ -1,6 +1,6 @@
 // tests/cv-optional-sections.test.mjs — the optional CV sections (projects,
-// education, certifications) must vanish entirely when they have no entries,
-// rather than rendering a bare section header with nothing under it.
+// education, publications, certifications) must vanish entirely when they have
+// no entries, rather than rendering a bare section header with nothing under it.
 //
 // #1879 fixed this for projects; education is the same bug (not every
 // candidate has a degree). Certifications was fixed once directly in
@@ -17,8 +17,13 @@ import { stripEmptySections } from '../cv-sections-core.mjs';
 
 console.log('\ncv-sections-core.mjs — optional sections leave no bare header');
 
-const EMPTY = { projects: [], education: [], certifications: [] };
-const FULL = { projects: [{ name: 'P' }], education: [{ degree: 'D' }], certifications: [{ title: 'C' }] };
+const EMPTY = { projects: [], education: [], publications: [], certifications: [] };
+const FULL = {
+  projects: [{ name: 'P' }],
+  education: [{ degree: 'D' }],
+  publications: [{ title: 'Pub' }],
+  certifications: [{ title: 'C' }],
+};
 
 function check(label, actual, expected) {
   if (actual === expected) pass(label);
@@ -29,12 +34,19 @@ function check(label, actual, expected) {
 // Assert against the shipped templates so a template edit that renames or
 // reorders a marker fails here instead of silently reviving the bare header.
 const TEMPLATES = [
-  { file: 'templates/cv-template.html', format: 'html', after: 'SKILLS', hasCertifications: true },
-  { file: 'templates/resume-template.html', format: 'html', after: 'SKILLS', hasCertifications: false },
-  { file: 'templates/cv-template.tex', format: 'tex', after: 'Technical Skills', hasCertifications: false },
+  { file: 'templates/cv-template.html', format: 'html', survivor: 'SKILLS', hasCertifications: true, hasPublications: true },
+  // zh-minimal is a full-fidelity alternate of cv-template.html, not a reduced
+  // one, so it carries the same optional sections and must strip them the same
+  // way. It is listed here because it once diverged: it had no publications
+  // block at all, which silently dropped them from any payload rendered through
+  // it, and its section order differed, which made generate-pdf.mjs demand
+  // --allow-reorder for this template alone.
+  { file: 'templates/cv-template.zh-minimal.html', format: 'html', survivor: 'SKILLS', hasCertifications: true, hasPublications: true },
+  { file: 'templates/resume-template.html', format: 'html', survivor: 'SKILLS', hasCertifications: false, hasPublications: false },
+  { file: 'templates/cv-template.tex', format: 'tex', survivor: 'Technical Skills', hasCertifications: false, hasPublications: false },
 ];
 
-for (const { file, format, after, hasCertifications } of TEMPLATES) {
+for (const { file, format, survivor, hasCertifications, hasPublications } of TEMPLATES) {
   const template = readFileSync(join(ROOT, file), 'utf-8');
   const name = file.split('/').pop();
 
@@ -42,31 +54,55 @@ for (const { file, format, after, hasCertifications } of TEMPLATES) {
   const projectsMarker = format === 'html' ? '<!-- PROJECTS -->' : 'PROJECTS  %';
   const educationMarker = format === 'html' ? '<!-- EDUCATION -->' : 'Education  %';
   const certificationsMarker = '<!-- CERTIFICATIONS -->'; // html-only; no LaTeX Certifications section exists
+  const publicationsMarker = '<!-- PUBLICATIONS -->';     // html-only; no LaTeX Publications section exists
 
   check(`${name}: empty payload removes the projects block`, stripped.includes(projectsMarker), false);
   check(`${name}: empty payload removes the education block`, stripped.includes(educationMarker), false);
   if (hasCertifications) {
     check(`${name}: empty payload removes the certifications block`, stripped.includes(certificationsMarker), false);
   }
-  check(`${name}: the section after certifications survives`, stripped.includes(after), true);
+  if (hasPublications) {
+    check(`${name}: empty payload removes the publications block`, stripped.includes(publicationsMarker), false);
+  }
+  check(`${name}: a non-optional neighbouring section survives`, stripped.includes(survivor), true);
   check(`${name}: {{EXPERIENCE}} is untouched`, stripped.includes('{{EXPERIENCE}}'), true);
+
+  // Certifications is the LAST optional section in cv-template.html, so an
+  // over-broad end-of-input strip would take the closing tags with it. The
+  // template's trailing END marker is what stops that; assert the document
+  // still closes rather than trusting the marker to stay put.
+  if (format === 'html') {
+    check(`${name}: stripping every optional section keeps the document closed`,
+      stripped.trimEnd().endsWith('</html>'), true);
+  }
 
   // Populated payload must be a no-op — the strip only ever removes.
   check(`${name}: populated payload leaves the template unchanged`,
     stripEmptySections(template, FULL, format) === template, true);
 
-  // One empty, one populated: only the empty one goes.
-  const onlyEdu = stripEmptySections(template, { projects: [{ name: 'P' }], education: [], certifications: [{ title: 'C' }] }, format);
+  // One empty, the rest populated: only the empty one goes.
+  const onlyEdu = stripEmptySections(template, { ...FULL, education: [] }, format);
   check(`${name}: empty education alone keeps projects`, onlyEdu.includes(projectsMarker), true);
   check(`${name}: empty education alone drops education`, onlyEdu.includes(educationMarker), false);
   if (hasCertifications) {
     check(`${name}: empty education alone keeps certifications`, onlyEdu.includes(certificationsMarker), true);
 
-    // Certifications empty on its own: projects/education (both populated) survive, only certifications goes.
-    const onlyCert = stripEmptySections(template, { projects: [{ name: 'P' }], education: [{ degree: 'D' }], certifications: [] }, format);
+    // Certifications empty on its own: every other section survives.
+    const onlyCert = stripEmptySections(template, { ...FULL, certifications: [] }, format);
     check(`${name}: empty certifications alone keeps projects`, onlyCert.includes(projectsMarker), true);
     check(`${name}: empty certifications alone keeps education`, onlyCert.includes(educationMarker), true);
     check(`${name}: empty certifications alone drops certifications`, onlyCert.includes(certificationsMarker), false);
+    check(`${name}: empty certifications alone keeps the document closed`,
+      onlyCert.trimEnd().endsWith('</html>'), true);
+  }
+  if (hasPublications) {
+    // The common case: most candidates have published nothing, so the
+    // publications strip runs on nearly every build.
+    const onlyPub = stripEmptySections(template, { ...FULL, publications: [] }, format);
+    check(`${name}: empty publications alone keeps education`, onlyPub.includes(educationMarker), true);
+    check(`${name}: empty publications alone keeps certifications`, onlyPub.includes(certificationsMarker), true);
+    check(`${name}: empty publications alone drops publications`, onlyPub.includes(publicationsMarker), false);
+    check(`${name}: empty publications alone keeps skills`, onlyPub.includes(survivor), true);
   }
 }
 

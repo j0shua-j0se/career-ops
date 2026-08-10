@@ -4,7 +4,7 @@
  * generate-pdf.mjs — HTML → PDF via Playwright
  *
  * Usage:
- *   node career-ops/generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--report=NNN] [--allow-reorder] [--max-pages=N] [--strict-pages]
+ *   node career-ops/generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--report=NNN] [--allow-reorder] [--max-pages=N] [--strict-pages] [--allow-stale]
  *
  * --report links the generated PDF to its tracker/report number and records
  * the linkage in data/pdf-index.tsv so downstream tools (e.g. the TUI
@@ -16,6 +16,11 @@
  * tailored (e.g. Projects moved ahead of Education for a technical-heavy
  * role) rather than accidentally scrambled by an agent. Without this flag,
  * any divergence from cv.md's section order still fails generation.
+ *
+ * --allow-stale downgrades the stale-HTML guard to a warning. By default,
+ * rendering is refused when the payload recorded in <input>.html.meta.json is
+ * newer than the HTML built from it, because that means an edit never reached
+ * the builder and the PDF would silently republish the previous CV.
  *
  * --max-pages=N sets the preferred rendered CV length (default: 2 pages).
  * The actual page count is checked after Chromium writes the PDF; overflow
@@ -29,7 +34,7 @@
 import { chromium } from 'playwright';
 import { resolve, dirname, relative, sep, isAbsolute } from 'path';
 import { readFile } from 'fs/promises';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
 import { readStyleTokens, injectThemeStyle } from './theme-style.mjs';
@@ -262,6 +267,48 @@ export function validateCvSectionOrder(html, cvMarkdown, { allowReorder = false 
 }
 
 /**
+ * Refuse to render HTML that its own payload has already moved past.
+ *
+ * build-cv-html.mjs drops a `<output>.html.meta.json` sidecar recording the
+ * payload path and its mtime at build time. If the payload is newer than that,
+ * the HTML on disk predates the last edit. The failure this catches is silent
+ * by construction: a payload write that never reaches the builder (a UTF-8 BOM
+ * from PowerShell used to do exactly this) leaves the previous HTML in place,
+ * and generate-pdf then republishes the previous CV with every gate green.
+ *
+ * A missing sidecar is not evidence of staleness — hand-authored HTML and
+ * output from older versions are both legitimate — so it returns quietly.
+ *
+ * @param {string} htmlPath
+ * @param {{ allowStale?: boolean }} [options] - `allowStale` downgrades the
+ *   refusal to a warning, for deliberately hand-edited HTML.
+ */
+export function assertHtmlNotStale(htmlPath, { allowStale = false } = {}) {
+  const metaPath = `${htmlPath}.meta.json`;
+  if (!existsSync(metaPath)) return;
+
+  let meta;
+  try {
+    meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
+  } catch {
+    return; // an unreadable sidecar is not evidence of staleness
+  }
+  if (!meta || typeof meta.source !== 'string' || typeof meta.sourceMtimeMs !== 'number') return;
+  if (!existsSync(meta.source)) return;
+
+  // 1ms tolerance: some filesystems round mtime on write.
+  if (statSync(meta.source).mtimeMs <= meta.sourceMtimeMs + 1) return;
+
+  const message = `Stale HTML: ${htmlPath} was built from an older version of ${meta.source}. `
+    + 'Re-run build-cv-html.mjs before generating the PDF.';
+  if (allowStale) {
+    console.warn(`⚠️  ${message} (proceeding — --allow-stale set)`);
+    return;
+  }
+  throw new Error(message);
+}
+
+/**
  * Decide whether a rendered CV fits its configured page budget.
  *
  * This is deliberately separate from rendering: page count comes from the
@@ -417,7 +464,7 @@ async function generatePDF() {
 
   // Parse arguments
   let inputPath, outputPath, format = 'a4', reportNum = '', allowReorder = false;
-  let maxPages = 2, maxPagesInput = '2', strictPages = false;
+  let maxPages = 2, maxPagesInput = '2', strictPages = false, allowStale = false;
 
   for (const arg of args) {
     if (arg.startsWith('--format=')) {
@@ -431,6 +478,8 @@ async function generatePDF() {
       allowReorder = true;
     } else if (arg === '--strict-pages') {
       strictPages = true;
+    } else if (arg === '--allow-stale') {
+      allowStale = true;
     } else if (!inputPath) {
       inputPath = arg;
     } else if (!outputPath) {
@@ -439,7 +488,7 @@ async function generatePDF() {
   }
 
   if (!inputPath || !outputPath) {
-    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--report=NNN] [--allow-reorder] [--max-pages=N] [--strict-pages]');
+    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--report=NNN] [--allow-reorder] [--max-pages=N] [--strict-pages] [--allow-stale]');
     console.error('');
     console.error('This script only converts an already-built HTML file to PDF.');
     console.error('The input HTML is produced by the pdf mode: the agent fills cv-template.html');
@@ -484,6 +533,8 @@ async function generatePDF() {
   console.log(`📁 Output: ${outputPath}`);
   console.log(`📏 Format: ${format.toUpperCase()}`);
   console.log(`📐 Page budget: ${maxPages}${strictPages ? ' (strict)' : ' (warning only)'}`);
+
+  assertHtmlNotStale(inputPath, { allowStale });
 
   let html = await readFile(inputPath, 'utf-8');
   let cvMarkdown = '';
