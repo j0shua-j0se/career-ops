@@ -1,0 +1,52 @@
+{
+  "candidate": {
+    "name": "Joshua Jose",
+    "email": "joshuajoseprofessional@gmail.com",
+    "phone": "+49 151 75033602",
+    "location": "Erlangen, Germany",
+    "linkedin": "linkedin.com/in/j0shuaj0se",
+    "credentials": [
+      "MSc Data Science (in progress), FAU Erlangen-Nürnberg",
+      "BTech Computer Science and Engineering, VIT"
+    ]
+  },
+  "letter": {
+    "role_title": "Working Student (f/m/d) - AI Engineering for Business Applications (Req. 456991)",
+    "company": "SAP SE",
+    "city": "Garching bei München",
+    "date": "2026-08-10",
+    "greeting": "Dear Hiring Team,",
+    "opening": "I would like to apply for the Working Student position in AI Engineering for Business Applications in Garching. The posting describes prompt design, orchestration across models, cloud deployment and testing, which is the arc of the application I shipped on Google Vertex AI.",
+    "profile_intro": "I am an MSc Data Science student at FAU Erlangen-Nürnberg, enrolled until August 2028, with four applied artificial intelligence and machine learning roles behind me. During a Generative AI internship at SmartInternz I built an ATS Resume Checker powered by large language models: it parses a resume, scores it against a job description and returns structured feedback. A later internship at Elevate Labs ended with recognition as Best Performer of the cohort.",
+    "achievements": [
+      {
+        "lead": "Automated document analysis with an LLM",
+        "impact": "The ATS Resume Checker parses documents, scores them against a reference and returns structured feedback, the shape the posting names as document and issue analysis."
+      },
+      {
+        "lead": "Prompt design plus embedding-based retrieval",
+        "impact": "I designed and iterated the prompts on Google Vertex AI and added embedding retrieval to ground the output, which fixed the consistency that prompt wording alone could not."
+      },
+      {
+        "lead": "Cloud deployment, not a notebook",
+        "impact": "The application was deployed against Vertex AI managed endpoints, so the prototype became something that served requests."
+      },
+      {
+        "lead": "Evaluation loops around the application",
+        "impact": "I set up evaluation loops to measure and improve output quality, because without one you are guessing whether a prompt change was an improvement."
+      },
+      {
+        "lead": "Python and measured results",
+        "impact": "Across 8 projects at Elevate Labs I delivered 10+ production-ready models, from 95%+ ROC-AUC on a tuned Support Vector Machine to 96.1% R² on an XGBoost sales forecast."
+      }
+    ],
+    "problems_section": "Internal LLM products in Cloud ERP Finance and Spend live or die on whether their output can be trusted and acted on, which is a testing and privacy question before it is a modelling one. My first move would be to put a measurable evaluation loop around whatever feature I am given, so prompt and retrieval changes can be judged rather than argued about. One requirement I do not meet yet is backend and web API framework experience. The serving side I have, through Vertex AI managed endpoints; the framework layer I have not touched, and it is the first thing I would pick up here.",
+    "closing": "I am based in Erlangen and can be in Garching for the two mandatory on-site days. Are those days fixed, or can they be scheduled back to back? My availability is up to 20 h/week during the semester and full time during official semester breaks, at a notice period of two weeks.",
+    "language_closing": "Ich lerne derzeit Deutsch auf dem Niveau A2 und arbeite auf B1 hin.",
+    "signature": {
+      "valediction": "Kind regards,",
+      "name": "Joshua Jose"
+    }
+  },
+  "output_path": "output/sap-ai-engineering-working-student-cover.pdf"
+}

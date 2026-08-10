@@ -1,0 +1,53 @@
+{
+  "candidate": {
+    "name": "Joshua Jose",
+    "email": "joshuajoseprofessional@gmail.com",
+    "phone": "+49 151 75033602",
+    "location": "Erlangen, Germany",
+    "linkedin": "linkedin.com/in/j0shuaj0se",
+    "credentials": [
+      "MSc Data Science, FAU Erlangen-Nürnberg (in progress)",
+      "BTech Computer Science, VIT",
+      "Oracle Cloud Infrastructure 2025 Certified Data Science Professional"
+    ]
+  },
+  "letter": {
+    "role_title": "Werkstudent (m/w/d) DevOps/MLOps (Job ID 7716)",
+    "company": "Primetals Technologies Germany GmbH",
+    "city": "Erlangen",
+    "date": "2026-08-10",
+    "greeting": "Dear Ms Kohler,",
+    "opening": "Job ID 7716 is about building and operating the infrastructure behind a machine learning and computer-vision team. Most people answering that posting will bring the toolchain and no feel for the workloads; I bring the opposite, and I would rather say so in the first paragraph than have it surface in a technical screen.",
+    "profile_intro": "I am an MSc Data Science student at FAU Erlangen-Nürnberg, living in Erlangen. At NxtGen I sat on the operations side: VMware virtualisation infrastructure, automation of recurring infrastructure tasks, monitoring for cloud workloads and enforcement of security guidelines across managed environments. The rest of my experience is the workload itself, 10+ production-ready models at Elevate Labs and computer-vision systems in PyTorch, the half of this role most infrastructure applicants have never touched.",
+    "achievements": [
+      {
+        "lead": "Infrastructure operations at NxtGen",
+        "impact": "VMware virtualisation infrastructure operated and supported, recurring infrastructure tasks automated, monitoring set up for cloud workloads and security guidelines enforced across managed environments."
+      },
+      {
+        "lead": "Computer-vision workloads end to end",
+        "impact": "Weapon detection with YOLOv11 and face recognition with FaceNet embeddings, benchmarked at 95.79% mAP@0.5 and published in the ICISD 2025 proceedings."
+      },
+      {
+        "lead": "Training, validation and inference pipelines in PyTorch",
+        "impact": "Full pipeline for an American Sign Language recognition model, including data augmentation to improve generalisation."
+      },
+      {
+        "lead": "10+ production-ready models at Elevate Labs",
+        "impact": "Best Performer of the cohort, with a Walmart weekly-sales forecasting model reaching 96.1% R² and cutting forecast error by 18%."
+      },
+      {
+        "lead": "A served model kept honest after deployment",
+        "impact": "A large language model application deployed to Google Vertex AI managed endpoints, with evaluation loops measuring and improving its output quality."
+      }
+    ],
+    "problems_section": "Two of your requirements are genuinely not on my CV: solid Linux knowledge and container technology such as Docker. I am not going to reformulate VMware administration into something it was not. The operating habits transfer, these are weeks of deliberate work rather than months for someone who has already kept infrastructure running, and I would rather close them before a start date than after one. What you get immediately is a platform-side colleague who can read a training run, a model evaluation and an inference path and say where the cost and the failures sit.",
+    "closing": "I am available 15-20 h/week, and the exam-period flexibility your posting mentions is what makes this workable alongside the FAU semester. One note: on 5 August I applied to Primetals for the Werkstudent position in Künstliche Intelligenz. That is a separate requisition, and I would rather flag it than have this read as a duplicate.",
+    "language_closing": "Ich lerne derzeit Deutsch auf dem Niveau A2 und arbeite auf B1 hin.",
+    "signature": {
+      "valediction": "Kind regards",
+      "name": "Joshua Jose"
+    }
+  },
+  "output_path": "output/primetals-devops-mlops-cover.pdf"
+}

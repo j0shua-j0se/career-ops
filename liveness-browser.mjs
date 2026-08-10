@@ -253,8 +253,17 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
       return candidates
         .filter((element) => {
           if (element.closest('nav, header, footer')) return false;
-          if (element.closest('[aria-hidden="true"]')) return false;
 
+          // An `aria-hidden="true"` ANCESTOR is deliberately not disqualifying.
+          // aria-hidden is an accessibility-tree signal, not a rendering one, and
+          // real career portals misuse it on wrappers around content that is
+          // fully painted and clickable. Primetals' Phenom portal does exactly
+          // that: its requisition page carries five "Apply Now" links, all with
+          // correct display/visibility and non-zero geometry, every one inside an
+          // aria-hidden wrapper — so this check reported a live posting as
+          // "content present but no visible apply control found" and aborted the
+          // build. The geometric tests below are the stronger evidence: anything
+          // genuinely hidden has no client rects and is rejected there anyway.
           const style = window.getComputedStyle(element);
           if (style.display === 'none' || style.visibility === 'hidden') return false;
           if (!element.getClientRects().length) return false;

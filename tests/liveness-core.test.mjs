@@ -9,7 +9,9 @@
 // generic apply control won and the posting was classified active. The
 // generalized pattern requires any job noun within 60 chars of "has been
 // filled" and rejects "filled out" (a candidate completing a form).
-import { pass, fail } from './helpers.mjs';
+import { pass, fail, ROOT } from './helpers.mjs';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { classifyLiveness } from '../liveness-core.mjs';
 
 console.log('\nliveness-core — "filled" reqs (incl. Phenom/ICF phrasing) classify as expired');
@@ -96,4 +98,30 @@ for (const status of [404, 410]) {
   gone.result === 'expired' && gone.code === 'http_gone'
     ? pass(`HTTP ${status} still -> expired/http_gone`)
     : fail(`HTTP ${status} classified ${gone.result}/${gone.code}, expected expired/http_gone`);
+}
+
+// ── Drift guard: aria-hidden must not disqualify an apply control ──────────
+// The apply-control extractor runs inside page.evaluate(), so it cannot be unit
+// tested without a browser — this guards the invariant at the source level.
+//
+// Primetals' Phenom careers portal renders five "Apply Now" links on a live
+// requisition, all with correct display/visibility and non-zero geometry, every
+// one inside an `aria-hidden="true"` wrapper. While the extractor rejected any
+// element with an aria-hidden ancestor, that live posting classified as
+// "content present but no visible apply control found" and aborted every kit
+// build for it. aria-hidden is an accessibility-tree signal, not a rendering
+// one, and portals misuse it on painted content; the geometric checks are the
+// real evidence and reject genuinely hidden elements on their own.
+{
+  const src = readFileSync(join(ROOT, 'liveness-browser.mjs'), 'utf-8');
+  if (!/closest\(\s*['"`]\[aria-hidden="true"\]['"`]\s*\)/.test(src)) {
+    pass('the apply-control extractor does not disqualify elements by aria-hidden ancestor');
+  } else {
+    fail('liveness-browser.mjs rejects apply controls with an aria-hidden ancestor again — this reports live Phenom/Primetals postings as uncertain');
+  }
+  // The geometry checks are what makes dropping the aria-hidden rule safe, so
+  // they must still be present.
+  const geo = /getClientRects\(\)/.test(src) && /display\s*===\s*['"`]none['"`]/.test(src) && /visibility\s*===\s*['"`]hidden['"`]/.test(src);
+  if (geo) pass('the extractor still rejects display:none, visibility:hidden and zero-geometry elements');
+  else fail('the geometric visibility checks are missing — dropping the aria-hidden rule is only safe alongside them');
 }

@@ -1,0 +1,135 @@
+{
+  "lang": "en",
+  "page_format": "a4",
+  "candidate": {
+    "name": "Joshua Jose",
+    "phone": "+49 151 75033602",
+    "email": "joshuajoseprofessional@gmail.com",
+    "linkedin": {
+      "url": "https://linkedin.com/in/j0shuaj0se",
+      "display": "linkedin.com/in/j0shuaj0se"
+    },
+    "location": "Erlangen, Germany"
+  },
+  "summary": "MSc Data Science student at FAU Erlangen-Nürnberg (Apr 2026 - Aug 2028) with applied computer vision and deep learning experience: object detection, face recognition and Convolutional Neural Network training in PyTorch. Co-author of a peer-reviewed paper on deep-learning video surveillance published in the ICISD 2025 proceedings by Atlantis Press (Springer Nature), reporting 95.79% mAP@0.5 for weapon detection. Four applied AI and machine learning roles before the degree, the most recent recognised as Best Performer with 10+ production-ready models delivered. Comfortable owning data preparation, model training and model evaluation end to end. Based in Erlangen.",
+  "competencies": [
+    "Computer Vision",
+    "Object Detection (YOLOv11)",
+    "Deep Learning in PyTorch",
+    "Model Training & Evaluation",
+    "Data Preparation & Augmentation",
+    "Face Recognition (FaceNet)",
+    "Python (Pandas, NumPy, scikit-learn)",
+    "Machine Learning"
+  ],
+  "experience": [
+    {
+      "company": "Elevate Labs",
+      "role": "AI & ML Intern",
+      "location": "Bengaluru, India",
+      "dates": "Sep 2025 - Nov 2025",
+      "bullets": [
+        "Recognised as Best Performer of the cohort: completed 8 end-to-end machine learning projects and delivered 10+ production-ready models across the supervised and unsupervised spectrum.",
+        "Prepared data, trained models and reported the evaluation metric that fitted each problem: 95%+ ROC-AUC on a Support Vector Machine tuned by GridSearchCV hyperparameter search, 96%+ accuracy on breast-cancer diagnosis with Logistic Regression, R² above 0.90 on housing-price regression.",
+        "Built a Walmart weekly-sales forecasting model with XGBoost, reaching 96.1% R² and reducing forecast error by 18%.",
+        "Segmented 200 customers into five actionable clusters with K-Means at a silhouette score of 0.55."
+      ]
+    },
+    {
+      "company": "SmartInternz",
+      "role": "Generative AI Intern",
+      "location": "VIT Chennai, India",
+      "dates": "Jun 2024 - Jul 2024",
+      "bullets": [
+        "Built an ATS Resume Checker powered by large language models: parsing resumes, scoring them against job descriptions and returning structured feedback.",
+        "Designed and iterated LLM prompts and embedding-based retrieval on Google Vertex AI, then set up evaluation loops to measure and improve output quality."
+      ]
+    },
+    {
+      "company": "NxtGen",
+      "role": "Cloud Operations Engineer",
+      "location": "Bengaluru, India",
+      "dates": "Sep 2023 - Nov 2023",
+      "bullets": [
+        "Operated and supported VMware virtualisation infrastructure, automated recurring infrastructure tasks and set up monitoring for cloud workloads."
+      ]
+    },
+    {
+      "company": "SmartInternz",
+      "role": "AI/ML Extern",
+      "location": "India",
+      "dates": "Aug 2023 - Nov 2023",
+      "bullets": [
+        "Built an American Sign Language image-recognition system with a Convolutional Neural Network in PyTorch.",
+        "Implemented the full training, validation and inference pipeline, including data augmentation to improve generalisation."
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "name": "PrisonSecure - deep-learning video surveillance",
+      "badge": "ICISD 2025 - Atlantis Press (Springer Nature)",
+      "tech": "Python, PyTorch, YOLOv11, ResNet, FaceNet, SVM",
+      "description": "Final-year thesis project: a deep-learning surveillance system for prison environments running on live CCTV feeds. Weapon detection with YOLOv11 and hard negative mining to suppress false positives from visually similar objects; face recognition via a ResNet-based detector, FaceNet embeddings and an SVM classifier; real-time audio alerting on detection. Reported results: 95.79% mAP@0.5 with precision and recall both at 0.93 for weapon detection, and 93.75% accuracy for face recognition."
+    }
+  ],
+  "education": [
+    {
+      "title": "MSc Data Science",
+      "org": "Friedrich-Alexander-Universität Erlangen-Nürnberg (FAU)",
+      "year": "Apr 2026 - Aug 2028 (in progress)",
+      "description": "Erlangen, Germany."
+    },
+    {
+      "title": "BTech, Computer Science and Engineering",
+      "org": "Vellore Institute of Technology (VIT)",
+      "year": "Jan 2021 - Sep 2025",
+      "description": "India."
+    }
+  ],
+  "publications": [
+    {
+      "title": "PrisonSecure: A Smart Surveillance System for Prisons using Deep Learning",
+      "authors": "B. Athul Krishna, R. P. Aakash, Joshua Jose, S. Anubha Pearline",
+      "venue": "Proceedings of the International Conference on Intelligent Systems and Digital Transformation (ICISD 2025), Atlantis Highlights in Intelligent Systems, Atlantis Press (Springer Nature), pp. 1015-1033",
+      "year": "Oct 2025",
+      "url": "https://doi.org/10.2991/978-94-6463-866-0_82",
+      "doi": "10.2991/978-94-6463-866-0_82"
+    }
+  ],
+  "certifications": [
+    { "title": "Machine Learning Specialization" },
+    { "title": "IBM Data Science Professional Certificate" },
+    { "title": "Oracle Cloud Infrastructure 2025 Certified Data Science Professional" }
+  ],
+  "skills": [
+    {
+      "category": "Computer Vision & Deep Learning",
+      "items": "PyTorch, Convolutional Neural Networks, object detection (YOLOv11), face recognition (FaceNet), hard negative mining, data augmentation"
+    },
+    {
+      "category": "Machine Learning",
+      "items": "Scikit-Learn, XGBoost, Feature Engineering, Linear & Logistic Regression, Decision Trees, Random Forests, SVM, K-Nearest Neighbours, K-Means clustering, GridSearchCV hyperparameter tuning"
+    },
+    {
+      "category": "Evaluation",
+      "items": "mAP, ROC-AUC, R², silhouette score, model evaluation and validation"
+    },
+    {
+      "category": "Programming & Data",
+      "items": "Python (Pandas, NumPy, scikit-learn), SQL, Jupyter, Git"
+    },
+    {
+      "category": "Generative AI / LLM",
+      "items": "Prompt Engineering, RAG, Embeddings, Google Vertex AI, managed endpoints, evaluation loops"
+    },
+    {
+      "category": "Cloud & Infrastructure",
+      "items": "Oracle Cloud Infrastructure, Google Cloud (Vertex AI), VMware, infrastructure automation, monitoring"
+    },
+    {
+      "category": "Languages",
+      "items": "English (full professional), Hindi (full professional), Malayalam (full professional), German (A2)"
+    }
+  ]
+}

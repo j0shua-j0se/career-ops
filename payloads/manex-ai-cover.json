@@ -1,0 +1,48 @@
+{
+  "candidate": {
+    "name": "Joshua Jose",
+    "email": "joshuajoseprofessional@gmail.com",
+    "phone": "+49 151 75033602",
+    "location": "Erlangen, Germany",
+    "linkedin": "linkedin.com/in/j0shuaj0se",
+    "credentials": [
+      "MSc Data Science, FAU Erlangen-Nürnberg (in progress)",
+      "BTech Computer Science, VIT",
+      "Oracle Cloud Infrastructure 2025 Certified Data Science Professional"
+    ]
+  },
+  "letter": {
+    "role_title": "AI Quality Engineer, Working Student (f/m/d)",
+    "company": "Manex AI GmbH",
+    "city": "Munich",
+    "date": "2026-08-10",
+    "opening": "Your AI Quality Engineer posting asks for someone to design and run evals: datasets, scoring, regression tracking over time. That measurement work is what I did around a large language model application at SmartInternz, and it is the part of my work I most want to keep doing.",
+    "profile_intro": "I am four months into an MSc in Data Science at FAU Erlangen-Nürnberg, after a BTech in Computer Science and four applied internships in machine learning, generative AI and cloud operations. At Elevate Labs I delivered 10+ production-ready models in Python and was recognised as Best Performer of the cohort. Most of that work came down to choosing a metric and then defending the choice.",
+    "achievements": [
+      {
+        "lead": "Evals around a live LLM application",
+        "impact": "set up evaluation loops on Google Vertex AI to measure and improve the output quality of an ATS Resume Checker, after designing the prompts and the embedding-based retrieval behind it and deploying it against managed endpoints."
+      },
+      {
+        "lead": "A fix with a number attached",
+        "impact": "built a Walmart weekly-sales forecasting model with XGBoost that reached 96.1% R² and reduced forecast error by 18%."
+      },
+      {
+        "lead": "Metric chosen to match the failure",
+        "impact": "ran a GridSearchCV hyperparameter search over a Support Vector Machine to 95%+ ROC-AUC, took breast-cancer classification to 96%+ accuracy, and scored customer segmentation at a silhouette of 0.55 instead of judging the clusters by eye."
+      },
+      {
+        "lead": "Findings written to survive review",
+        "impact": "co-authored PrisonSecure in the ICISD 2025 proceedings published by Atlantis Press, reporting 95.79% mAP@0.5 for weapon detection and 93.75% accuracy for face recognition."
+      }
+    ],
+    "problems_section": "Manex runs Kosmos inside customer production lines, so a shift in system behaviour shows up on a factory floor. The first thing I would want is a small evaluation set whose scores move when behaviour moves, so a change can be called an improvement with a number attached, and then those scores tracked over time so a regression is caught before a customer meets it. I have not built adversarial test suites before. I have built the measurement half, and breaking things on purpose is what I would be learning from your senior engineers.",
+    "closing": "On logistics, plainly. I live in Erlangen and the posting says Munich-based with regular time on-site. At sixteen to twenty hours a week, two round trips would spend a fifth of the contract on trains, so I will not pretend that commute works. What I would propose is predominantly remote from Erlangen with one fixed on-site day, weekly or fortnightly, whichever suits the team, and full days on site during semester breaks when the hours cap lifts. If the role needs someone in the office most weeks, tell me and I will stop taking up your time. Your hours clause is the best-specified I have read this year, and it is why I am asking rather than moving on.",
+    "language_closing": "Ich lerne derzeit Deutsch auf dem Niveau A2 und arbeite auf B1 hin.",
+    "signature": {
+      "valediction": "Kind regards,",
+      "name": "Joshua Jose"
+    }
+  },
+  "output_path": "output/manex-ai-quality-engineer-working-student-cover.pdf"
+}

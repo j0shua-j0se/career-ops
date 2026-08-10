@@ -1,0 +1,53 @@
+{
+  "candidate": {
+    "name": "Joshua Jose",
+    "email": "joshuajoseprofessional@gmail.com",
+    "phone": "+49 151 75033602",
+    "location": "Erlangen, Deutschland",
+    "linkedin": "linkedin.com/in/j0shuaj0se",
+    "credentials": [
+      "MSc Data Science, FAU Erlangen-Nürnberg (laufend)",
+      "BTech Computer Science, VIT",
+      "Oracle Cloud Infrastructure 2025 Certified Data Science Professional"
+    ]
+  },
+  "letter": {
+    "role_title": "Werkstudent (w/m/d) LLM und KI-Agenten für Datenerfassung und -auswertung (Job-ID 516903)",
+    "company": "Siemens Mobility GmbH",
+    "city": "Erlangen",
+    "date": "2026-08-10",
+    "greeting": "Sehr geehrte Frau Hitz,",
+    "opening": "Ihre Ausschreibung nennt Auswertungsalgorithmen auf Basis von LLMs, und genau das ist der Teil meiner bisherigen Arbeit, den ich am liebsten mache. Bei SmartInternz habe ich eine LLM-Anwendung auf Google Vertex AI entwickelt und die Evaluationsschleifen aufgesetzt, die deren Ausgabequalität überhaupt erst messbar gemacht haben.",
+    "profile_intro": "Ich studiere Data Science im Master an der FAU Erlangen-Nürnberg und wohne in Erlangen. Davor habe ich einen Bachelor in Computer Science abgeschlossen und vier Praktika im Bereich KI und maschinelles Lernen absolviert, zuletzt bei Elevate Labs, wo ich als Best Performer des Jahrgangs ausgezeichnet wurde. Mein Schwerpunkt liegt weniger auf dem Trainieren von Modellen als auf der Frage, wie man ihre Ergebnisse belastbar misst.",
+    "achievements": [
+      {
+        "lead": "Evaluationsschleifen für eine LLM-Anwendung auf Google Vertex AI",
+        "impact": "Prompts und Embedding-basiertes Retrieval entworfen, die Anwendung an Managed Endpoints ausgeliefert und die Ausgabequalität anschließend gemessen und verbessert."
+      },
+      {
+        "lead": "Absatzprognose mit XGBoost",
+        "impact": "Wochenumsätze für Walmart vorhergesagt, dabei 96.1% R² erreicht und den Prognosefehler um 18% gesenkt."
+      },
+      {
+        "lead": "Metrikauswahl über acht Projekte hinweg",
+        "impact": "95%+ ROC-AUC bei einer Support Vector Machine mit GridSearchCV-Suche, 96%+ Genauigkeit bei der Brustkrebsdiagnose und ein Silhouettenwert von 0.55 bei der Segmentierung von 200 Kundinnen und Kunden."
+      },
+      {
+        "lead": "Begutachtete Veröffentlichung",
+        "impact": "Mitautor von PrisonSecure (ICISD 2025, Atlantis Press / Springer Nature), einem Deep-Learning-System zur Videoüberwachung, das bei der Waffenerkennung 95.79% mAP@0.5 erreicht."
+      },
+      {
+        "lead": "Monitoring und Infrastrukturautomatisierung bei NxtGen",
+        "impact": "VMware-Virtualisierungsinfrastruktur betrieben, wiederkehrende Infrastrukturaufgaben automatisiert und Monitoring für Cloud-Workloads eingerichtet."
+      }
+    ],
+    "problems_section": "Auswertungsalgorithmen und die Aufbereitung von Zuverlässigkeits- und Verfügbarkeitskennzahlen sind für mich zwei Seiten derselben Aufgabe: zuerst festlegen, was gemessen werden soll, dann prüfen, ob die Zahl das auch trägt. Die Betriebsseite solcher Kennzahlen kenne ich aus dem Monitoring von Cloud-Workloads bei NxtGen, allerdings aus dem Rechenzentrumsbetrieb und nicht aus der Simulation von Schienenfahrzeugen. Mit KI-Agenten-Frameworks habe ich bisher nicht gearbeitet; meine Erfahrung liegt auf der LLM-Seite, und dort kann ich vom ersten Tag an mitarbeiten.",
+    "closing": "Ich wohne in Erlangen, kann während der Vorlesungszeit bis zu 20 h/Woche arbeiten und in der vorlesungsfreien Zeit mehr. Über ein Gespräch freue ich mich.",
+    "language_closing": "Diese Bewerbung habe ich auf Deutsch verfasst. Damit Sie es richtig einordnen können: Ich lerne derzeit Deutsch auf dem Niveau A2 und arbeite auf B1 hin; fachlich arbeite ich bislang auf Englisch.",
+    "signature": {
+      "valediction": "Mit freundlichen Grüßen",
+      "name": "Joshua Jose"
+    }
+  },
+  "output_path": "output/siemens-mobility-llm-cover.pdf"
+}

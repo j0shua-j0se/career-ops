@@ -1,0 +1,48 @@
+{
+  "candidate": {
+    "name": "Joshua Jose",
+    "email": "joshuajoseprofessional@gmail.com",
+    "phone": "+49 151 75033602",
+    "location": "Erlangen, Germany",
+    "linkedin": "linkedin.com/in/j0shuaj0se",
+    "credentials": [
+      "MSc Data Science (in progress), FAU Erlangen-Nürnberg",
+      "BTech Computer Science and Engineering, VIT"
+    ]
+  },
+  "letter": {
+    "role_title": "Studentische Hilfskraft (HiWi) - Physical AI, Humanoide Robotik und Computer Vision",
+    "company": "FAU Erlangen-Nürnberg, Lehrstuhl FAPS",
+    "city": "Erlangen",
+    "date": "2026-08-10",
+    "greeting": "Dear Patrick Ziegler,",
+    "opening": "I would like to apply for the student assistant position in Physical AI, humanoid robotics and computer vision at the Lehrstuhl FAPS. I am enrolled in the MSc Data Science programme here at FAU, and computer vision is the part of my work with the most evidence behind it: object detection, face recognition and Convolutional Neural Network training in Python and PyTorch.",
+    "profile_intro": "Before moving to Erlangen I completed four applied artificial intelligence and machine learning roles in India. The most recent, an internship at Elevate Labs, ended with recognition as Best Performer of the cohort after 8 end-to-end machine learning projects. My final-year thesis project, PrisonSecure, is a deep-learning surveillance system that runs on live CCTV feeds, and it was published in the ICISD 2025 proceedings by Atlantis Press (Springer Nature).",
+    "achievements": [
+      {
+        "lead": "Object detection on a live video pipeline",
+        "impact": "PrisonSecure reached 95.79% mAP@0.5 with precision and recall both at 0.93 for weapon detection, with hard negative mining to suppress false positives from visually similar objects."
+      },
+      {
+        "lead": "Face recognition end to end",
+        "impact": "A ResNet-based detector, FaceNet embeddings and an SVM classifier identified individuals at 93.75% accuracy on the same feed, with real-time audio alerting on detection."
+      },
+      {
+        "lead": "PyTorch training pipelines",
+        "impact": "For an American Sign Language image-recognition system I implemented the full training, validation and inference pipeline, including data augmentation to improve generalisation."
+      },
+      {
+        "lead": "Evaluation treated as part of the work",
+        "impact": "Across 8 projects at Elevate Labs I picked the metric that fitted the problem, from 95%+ ROC-AUC on a Support Vector Machine tuned by GridSearchCV to 96.1% R² on an XGBoost sales forecast."
+      }
+    ],
+    "problems_section": "The posting says the concrete tasks follow the applicant's prior knowledge, so I want to be precise about what mine is. I can take on the perception side of a demonstrator: preparing image data, training detection and recognition models, and measuring them properly before anyone relies on the output. Robotics, humanoid systems and Physical AI are new to me, and I have not worked with ROS or ROS 2. I would treat both as things to learn in the group rather than as experience I already have.",
+    "closing": "I am enrolled at FAU until August 2028, so a longer-term collaboration fits my schedule. My CV is attached and I can send my current transcript of records immediately. Two questions from my side: what weekly hours do you have in mind, and which HiWi pay band applies given a completed Bachelor's degree in Computer Science?",
+    "language_closing": "Ich lerne derzeit Deutsch auf dem Niveau A2 und arbeite auf B1 hin.",
+    "signature": {
+      "valediction": "Kind regards,",
+      "name": "Joshua Jose"
+    }
+  },
+  "output_path": "output/fau-faps-hiwi-cover.pdf"
+}
