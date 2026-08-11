@@ -442,4 +442,27 @@ console.log('\nrun-core — the scan stage accounts for agent-driven sources');
   /scan-loop\.mjs wave/.test(midRun.instructions || '')
     ? pass('mid-run instructions name `scan-loop.mjs wave`, the command that records')
     : fail('mid-run instructions do not name `wave`');
+
+  // An ABORTED loop must never satisfy the scan stage.
+  //
+  // scan-loop's `abort` and `finish` both set phase='done' — byte-identical
+  // state apart from halted_reason — so reading the phase alone cannot tell a
+  // completed scan from an abandoned one. A run pass started after an abort
+  // SKIPPED THE ENTIRE SCAN STAGE, believing discovery had already happened:
+  // observed live, a pass jumped straight to Stage 1b and silently missed
+  // wave 1 (portals, including newly added providers) and wave 2 (interamt).
+  const aborted = decideNextStage(newRun(), {
+    loop: { done: false, endedAbnormally: true, haltedReason: 'stale run', phase: 'done' },
+  });
+  aborted.action === 'scan'
+    ? pass('an aborted loop keeps the run on the scan stage instead of completing it')
+    : fail(`an aborted loop decided ${aborted.action} — the scan stage would be skipped`);
+
+  /start --reset/.test(aborted.instructions || '')
+    ? pass('the aborted path says to start a FRESH loop, not to continue the dead one')
+    : fail('aborted instructions do not say to start a fresh loop');
+
+  /ended without completing/.test(aborted.reason || '')
+    ? pass('the reason states the previous loop did not complete')
+    : fail('the aborted reason does not explain itself');
 }

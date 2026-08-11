@@ -337,6 +337,21 @@ export function decideNextStage(state, facts = {}) {
         reason: `scan loop finished with ${loop.qualified ?? 0} qualified posting(s); agent-driven sources swept`,
       };
     }
+    // A previous loop that was aborted or halted left phase='done' with a
+    // halted_reason. It delivered nothing, so this pass needs a NEW run — and
+    // `scan-loop next` would otherwise just answer "run already finished".
+    if (loop.endedAbnormally) {
+      return {
+        ...base,
+        reason: `the previous scan loop ended without completing (${loop.haltedReason ?? 'no reason recorded'})`,
+        instructions: 'Start a FRESH loop: `node scan-loop.mjs start --reset`. The previous run ended '
+          + 'abnormally, so it delivered no scan results — do not treat it as a completed scan. Then '
+          + 'ask `node scan-loop.mjs next` what is due and run `node scan-loop.mjs wave` to execute it '
+          + '(NOT strategy.command directly, which scans for real without recording the rung). Repeat '
+          + 'until `next` reports `finish`, then `node scan-loop.mjs finish`.',
+      };
+    }
+
     return {
       ...base,
       reason: loop.phase

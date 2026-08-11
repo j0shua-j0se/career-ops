@@ -120,8 +120,23 @@ function loopFacts() {
   try {
     const status = JSON.parse(res.stdout);
     if (status.running === false && !status.run_id) return { done: false, phase: null, qualified: 0, available: true };
+    // `abort` and `finish` both set phase='done' — byte-identical state apart
+    // from halted_reason (scan-loop.mjs cmdAbort vs cmdFinish). Reading phase
+    // alone therefore cannot tell "the scan completed" from "the scan was
+    // abandoned", and a run pass started after an abort SKIPPED THE ENTIRE SCAN
+    // STAGE believing discovery had already happened. Observed live: a pass
+    // jumped straight to Stage 1b, silently missing wave 1 (portals — including
+    // newly added providers) and wave 2 (interamt).
+    //
+    // The phase value itself is deliberately not changed: three places depend on
+    // `phase === 'done'` (loop-core's decideNextAction, cmdStart's
+    // already-running guard, and the `running` flag), so the inference is fixed
+    // here rather than the vocabulary everywhere.
+    const endedAbnormally = Boolean(status.halted_reason);
     return {
-      done: status.phase === 'done',
+      done: status.phase === 'done' && !endedAbnormally,
+      endedAbnormally,
+      haltedReason: status.halted_reason ?? null,
       phase: status.phase ?? null,
       qualified: status.qualified ?? 0,
       available: true,
