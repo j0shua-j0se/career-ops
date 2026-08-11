@@ -199,6 +199,10 @@ const SYSTEM_PATHS = [
   'run-all.mjs',
   'modes/run.md',
   'ingest-jobs.mjs',
+  // Emits the exact Indeed `search_jobs` calls for the profile. Indeed has no
+  // public API and its MCP is agent-only, so the sweep can never be a provider;
+  // this is what keeps it mechanical rather than a per-pass judgement call.
+  'indeed-plan.mjs',
   // ──────────────────────────────────────────────────────────────────────
   'scan-interamt.mjs',
   'company-funded.mjs',

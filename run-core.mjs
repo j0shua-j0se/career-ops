@@ -39,8 +39,10 @@ export const STAGES = ['scan', 'pipeline', 'kits', 'sync'];
 export const AGENT_DRIVEN_SOURCES = [
   {
     id: 'indeed',
-    how: 'the Indeed MCP `search_jobs` (needs search, location, country_code: "DE") — an MCP tool only '
-      + 'the agent can call, so it can never be a providers/ module. No public API; the RSS feed 403s.',
+    how: 'the Indeed MCP `search_jobs` — an MCP tool only the agent can call, so it can never be a '
+      + 'providers/ module. No public API; the RSS feed 403s.',
+    plan: 'node indeed-plan.mjs --summary',
+    ingest: 'node ingest-jobs.mjs --file <offers.json> --source indeed-mcp',
   },
 ];
 
@@ -307,11 +309,12 @@ export function decideNextStage(state, facts = {}) {
           agent: true,
           reason: 'the scan loop finished, but the agent-driven sources (Stage 1b) have not been swept this pass',
           sources: AGENT_DRIVEN_SOURCES,
-          instructions: 'Sweep the sources in `sources` — see `modes/run.md` → Stage 1b. They have no '
-            + 'HTTP provider and cannot run inside scan.mjs. Collect {url, company, title, location} '
-            + 'into a JSON array and run `node ingest-jobs.mjs --file <file> --source <label>`. When '
-            + 'done — or if you deliberately skip them — record it with '
-            + '`node run-all.mjs note-sources --note "..."`, which is what lets this stage complete.',
+          instructions: 'Run `node indeed-plan.mjs --summary`. It prints the exact `search_jobs` '
+            + 'argument objects for this profile — call the Indeed MCP once per row, collect '
+            + '{url, company, title, location} for every hit into a JSON array, then '
+            + '`node ingest-jobs.mjs --file <file> --source indeed-mcp`. Finally record it with '
+            + '`node run-all.mjs note-sources --note "..."`, which is what lets this stage complete. '
+            + 'Full context in `modes/run.md` → Stage 1b.',
         };
       }
       return {

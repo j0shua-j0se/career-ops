@@ -53,9 +53,22 @@ Collect `{url, company, title, location?, postedAt?}` into a JSON array, then:
 node ingest-jobs.mjs --file offers.json --source <label>
 ```
 
-**This stage is now enforced, not remembered.** When the scan loop finishes,
-`run-all.mjs next` returns `scan-agent-sources` and will NOT complete the stage
-until you record the sweep with `node run-all.mjs note-sources --note "..."`.
+**This stage is now enforced AND mechanical.** When the scan loop finishes,
+`run-all.mjs next` returns `scan-agent-sources`. Do this:
+
+```bash
+node indeed-plan.mjs --summary
+```
+
+It prints the exact `search_jobs` argument objects for this profile — queries ×
+locations, `country_code` derived from `config/profile.yml` → `location`. Call
+the Indeed MCP once per row, collect `{url, company, title, location}` for every
+hit into a JSON array, then `node ingest-jobs.mjs --file <file> --source
+indeed-mcp`. Override the queries in `portals.yml` → `indeed:` if the targeting
+changes; there is no need to edit code.
+
+The stage will NOT complete until you record the sweep with `node run-all.mjs
+note-sources --note "..."`.
 That exists because the omission was silent: an Indeed sweep that legitimately
 finds nothing writes exactly what a sweep that never ran writes, so a pass could
 report "scan complete" having never touched it. Record it even when you skip
