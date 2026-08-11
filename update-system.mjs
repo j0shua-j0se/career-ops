@@ -198,6 +198,7 @@ const SYSTEM_PATHS = [
   'run-core.mjs',
   'run-all.mjs',
   'modes/run.md',
+  'ingest-jobs.mjs',
   // ──────────────────────────────────────────────────────────────────────
   'scan-interamt.mjs',
   'company-funded.mjs',
