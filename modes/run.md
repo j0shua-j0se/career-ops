@@ -57,18 +57,31 @@ node ingest-jobs.mjs --file offers.json --source <label>
 `run-all.mjs next` returns `scan-agent-sources`. Do this:
 
 ```bash
-node indeed-plan.mjs --summary
+node websearch-plan.mjs --summary
 ```
 
-It prints the exact `search_jobs` argument objects for this profile — queries ×
-locations, `country_code` derived from `config/profile.yml` → `location`. Call
-the Indeed MCP once per row, collect `{url, company, title, location}` for every
-hit into a JSON array, then `node ingest-jobs.mjs --file <file> --source
-indeed-mcp`. Override the queries in `portals.yml` → `indeed:` if the targeting
-changes; there is no need to edit code.
+It selects the **stalest** `site:` queries from `portals.yml` → `search_queries`
+and rotates them, so one pass costs ~10 searches rather than 32. Run each with
+WebSearch, collect `{url, company, title, location}` per hit, then:
 
-The stage will NOT complete until you record the sweep with `node run-all.mjs
-note-sources --note "..."`.
+```bash
+node ingest-jobs.mjs --file offers.json --source websearch
+```
+
+Then `node websearch-plan.mjs --record "<name>" ...` so the next pass rotates on,
+and `node run-all.mjs note-sources --note "..."` to complete the stage.
+
+**Why a search engine and not a fetcher.** LinkedIn (`User-agent: * → Disallow:
+/`) and XING (`Disallow: /jobs/search/`) both refuse automated fetching in
+robots.txt — XING's matching `Allow` is scoped to `User-agent: Perplexity-User`,
+one named agent, not us. Both permit search engines to index their job pages,
+which is why a `site:` query returns anything. Going through the index is the
+route they allow. **Do not "upgrade" this to a scraper.**
+
+Queries for sites that now have providers (StepStone, Indeed, Arbeitsagentur)
+sort last — they stay enabled because a search engine occasionally surfaces what
+a board search missed, but they must not eat the budget for sources with no
+other route in.
 That exists because the omission was silent: an Indeed sweep that legitimately
 finds nothing writes exactly what a sweep that never ran writes, so a pass could
 report "scan complete" having never touched it. Record it even when you skip

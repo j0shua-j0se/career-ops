@@ -320,12 +320,14 @@ export function decideNextStage(state, facts = {}) {
           agent: true,
           reason: 'the scan loop finished, but the robots-blocked sources (Stage 1b) have not been swept this pass',
           sources: AGENT_DRIVEN_SOURCES,
-          instructions: 'Run the `site:` queries for these sources from `portals.yml` → `search_queries` '
-            + 'as WebSearch — NOTHING reads that section automatically, which is why 32 configured '
-            + 'queries have never run. Collect {url, company, title, location} for each hit and '
-            + '`node ingest-jobs.mjs --file <file> --source websearch`. Do NOT fetch these hosts '
-            + 'directly: both Disallow it in robots.txt. Then record it with '
-            + '`node run-all.mjs note-sources --note "..."`, which is what lets this stage complete.',
+          instructions: 'Run `node websearch-plan.mjs --summary`. It selects the stalest `site:` '
+            + 'queries from `portals.yml` → `search_queries` (nothing else reads that section, which '
+            + 'is why 32 configured queries had never run) and rotates them so no single pass is '
+            + 'expensive. Run each with WebSearch, collect {url, company, title, location} per hit, '
+            + 'then `node ingest-jobs.mjs --file offers.json --source websearch` and '
+            + '`node websearch-plan.mjs --record "<name>" ...`. Do NOT fetch linkedin.com or '
+            + 'xing.com directly — both Disallow it in robots.txt; a search engine is the route they '
+            + 'permit. Finally `node run-all.mjs note-sources --note "..."` to complete the stage.',
         };
       }
       return {

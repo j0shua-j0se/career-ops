@@ -199,6 +199,10 @@ const SYSTEM_PATHS = [
   'run-all.mjs',
   'modes/run.md',
   'ingest-jobs.mjs',
+  // Selects which portals.yml search_queries to run this pass. WebSearch is an
+  // agent tool, so these can never be a provider; this rotates them so the step
+  // is affordable and therefore actually happens.
+  'websearch-plan.mjs',
   // ──────────────────────────────────────────────────────────────────────
   'scan-interamt.mjs',
   'company-funded.mjs',
