@@ -42,6 +42,9 @@ If deeper company research is useful, recommend running `/career-ops deep` separ
 ## Step 0 — Archetype Detection
 
 Classify the job into one of the 6 archetypes (see `_shared.md`). If it is a hybrid, indicate the 2 closest ones. This determines:
+
+**When `config/profile.yml` defines `target_roles.archetypes`, those names win** — and the Machine Summary `archetype:` key takes the winning name **verbatim** (or `none`). It is a grouping key, not prose: an invented slug or an appended qualifier splits one archetype's conversion evidence across buckets. Full rule in `batch/batch-prompt.md` → Step 0.
+
 - Which proof points to prioritize in block B
 - How to rewrite the summary in block E
 - Which STAR stories to prepare in block F

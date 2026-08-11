@@ -15,7 +15,7 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname, relative, sep } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { load as yamlLoad } from 'js-yaml';
 import { resolveColumns, parseTrackerRow, normalizeVia } from './tracker-parse.mjs';
 
@@ -24,6 +24,115 @@ const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
   ? join(CAREER_OPS, 'data/applications.md')
   : join(CAREER_OPS, 'applications.md');
 const REPORTS_DIR = join(CAREER_OPS, 'reports');
+const PROFILE_PATH = join(CAREER_OPS, 'config/profile.yml');
+
+// --- Archetype normalization -------------------------------------------------
+//
+// Reports write `archetype:` as free-form prose, one ad-hoc slug per evaluation:
+// `working-student-ai-ml`, `Working Student — AI/ML`, `working-student-ai-ml-
+// primary`, `working-student-ai-ml-evaluation`, `data-science-working-student-
+// weak-partial`… all naming ONE archetype. Grouped verbatim, 32 reports produced
+// ~20 buckets, almost every one with total=1, so the conversion rates this whole
+// analysis exists to produce were computed on samples of one and the "double
+// down on X" recommendation keyed off whichever singleton happened to convert.
+//
+// The canonical list is user-layer data (`config/profile.yml` → `archetypes[]`),
+// exactly where AGENTS.md says targeting lives. This module only READS it — it
+// never invents or writes archetypes.
+//
+// Nothing is hidden by the folding: every group reports the raw variants it
+// absorbed, and anything that fails to match is listed rather than silently
+// bucketed, so a wrong mapping is visible instead of quietly skewing a rate.
+
+// Tokens too generic to carry a match on their own. "student" and "engineer"
+// stay OUT of this list: they are genuinely discriminating here (working-student
+// vs entry-level, engineer vs scientist).
+const ARCHETYPE_NOISE_TOKENS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'in', 'of', 'for', 'to', 'with',
+  'role', 'roles', 'position', 'level', 'entry', 'junior', 'senior',
+  'primary', 'secondary', 'adjacent', 'weak', 'strong', 'partial', 'full',
+  'one', 'two', 'bullet', 'bullets', 'only', 'mislevelled',
+  'msc', 'ms', 'progress',
+]);
+
+// Raw values that explicitly say "this posting matched no archetype". They must
+// never be folded into a real archetype — doing so would inflate that
+// archetype's total with postings that were rejected for being off-target.
+const NO_ARCHETYPE_RE = /^(?:none|no[-_\s]?match|off[-_\s]?archetype|unknown)\b/i;
+
+export function archetypeTokens(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFKD').replace(/[̀-ͯ]/g, '')
+    // Fold the possessive before splitting, or "Master's thesis" tokenizes to
+    // ["master","s"] and never matches a report's "masters-thesis".
+    .replace(/'s\b/g, 's')
+    // Treat every separator alike so "AI/ML", "ai-ml" and "AI, ML" tokenize the same.
+    .split(/[^a-z0-9+]+/)
+    .filter((t) => t && !ARCHETYPE_NOISE_TOKENS.has(t));
+}
+
+/** Canonical archetypes from the user's profile. Never derived from reports. */
+export function loadCanonicalArchetypes(profilePath = PROFILE_PATH) {
+  if (!existsSync(profilePath)) return [];
+  let parsed;
+  try {
+    parsed = yamlLoad(readFileSync(profilePath, 'utf-8'));
+  } catch {
+    return []; // a malformed profile disables folding; it must not crash analysis
+  }
+  const list = parsed?.target_roles?.archetypes ?? parsed?.archetypes ?? [];
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((a) => (typeof a === 'string' ? a : a?.name))
+    .filter(Boolean)
+    .map((name) => ({ name, tokens: new Set(archetypeTokens(name)) }));
+}
+
+/**
+ * Fold a free-form report archetype onto a canonical one.
+ *
+ * Conservative by construction: at least two shared tokens, and the winner must
+ * beat the runner-up outright. A tie means the value is genuinely ambiguous
+ * between two archetypes, and guessing would move a conversion rate on no
+ * evidence — so it stays unmapped and gets reported as such.
+ *
+ * @returns {string|null} canonical name, or null when it should not be folded
+ */
+export function normalizeArchetype(raw, canonical) {
+  if (!raw || !canonical?.length) return null;
+  if (NO_ARCHETYPE_RE.test(String(raw).trim())) return null;
+
+  const tokens = new Set(archetypeTokens(raw));
+  if (tokens.size === 0) return null;
+
+  let best = null;
+  let bestScore = 0;
+  let tied = false;
+  let bestShared = [];
+  for (const arch of canonical) {
+    const shared = [];
+    for (const t of tokens) if (arch.tokens.has(t)) shared.push(t);
+    const score = shared.length;
+    if (score > bestScore) { bestScore = score; best = arch.name; bestShared = shared; tied = false; }
+    else if (score === bestScore && score > 0) tied = true;
+  }
+
+  if (bestScore === 0 || tied) return null;
+
+  // Two shared tokens is the general bar. One suffices when that token belongs
+  // to exactly one archetype in the profile, because such a token is by
+  // definition discriminating — "werkstudent", "hiwi", "mlops", "praktikum".
+  // Requiring two would drop a report labelled simply `werkstudent`, which
+  // names its archetype unambiguously.
+  if (bestScore === 1) {
+    const token = bestShared[0];
+    const owners = canonical.filter((a) => a.tokens.has(token)).length;
+    if (owners !== 1) return null;
+  }
+
+  return best;
+}
 
 const MACHINE_SUMMARY_FIELDS = new Set([
   'company',
@@ -34,6 +143,12 @@ const MACHINE_SUMMARY_FIELDS = new Set([
   'final_decision',
   'hard_stops',
   'soft_gaps',
+  // Aliases for the two above. Reports in this pipeline write `blockers:` and
+  // `gaps:` — 30 of 32 do — and this allowlist silently dropped both before any
+  // consumer saw them, so blockerAnalysis and techStackGaps came back empty
+  // while every report was full of gap data.
+  'blockers',
+  'gaps',
   'top_strengths',
   'risk_level',
   'confidence',
@@ -470,10 +585,16 @@ function parseReport(reportPath) {
       report.scores.global = machineSummary.score;
     }
 
-    for (const hardStop of normalizeList(machineSummary.hard_stops)) {
+    // `blockers:`/`gaps:` are accepted alongside the schema's `hard_stops:`/
+    // `soft_gaps:`. Reports in this pipeline write the former — all 32 of them —
+    // so reading only the schema names made blockerAnalysis and techStackGaps
+    // come back EMPTY while every report was full of gap data. The failure is
+    // silent by nature: an empty array reads as "no blockers found", which is
+    // indistinguishable from "nothing was ever parsed".
+    for (const hardStop of [...normalizeList(machineSummary.hard_stops), ...normalizeList(machineSummary.blockers)]) {
       report.gaps.push({ description: hardStop, severity: 'hard stop', mitigation: '' });
     }
-    for (const softGap of normalizeList(machineSummary.soft_gaps)) {
+    for (const softGap of [...normalizeList(machineSummary.soft_gaps), ...normalizeList(machineSummary.gaps)]) {
       report.gaps.push({ description: softGap, severity: 'soft gap', mitigation: '' });
     }
   }
@@ -627,14 +748,41 @@ function classifyCompanySize(teamSize) {
 }
 
 // --- Extract hard blocker keywords from gaps ---
-function extractBlockerType(gap) {
+// Follow-up actions the evaluator recorded alongside real blockers: "ask-…",
+// "confirm-…", "clarify-…", "do-not-mention-…". They are things for the USER to
+// do, not reasons a role is closed to them, and counting them as blockers made
+// `other` the largest category by far (51 of 58 here) — which is the same as
+// having no blocker analysis at all.
+const ACTION_ITEM_RE = /^\s*(?:ask|confirm|clarify|check|verify|assemble|correct|do[-\s]?not|note|remember|prepare)\b[-\s]/i;
+
+export function extractBlockerType(gap) {
   const desc = gap.description.toLowerCase();
   const sev = gap.severity.toLowerCase();
   if (sev.includes('nice') || sev.includes('soft')) return null; // skip soft gaps
-  if (/\b(residency|us[- ]only|canada|location|visa|geo|country|region)\b/.test(desc)) return 'geo-restriction';
-  if (/\b(javascript|typescript|python|ruby|java|go|rust|node|react|angular|vue|django|flask|rails)\b/.test(desc)) return 'stack-mismatch';
-  if (/\b(senior|staff|lead|principal|director|manager|head)\b/.test(desc)) return 'seniority-mismatch';
-  if (/\b(hybrid|on-?site|office|relocat)\b/.test(desc)) return 'onsite-requirement';
+  if (ACTION_ITEM_RE.test(desc)) return null;                    // a to-do, not a blocker
+
+  // Language first: in a non-English-speaking market it is the single most
+  // common reason a technically-strong candidate is closed out, and it was
+  // landing in `other`. Across this pipeline's 13 evaluations a German
+  // requirement decided almost every outcome — the pattern is only visible if
+  // it has its own bucket.
+  if (/\b(?:german|deutsch|french|spanish|dutch|language|sprach)\w*\b|verhandlungssicher|flie(?:ss|ß)end|muttersprach|\b[abc][12]\b/.test(desc)) return 'language-requirement';
+
+  if (/\b(residency|us[- ]only|canada|visa|sponsor\w*|work permit|geo|country|region)\b/.test(desc)) return 'geo-restriction';
+  // Distance is written as "berlin-430km-not-full-remote" / "freiburg-450km-…",
+  // which matched none of the geo words above.
+  if (/\d+\s?km\b|\bcommut\w*|\bdistance\b/.test(desc)) return 'distance';
+  if (/\b(javascript|typescript|python|ruby|java|go|rust|node|react|angular|vue|django|flask|rails|c#|visualbasic|cad)\b/.test(desc)) return 'stack-mismatch';
+  // Hours and contract shape: a 20 h/week cap against a full-time contract is a
+  // hard stop for a working student, and it recurs across this tracker.
+  if (/\b(?:weekly[-\s]hours|hours[-\s]per[-\s]week|full[-\s]?time|vollzeit|20[-\s]?h|werkstudent[-\s]vs|contract)\b/.test(desc)) return 'hours-or-contract';
+  if (/\b(?:hourly[-\s]rate|pay|salary|verg[uü]tung|entgeltgruppe|tarif|eur\b|stipend)/.test(desc)) return 'pay';
+  // "five-years-frontend-professional-experience" puts the domain between the
+  // year count and the word "experience", so a `years-of-experience` phrase
+  // match misses it. Any explicit year count is the signal.
+  if (/\b(?:\d+\+?|one|two|three|four|five|six|seven|eight|nine|ten)[-\s]years?\b/.test(desc)) return 'seniority-mismatch';
+  if (/\b(senior|staff|lead|principal|director|manager|head|years?[-\s](?:of[-\s])?experience|semester)\b/.test(desc)) return 'seniority-mismatch';
+  if (/\b(hybrid|on-?site|office|relocat|pr[aä]senz)\w*\b/.test(desc)) return 'onsite-requirement';
   return 'other';
 }
 
@@ -727,36 +875,65 @@ function analyze() {
   };
 
   // --- Archetype breakdown ---
+  // Free-form report archetypes are folded onto the canonical list from the
+  // user's profile first; see normalizeArchetype. Unfolded values keep their own
+  // bucket and are also listed in `archetypeUnmapped`, so a bad fold or a
+  // missing canonical entry is visible rather than silently skewing a rate.
+  const canonical = loadCanonicalArchetypes();
   const archetypeMap = new Map();
+  const archetypeUnmapped = new Map();
   for (const e of enriched) {
-    const arch = e.report?.archetype || 'Unknown';
-    if (!archetypeMap.has(arch)) archetypeMap.set(arch, { total: 0, positive: 0, negative: 0, self_filtered: 0, pending: 0 });
+    const raw = e.report?.archetype || 'Unknown';
+    const folded = normalizeArchetype(raw, canonical);
+    if (!folded) archetypeUnmapped.set(raw, (archetypeUnmapped.get(raw) || 0) + 1);
+    const arch = folded || raw;
+    if (!archetypeMap.has(arch)) archetypeMap.set(arch, { total: 0, positive: 0, negative: 0, self_filtered: 0, pending: 0, canonical: Boolean(folded), variants: new Set() });
     const entry = archetypeMap.get(arch);
     entry.total++;
     entry[e.outcome]++;
+    entry.variants.add(raw);
   }
   const archetypeBreakdown = [...archetypeMap.entries()].map(([archetype, data]) => ({
     archetype,
-    ...data,
+    total: data.total,
+    positive: data.positive,
+    negative: data.negative,
+    self_filtered: data.self_filtered,
+    pending: data.pending,
+    canonical: data.canonical,
+    // Only interesting when more than one spelling was folded together.
+    variants: data.variants.size > 1 ? [...data.variants].sort() : undefined,
     conversionRate: data.total > 0 ? Math.round((data.positive / data.total) * 100) : 0,
   })).sort((a, b) => b.total - a.total);
 
   // --- Blocker analysis ---
   const blockerCounts = new Map();
+  // Applications touched by each blocker type. `frequency` counts occurrences
+  // and one report can list the same blocker twice, so dividing that by the
+  // application count produced percentages above 100 (159% here) — a number that
+  // cannot mean anything. The share is now "applications with this blocker",
+  // which is what the phrase implies and is bounded by construction.
+  const blockerApps = new Map();
   const totalWithGaps = enriched.filter(e => e.report?.gaps?.length > 0);
   for (const e of enriched) {
     if (!e.report?.gaps) continue;
+    const seenInThisApp = new Set();
     for (const gap of e.report.gaps) {
       const type = extractBlockerType(gap);
       if (!type) continue;
       blockerCounts.set(type, (blockerCounts.get(type) || 0) + 1);
+      seenInThisApp.add(type);
     }
+    for (const type of seenInThisApp) blockerApps.set(type, (blockerApps.get(type) || 0) + 1);
   }
   const blockerAnalysis = [...blockerCounts.entries()]
     .map(([blocker, frequency]) => ({
       blocker,
       frequency,
-      percentage: Math.round((frequency / enriched.length) * 100),
+      applications: blockerApps.get(blocker) || 0,
+      percentage: enriched.length > 0
+        ? Math.round(((blockerApps.get(blocker) || 0) / enriched.length) * 100)
+        : 0,
     }))
     .sort((a, b) => b.frequency - a.frequency);
 
@@ -951,8 +1128,13 @@ function analyze() {
     });
   }
 
-  // Best archetype recommendation
-  const bestArchetype = archetypeBreakdown.filter(a => a.total >= 2).sort((a, b) => b.conversionRate - a.conversionRate)[0];
+  // Best archetype recommendation. Restricted to CANONICAL archetypes: an
+  // unfolded value is an ad-hoc phrase invented by one report, so "double down
+  // on it" is not advice the user can act on — there is no such target to aim
+  // at, and the sample behind it is usually a single application.
+  const bestArchetype = archetypeBreakdown
+    .filter(a => a.canonical && a.total >= 2)
+    .sort((a, b) => b.conversionRate - a.conversionRate)[0];
   if (bestArchetype && bestArchetype.conversionRate > 0) {
     recommendations.push({
       action: `Double down on "${bestArchetype.archetype}" roles (${bestArchetype.conversionRate}% conversion rate)`,
@@ -1029,6 +1211,13 @@ function analyze() {
     funnel,
     scoreComparison,
     archetypeBreakdown,
+    // Report values that could not be folded onto a profile archetype. A long
+    // list here means either the reports are drifting from the profile or the
+    // profile is missing an archetype the search is actually pursuing — both
+    // worth seeing, neither safe to guess at.
+    archetypeUnmapped: [...archetypeUnmapped.entries()]
+      .map(([archetype, count]) => ({ archetype, count }))
+      .sort((a, b) => b.count - a.count),
     blockerAnalysis,
     remotePolicy,
     companySizeBreakdown,
@@ -1079,7 +1268,10 @@ function printSummary(result) {
     console.log('\nTOP BLOCKERS');
     console.log('-'.repeat(40));
     for (const b of blockerAnalysis) {
-      console.log(`  ${b.blocker.padEnd(20)} ${String(b.frequency).padStart(2)}x (${b.percentage}% of all)`);
+      // "Nx" counts occurrences; the share is of APPLICATIONS touched, which is
+      // a different denominator — spell both out rather than let "of all" imply
+      // they are the same number.
+      console.log(`  ${b.blocker.padEnd(20)} ${String(b.frequency).padStart(2)}x  in ${String(b.applications).padStart(2)}/${metadata.total} apps (${b.percentage}%)`);
     }
   }
 
@@ -1156,16 +1348,22 @@ function printSummary(result) {
 }
 
 // --- Run ---
-if (args.includes('--self-test')) {
-  runSelfTest();
+// Guarded, as in check-liveness.mjs and stats.mjs. Without it merely importing
+// this module for its helpers ran a full analysis, dumped the whole JSON report
+// to stdout, and could call process.exit(1) — which in an in-process test runner
+// terminates the run itself.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (args.includes('--self-test')) {
+    runSelfTest();
+  }
+
+  const result = analyze();
+
+  if (summaryMode) {
+    printSummary(result);
+  } else {
+    console.log(JSON.stringify(result, null, 2));
+  }
+
+  if (result.error) process.exit(1);
 }
-
-const result = analyze();
-
-if (summaryMode) {
-  printSummary(result);
-} else {
-  console.log(JSON.stringify(result, null, 2));
-}
-
-if (result.error) process.exit(1);

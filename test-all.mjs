@@ -5011,7 +5011,11 @@ console.log('\n12c. Materialized skill index mode');
     const fixtureSkill = '---\nname: career-ops\n---\n\n# canonical skill\n';
     const pointer = '../../../.agents/skills/career-ops/SKILL.md';
 
-    gitRun(['init']);
+    // -b pins the initial branch name. Without it git emits its "using 'master'
+    // as the name for the initial branch" advice to stderr, which is the only
+    // thing making an otherwise-clean run report "passed with warnings" — a
+    // standing yellow that trains the reader to ignore the warning count.
+    gitRun(['init', '-b', 'main']);
     // core.excludesFile is only the GLOBAL layer. `git init` also seeds
     // .git/info/exclude from a template, which GIT_TEMPLATE_DIR can still point
     // at an ambient one, so empty that layer too rather than assume it is inert.

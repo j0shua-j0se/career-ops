@@ -394,7 +394,12 @@ function buildRepostCluster(clusterRows, windowDays) {
   // seats, not four reposts. Without this guard 58 clusters were reported for
   // this history and only ONE (Flix, 6-day span) was a real repost, so the
   // genuine signal was buried under ~57 false ones and the report was unusable.
-  if (span < MIN_SPAN_DAYS) return null;
+  //
+  // Clamped to the window: `--window 0` asks for same-day clusters explicitly,
+  // and requiring a 1-day span inside a 0-day window is self-contradictory — it
+  // would make that flag return nothing at all. So the guard applies only where
+  // the window leaves room for it.
+  if (span < Math.min(MIN_SPAN_DAYS, windowDays)) return null;
 
   const role = last.title;
   const appearances = sorted.map(r => ({ url: r.url, date: r.dateStr, title: r.title }));

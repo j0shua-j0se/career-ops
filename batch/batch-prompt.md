@@ -102,6 +102,25 @@ Read `cv.md`, `article-digest.md`, `llms.txt`, `modes/_profile.md`, and `config/
 
 #### Step 0 — Archetype Detection
 
+**The archetype set is the user's, and the label is copied, not composed.** When
+`config/profile.yml` defines `target_roles.archetypes`, classify against THOSE
+names and write the winning one **verbatim** into the Machine Summary
+`archetype:` field. The table below is only the fallback for a profile that
+defines none. Write `none` when the posting matches no archetype — that is a
+real and useful answer.
+
+Do not invent a slug, do not append a qualifier, and do not blend two names.
+`archetype:` is a grouping key that `analyze-patterns.mjs` counts conversions
+by, so every spelling variant splits one archetype's evidence into separate
+buckets. Left free-form, 32 reports produced ~20 buckets — `working-student-ai-ml`,
+`Working Student — AI/ML`, `working-student-ai-ml-primary`,
+`data-science-working-student-weak-partial` and five more all naming one
+archetype — and every conversion rate was computed on a sample of one. Nuance
+about fit belongs in the Block A table and the notes, never in this key.
+
+For a genuine hybrid, pick the closer archetype for this field and name the
+second in Block A.
+
 Classify the role as one or two closest archetypes:
 
 | Archetype | Signals | Buyer intent |
@@ -292,7 +311,7 @@ company: "{company}"
 role: "{role}"
 score: {X.X}
 legitimacy_tier: "{High Confidence | Proceed with Caution | Suspicious}"
-archetype: "{detected}"
+archetype: "{detected}"   # VERBATIM from the user's profile — see below
 final_decision: "{Apply | Consider | Research first | Skip}"
 hard_stops:
   - "{blocking gap or risk}"
@@ -319,6 +338,17 @@ risk_summary:
 
 Rules:
 - Use `[]` for `hard_stops`, `soft_gaps`, `top_strengths`, or `discard_reasons` when empty.
+- **`hard_stops` and `soft_gaps` are the canonical names — prefer them.** `blockers`
+  and `gaps` are accepted as aliases because reports in the wild write those, and
+  reading only the canonical pair meant 30 of 32 real reports contributed nothing:
+  `blockerAnalysis`, `techStackGaps` and the entire `upskill` gap map came back
+  empty while every report was full of gap data. That failure is silent — an empty
+  array is indistinguishable from "nothing was parsed" — so use one pair or the
+  other, never both for the same item.
+- **These lists hold BLOCKERS, not follow-up actions.** "ask-weekly-hours",
+  "confirm-hourly-rate", "clarify-german-requirement" are things the *user* must
+  do; they belong in `open_questions`, not here. Counting them as blockers put 51
+  of 58 entries into an `other` bucket and buried the real pattern.
 - `score` is numeric only, without `/5`.
 - `final_decision` must reflect the full evaluation, not only the CV match.
 - `advertised_comp` is the JD's **own** figure, verbatim; `null` when the JD states nothing — never estimate it and never substitute researched market data (Block D research stays in Block D). Batch workers never write `data/salary-observations.tsv` — the report itself is the advertised observation (`salary-gap.mjs` reads it).

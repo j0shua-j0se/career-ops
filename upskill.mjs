@@ -90,6 +90,13 @@ export function parseReportGaps(content) {
     if (typeof summary.score === 'number' && Number.isFinite(summary.score)) score = summary.score;
     gapDescriptions.push(...normalizeList(summary.hard_stops));
     gapDescriptions.push(...normalizeList(summary.soft_gaps));
+    // `blockers:`/`gaps:` are the key names reports in this pipeline actually
+    // write — all 32 of them — so reading only the schema names above yielded
+    // ZERO gaps across the entire history and `upskill` reported "no skill gaps
+    // detected". Accepting both keeps old and new reports readable, and the
+    // skill tokenizer downstream dedups anything that arrives twice.
+    gapDescriptions.push(...normalizeList(summary.blockers));
+    gapDescriptions.push(...normalizeList(summary.gaps));
   }
 
   const plain = content.replace(/\*\*/g, '');

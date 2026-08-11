@@ -39,7 +39,8 @@ Parse the JSON output. It contains:
 | `metadata` | Total entries, date range, analysis date, counts by outcome |
 | `funnel` | Count per status stage (evaluated, applied, interview, offer, etc.) |
 | `scoreComparison` | Avg/min/max score per outcome group (positive, negative, self_filtered, pending) |
-| `archetypeBreakdown` | Per-archetype: total, positive, negative, self_filtered, conversion rate |
+| `archetypeBreakdown` | Per-archetype: total, positive, negative, self_filtered, conversion rate. Report archetypes are folded onto the canonical names in `config/profile.yml` → `target_roles.archetypes`; `canonical: true` marks a folded group and `variants` lists the raw spellings it absorbed |
+| `archetypeUnmapped` | Report archetypes that matched no canonical name. `none`/off-archetype values belong here. A long list means the reports are drifting from the profile, or the profile is missing an archetype the search is actually pursuing — say which you think it is |
 | `blockerAnalysis` | Most frequent hard blockers: geo-restriction, stack-mismatch, seniority, onsite |
 | `remotePolicy` | Per-policy bucket: total, positive, negative, conversion rate |
 | `companySizeBreakdown` | Per-size bucket: startup, scaleup, enterprise |
