@@ -234,7 +234,13 @@ try {
   if (scanPending.agent === false) pass('the scan stage is marked zero-token, not an agent stage');
   else fail('the scan stage was marked as an agent stage');
 
-  const scanDone = decideNextStage(run, { loop: { done: true, qualified: 12 } });
+  // A finished loop completes the stage only once the agent-driven sources
+  // (modes/run.md → Stage 1b) are recorded as swept. This assertion used to
+  // pass `{ loop: { done: true } }` alone and expect `stage-complete`; that is
+  // exactly what let a pass report "scan complete" having never touched Indeed,
+  // which has no HTTP provider and cannot run inside scan.mjs. The
+  // `agentSourcesSwept` fact is asserted in its own block further down.
+  const scanDone = decideNextStage(run, { loop: { done: true, qualified: 12 }, agentSourcesSwept: true });
   if (scanDone.action === 'stage-complete' && /12 qualified/.test(scanDone.reason)) {
     pass('a finished scan loop reports the scan stage complete, with the qualified count');
   } else {
@@ -362,4 +368,67 @@ try {
   }
 } catch (e) {
   fail(`run-core tests crashed: ${e.message}`);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1 is not only the scan loop.
+//
+// Sources with no HTTP provider — currently Indeed, reachable only through an
+// MCP that the AGENT calls and which therefore can never be a providers/
+// module — live in modes/run.md Stage 1b. The stage used to complete on
+// `loop.done` alone, so skipping them was invisible: a pass reported "scan
+// complete" having never touched them. Indeed contributed 3 rows in the
+// scanner's entire history while producing two of six evaluations in the one
+// pass that actually used it, so the omission is not cosmetic.
+//
+// The fact is not derivable from any file: an Indeed sweep that legitimately
+// found nothing writes exactly what a sweep that never ran writes. Hence an
+// explicit record.
+console.log('\nrun-core — the scan stage accounts for agent-driven sources');
+
+{
+  const { AGENT_DRIVEN_SOURCES, decideNextStage, newRun } = await import('../run-core.mjs');
+
+  const withLoopDone = (swept) =>
+    decideNextStage(newRun(), { loop: { done: true, qualified: 2 }, agentSourcesSwept: swept });
+
+  const pending = withLoopDone(false);
+  pending.action === 'scan-agent-sources'
+    ? pass('a finished loop does NOT complete the stage while Stage 1b is unrecorded')
+    : fail(`expected scan-agent-sources, got ${pending.action}`);
+
+  pending.agent === true
+    ? pass('the Stage 1b action is handed to the agent, not a script')
+    : fail('scan-agent-sources should be agent-driven');
+
+  Array.isArray(pending.sources) && pending.sources.some((s) => s.id === 'indeed')
+    ? pass('the action names the sources to sweep rather than assuming the agent recalls them')
+    : fail('scan-agent-sources did not list Indeed');
+
+  /note-sources/.test(pending.instructions || '')
+    ? pass('the instructions say how to record the sweep')
+    : fail('instructions do not mention note-sources');
+
+  withLoopDone(true).action === 'stage-complete'
+    ? pass('once recorded, the stage completes')
+    : fail('recording the sweep did not complete the stage');
+
+  // Sources that CAN be automated must leave the list, or the gate nags about
+  // work the scanner already does. StepStone became a real provider
+  // (providers/stepstone.mjs) and BMW arrives via arbeitsagentur.
+  !AGENT_DRIVEN_SOURCES.some((s) => s.id === 'stepstone')
+    ? pass('StepStone is no longer agent-driven — it is a provider now')
+    : fail('StepStone is still listed as agent-driven despite having a provider');
+
+  !AGENT_DRIVEN_SOURCES.some((s) => /bmw/i.test(s.id))
+    ? pass('BMW is not agent-driven — it arrives via the arbeitsagentur provider')
+    : fail('BMW listed as agent-driven; it comes through arbeitsagentur');
+
+  // A mid-run loop must still point at `wave`, not at strategy.command — running
+  // the strategy by hand scans for real without recording the rung, so `next`
+  // returns the same wave forever.
+  const midRun = decideNextStage(newRun(), { loop: { done: false, phase: 'scanning' } });
+  /scan-loop\.mjs wave/.test(midRun.instructions || '')
+    ? pass('mid-run instructions name `scan-loop.mjs wave`, the command that records')
+    : fail('mid-run instructions do not name `wave`');
 }

@@ -26,6 +26,25 @@
 export const STAGES = ['scan', 'pipeline', 'kits', 'sync'];
 
 /**
+ * Sources that have no HTTP provider and therefore cannot run inside
+ * `scan.mjs` — the agent has to fetch them and hand the results to
+ * `ingest-jobs.mjs`. Listed here so the scan stage can name them rather than
+ * relying on the agent remembering that `modes/run.md` → Stage 1b exists.
+ *
+ * StepStone is deliberately NOT here: it became a real provider
+ * (`providers/stepstone.mjs`, via the scrapling CLI) and now runs in wave 1
+ * with everything else. BMW likewise arrives through the `arbeitsagentur`
+ * provider. Anything that can be automated should leave this list.
+ */
+export const AGENT_DRIVEN_SOURCES = [
+  {
+    id: 'indeed',
+    how: 'the Indeed MCP `search_jobs` (needs search, location, country_code: "DE") — an MCP tool only '
+      + 'the agent can call, so it can never be a providers/ module. No public API; the RSS feed 403s.',
+  },
+];
+
+/**
  * Per-stage metadata. `agent` marks the stages that cost model tokens and
  * therefore cannot be performed by the driver alone — it hands those back with
  * an explicit contract rather than pretending to have run them.
@@ -274,11 +293,32 @@ export function decideNextStage(state, facts = {}) {
   if (stage === 'scan') {
     const loop = facts.loop ?? {};
     if (loop.done) {
+      // The scan loop is not the whole of stage 1. Sources with no HTTP
+      // provider — currently Indeed, reachable only through an MCP that the
+      // AGENT calls — cannot run inside scan.mjs, so they live in modes/run.md
+      // Stage 1b. Completing the stage on `loop.done` alone made skipping them
+      // invisible: the pass reported "scan complete" having never touched them,
+      // and Indeed contributed 3 rows in the scanner's entire history while
+      // producing two of six evaluations in the one pass that used it.
+      if (!facts.agentSourcesSwept) {
+        return {
+          ...base,
+          action: 'scan-agent-sources',
+          agent: true,
+          reason: 'the scan loop finished, but the agent-driven sources (Stage 1b) have not been swept this pass',
+          sources: AGENT_DRIVEN_SOURCES,
+          instructions: 'Sweep the sources in `sources` — see `modes/run.md` → Stage 1b. They have no '
+            + 'HTTP provider and cannot run inside scan.mjs. Collect {url, company, title, location} '
+            + 'into a JSON array and run `node ingest-jobs.mjs --file <file> --source <label>`. When '
+            + 'done — or if you deliberately skip them — record it with '
+            + '`node run-all.mjs note-sources --note "..."`, which is what lets this stage complete.',
+        };
+      }
       return {
         ...base,
         action: 'stage-complete',
         agent: false,
-        reason: `scan loop finished with ${loop.qualified ?? 0} qualified posting(s)`,
+        reason: `scan loop finished with ${loop.qualified ?? 0} qualified posting(s); agent-driven sources swept`,
       };
     }
     return {
@@ -286,8 +326,10 @@ export function decideNextStage(state, facts = {}) {
       reason: loop.phase
         ? `scan loop is mid-run (phase: ${loop.phase})`
         : 'no scan run in progress yet',
-      instructions: 'Drive `node scan-loop.mjs next` and do what it says until it reports '
-        + '`finish`, then run `node scan-loop.mjs finish`. Budgets and the escalation ladder are in LOOP.md.',
+      instructions: 'Ask `node scan-loop.mjs next` what is due, then run `node scan-loop.mjs wave` to '
+        + 'actually run it — NOT strategy.command directly, which scans for real without recording the '
+        + 'rung. Repeat until `next` reports `finish`, then `node scan-loop.mjs finish`. Budgets and the '
+        + 'escalation ladder are in LOOP.md.',
     };
   }
 

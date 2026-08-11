@@ -159,7 +159,13 @@ function trackerRows() {
 function gatherFacts(state) {
   const stage = currentStage(state);
   const facts = {};
-  if (stage === 'scan') facts.loop = loopFacts();
+  if (stage === 'scan') {
+    facts.loop = loopFacts();
+    // Recorded by `note-sources`. Kept in run state, not derived, because
+    // "did the agent sweep Indeed this pass" is not observable from any file —
+    // an ingest that found nothing looks identical to one that never ran.
+    facts.agentSourcesSwept = Boolean(state.agent_sources_swept);
+  }
   if (stage === 'pipeline') facts.pendingUrls = pendingUrlCount();
   if (stage === 'kits') facts.kitCandidates = kitCandidates(trackerRows(), state.config.kitThreshold);
   return facts;
@@ -397,8 +403,31 @@ function printSummary(result) {
   if (result.next) console.log(`  next: ${result.next.action} — ${result.next.reason}`);
 }
 
+/**
+ * Record that the agent-driven sources (modes/run.md → Stage 1b) were swept
+ * this pass — or deliberately skipped, with a reason.
+ *
+ * This exists because the fact is not observable anywhere else: an Indeed
+ * sweep that legitimately found nothing writes exactly what a sweep that never
+ * happened writes, i.e. nothing. Without an explicit record the scan stage
+ * completed on the loop alone and the omission was silent.
+ */
+function cmdNoteSources(flags) {
+  const state = loadState();
+  const note = typeof flags.note === 'string' ? flags.note.trim() : '';
+  if (!note) {
+    throw new Error('note-sources needs --note "what you swept, or why you skipped it" — the note is the '
+      + 'audit trail for a stage that cannot otherwise be verified.');
+  }
+  state.agent_sources_swept = true;
+  state.agent_sources_note = note;
+  state.agent_sources_at = new Date().toISOString();
+  saveState(state);
+  return { recorded: true, note, next: decideNextStage(state, gatherFacts(state)) };
+}
+
 const COMMANDS = {
-  start: cmdStart, next: cmdNext, advance: cmdAdvance,
+  start: cmdStart, next: cmdNext, advance: cmdAdvance, 'note-sources': cmdNoteSources,
   sync: cmdSync, status: cmdStatus, abort: cmdAbort,
 };
 

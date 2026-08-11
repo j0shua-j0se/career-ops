@@ -1980,7 +1980,10 @@ async function main() {
     '--posted-after', '--posted-before', '--quiet', '--rediscover-404',
     '--since', '--throttle', '--verify', '--help', '-h',
   ]);
-  const unknownFlags = args.filter((a) => a.startsWith('-') && !KNOWN_FLAGS.has(a.split('=')[0]));
+  // Only `--`-prefixed tokens are candidates. A single dash is how a NEGATIVE
+  // VALUE arrives (`--since -3`), and rejecting that here would pre-empt
+  // --since's own validation, which reports the real problem with the number.
+  const unknownFlags = args.filter((a) => a.startsWith('--') && !KNOWN_FLAGS.has(a.split('=')[0]));
   if (unknownFlags.length > 0) {
     console.error(`scan: unknown option(s): ${unknownFlags.join(', ')}`);
     console.error('Known options: ' + [...KNOWN_FLAGS].filter((f) => f !== '-h').sort().join(' '));

@@ -53,10 +53,18 @@ Collect `{url, company, title, location?, postedAt?}` into a JSON array, then:
 node ingest-jobs.mjs --file offers.json --source <label>
 ```
 
+**This stage is now enforced, not remembered.** When the scan loop finishes,
+`run-all.mjs next` returns `scan-agent-sources` and will NOT complete the stage
+until you record the sweep with `node run-all.mjs note-sources --note "..."`.
+That exists because the omission was silent: an Indeed sweep that legitimately
+finds nothing writes exactly what a sweep that never ran writes, so a pass could
+report "scan complete" having never touched it. Record it even when you skip
+deliberately — the note is the audit trail.
+
 | Source | How | Verified |
 |---|---|---|
-| **Indeed** | the Indeed MCP `search_jobs` (needs `search`, `location`, `country_code: "DE"`). Not a `providers/` module — the MCP is a tool only the agent can call. | ✅ found a Siemens Healthineers Werkstudent in Forchheim |
-| **StepStone** | `scrapling` `stealthy_fetch` on `stepstone.de/jobs/<query>/in-<city>?radius=50`. No credentials, no session cookie. | ✅ HTTP 200, 79 results |
+| **Indeed** | the Indeed MCP `search_jobs` (needs `search`, `location`, `country_code: "DE"`). Not a `providers/` module and never can be — the MCP is a tool only the agent can call, Indeed publishes no public job API, and the RSS feed returns 403. | ✅ found a Siemens Healthineers Werkstudent in Forchheim |
+| **StepStone** | **Automated — no longer a Stage 1b step.** `providers/stepstone.mjs` runs in wave 1 with every other board, shelling out to the `scrapling` CLI (StepStone has no usable API; `/public-api/` is robots-Disallowed and a plain fetch is refused). Needs `scrapling` on PATH. | ✅ 25 cards/page parsed, company + location + date |
 | **BMW** | **Do not scrape it.** `bmwgroup.jobs` runs Akamai Bot Manager: the shell returns 200 but the job-search component never initialises for an automated client, so there is no API call to intercept. Its SuccessFactors instance is the RCM application portal, not the public RMK board `providers/successfactors.mjs` reads. BMW arrives through the **Arbeitsagentur — BMW Group** board instead. | ✅ 16 found, 1 queued |
 | **LinkedIn** | Not supported. Reaching it needs the user's `li_at` session cookie — a credential — and breaches LinkedIn's ToS with real account-restriction risk against a profile that is a live asset in this search. Do not build it without an explicit, informed instruction. | — |
 
