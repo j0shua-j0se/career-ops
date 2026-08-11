@@ -2071,6 +2071,26 @@ async function main() {
   const boards = Array.isArray(config.job_boards) ? config.job_boards : [];
   const titleFilter = buildTitleFilter(config.title_filter);
 
+  // Per-board widening of the title filter. Cached per board object so a board
+  // with extras compiles its filter once rather than once per job.
+  const boardFilterCache = new WeakMap();
+  const boardTitleFilter = (board, title) => {
+    if (titleFilter(title)) return true;
+    const extra = board && board.title_filter_extra;
+    const extraPositive = Array.isArray(extra?.positive) ? extra.positive : null;
+    if (!extraPositive || extraPositive.length === 0) return false;
+    let scoped = boardFilterCache.get(board);
+    if (!scoped) {
+      // Reuse the global negatives so a board can never opt out of an exclusion.
+      scoped = buildTitleFilter({
+        positive: extraPositive,
+        negative: config.title_filter?.negative,
+      });
+      boardFilterCache.set(board, scoped);
+    }
+    return scoped(title);
+  };
+
   // Seniority tier classifier integration
   let classifyTier = null;
   const skipTiers = Array.isArray(config.skip_tiers)
@@ -2257,7 +2277,20 @@ async function main() {
           }
         }
 
-        if (!titleFilter(job.title)) {
+        // A board may widen the GLOBAL title filter for itself via
+        // `title_filter_extra.positive`. Scoped, not global, on purpose:
+        // Arbeitsagentur returned 92 jobs for the Erlangen radius and the
+        // global filter dropped 74 of them, because `title_filter.positive`
+        // carries only AI/ML/Data vocabulary and no German student-contract
+        // terms — so "Werkstudent (m/w/d) Softwareentwicklung", a primary
+        // archetype in the home city, never survived. Widening the global list
+        // instead would admit the same terms on every broad ATS sweep, where
+        // "Werkstudent Office Management" is exactly the noise the prefilter
+        // already discards by the dozen.
+        //
+        // Extras only ever ADD matches; negatives still apply, because
+        // boardTitleFilter is the global filter OR'd with the board's own.
+        if (!boardTitleFilter(company, job.title)) {
           totalFilteredTitle++;
           continue;
         }
