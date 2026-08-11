@@ -178,6 +178,22 @@ export function currentStage(state) {
 }
 
 /**
+ * A row whose own evaluation says not to send it.
+ *
+ * Reports write a verdict into the tracker notes ("DO NOT APPLY", "do NOT apply
+ * as posted", "send a one-question enquiry instead"). Score alone cannot see
+ * this: ZEISS and Manex both scored 3.9 — above the kit bar — while their
+ * reports said the posting is full-time against a 20 h/week cap, and Munich at
+ * ~190 km, and asked for an enquiry rather than an application. Building kits
+ * for those spends two PDFs each and, worse, nudges toward sending something
+ * the candidate's own analysis advised against.
+ *
+ * So these are separated, not dropped: they stay visible as `needsDecision` for
+ * the user to override deliberately, which is exactly what happened.
+ */
+export const DO_NOT_APPLY_RE = /\bdo\s*not\s+apply\b|\bdon'?t\s+apply\b|\bnicht\s+bewerben\b/i;
+
+/**
  * Select the tracker rows that still need an application kit.
  *
  * A row qualifies when it scored at or above the kit threshold, is still at
@@ -205,6 +221,9 @@ export function kitCandidates(rows = [], kitThreshold = DEFAULT_RUN_CONFIG.kitTh
       role: row.role,
       score,
       report: row.report ?? '',
+      // Surfaced, not silently honoured: the driver splits on this so the user
+      // sees the row and decides, rather than the row vanishing.
+      doNotApply: DO_NOT_APPLY_RE.test(String(row.notes ?? '')),
     });
   }
   return out;
@@ -288,8 +307,11 @@ export function decideNextStage(state, facts = {}) {
   }
 
   if (stage === 'kits') {
-    const candidates = facts.kitCandidates ?? [];
-    if (candidates.length === 0) {
+    const all = facts.kitCandidates ?? [];
+    // A row its own report advised against is held back for an explicit call.
+    const candidates = all.filter((c) => !c.doNotApply);
+    const needsDecision = all.filter((c) => c.doNotApply);
+    if (all.length === 0) {
       return {
         ...base,
         action: 'stage-complete',
@@ -297,10 +319,22 @@ export function decideNextStage(state, facts = {}) {
         reason: `no tracker row is at or above ${state.config.kitThreshold} without a PDF`,
       };
     }
+    if (candidates.length === 0) {
+      return {
+        ...base,
+        action: 'stage-complete',
+        agent: false,
+        needsDecision,
+        reason: `every remaining row at or above ${state.config.kitThreshold} carries a "do not apply" verdict `
+          + `(${needsDecision.map((c) => `#${c.num}`).join(', ')}) — build one only if the user says so`,
+      };
+    }
     return {
       ...base,
       candidates,
-      reason: `${candidates.length} row(s) at or above ${state.config.kitThreshold} have no kit yet`,
+      needsDecision,
+      reason: `${candidates.length} row(s) at or above ${state.config.kitThreshold} have no kit yet`
+        + (needsDecision.length ? `; ${needsDecision.length} more held back on a "do not apply" verdict` : ''),
       instructions: 'For each candidate: tailor the CV payload (`modes/pdf.md`) and the cover-letter '
         + 'payload (`modes/cover.md`) from that row\'s report, then run '
         + '`node build-application.mjs --report NNN --cv <cv.json> --cover <cover.json>`. '

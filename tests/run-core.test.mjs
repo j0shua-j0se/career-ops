@@ -173,6 +173,55 @@ try {
     fail('kitCandidates did not handle an empty row list');
   }
 
+  // ── "do not apply" verdicts are separated, not silently honoured ──────────
+  // Score alone cannot see a report's verdict. ZEISS and Manex both scored 3.9,
+  // above the kit bar, while their reports said the posting is full-time
+  // against a 20 h/week cap and Munich at ~190 km, and asked for a one-question
+  // enquiry rather than an application. Building kits there spends two PDFs
+  // each and nudges toward sending what the candidate's own analysis advised
+  // against — but dropping the rows silently is worse, so they surface as
+  // needsDecision.
+  const verdictRows = [
+    { num: 1, company: 'Good', role: 'r', score: '4.4/5', status: 'Evaluated', pdf: '❌', notes: 'Recommendation: APPLY.' },
+    { num: 12, company: 'ZEISS', role: 'r', score: '3.9/5', status: 'Evaluated', pdf: '❌', notes: 'RECOMMENDED ACTION: do NOT apply as posted; send an enquiry.' },
+    { num: 13, company: 'Manex', role: 'r', score: '3.9/5', status: 'Evaluated', pdf: '❌', notes: 'DO NOT APPLY — Munich, not commutable.' },
+  ];
+  const verdicts = kitCandidates(verdictRows, 3.8);
+  if (verdicts.length === 3) pass('a "do not apply" row is still a kit candidate, not dropped from the list');
+  else fail(`kitCandidates returned ${verdicts.length} rows, expected all 3`);
+
+  const flagged = verdicts.filter((c) => c.doNotApply).map((c) => c.num);
+  if (eq(flagged, [12, 13])) pass('rows whose notes carry a do-not-apply verdict are flagged');
+  else fail(`flagged rows were ${JSON.stringify(flagged)}, expected [12, 13]`);
+
+  const atKitsVerdict = normalizeRun({ ...newRun(DEFAULT_RUN_CONFIG, { now: '2026-08-11T09:00:00.000Z' }), completed: ['scan', 'pipeline'] }, DEFAULT_RUN_CONFIG);
+  const split = decideNextStage(atKitsVerdict, { kitCandidates: verdicts });
+  if (eq(split.candidates.map((c) => c.num), [1]) && eq(split.needsDecision.map((c) => c.num), [12, 13])) {
+    pass('the kits stage builds only the un-flagged row and holds the rest for a decision');
+  } else {
+    fail(`split was build=${JSON.stringify(split.candidates.map((c) => c.num))} held=${JSON.stringify(split.needsDecision?.map((c) => c.num))}`);
+  }
+
+  // When EVERY remaining row is flagged there is nothing to build unprompted —
+  // the stage completes and names the rows rather than looping on them.
+  const allFlagged = decideNextStage(atKitsVerdict, { kitCandidates: verdicts.filter((c) => c.doNotApply) });
+  if (allFlagged.action === 'stage-complete' && /do not apply/i.test(allFlagged.reason) && /#12/.test(allFlagged.reason)) {
+    pass('a kits stage with only flagged rows completes and names them in the reason');
+  } else {
+    fail(`all-flagged case gave ${JSON.stringify({ a: allFlagged.action, r: allFlagged.reason })}`);
+  }
+
+  // The wording varies across reports; all of these must trip.
+  const phrasings = ['DO NOT APPLY', 'do NOT apply as posted', "don't apply", 'Nicht bewerben'];
+  const missed = phrasings.filter((n) => !kitCandidates([{ num: 9, company: 'C', role: 'r', score: '4.0/5', status: 'Evaluated', pdf: '❌', notes: n }], 3.8)[0]?.doNotApply);
+  if (missed.length === 0) pass('every common do-not-apply phrasing is recognised');
+  else fail(`these phrasings were missed: ${JSON.stringify(missed)}`);
+
+  // And it must not fire on a row that merely discusses applying.
+  const benign = kitCandidates([{ num: 8, company: 'D', role: 'r', score: '4.2/5', status: 'Evaluated', pdf: '❌', notes: 'Recommendation: APPLY — assemble documents before you apply.' }], 3.8);
+  if (benign[0] && benign[0].doNotApply === false) pass('an ordinary "APPLY" note is not mistaken for a refusal');
+  else fail('a positive recommendation was flagged as do-not-apply');
+
   // ── decideNextStage ────────────────────────────────────────────────────────
   const run = newRun(DEFAULT_RUN_CONFIG, { now: '2026-08-10T09:00:00.000Z' });
 

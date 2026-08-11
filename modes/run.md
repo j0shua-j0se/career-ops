@@ -28,14 +28,56 @@ node run-all.mjs next         # ask what to do; repeat until action = done|halt
 
 | Action | What you do |
 |---|---|
-| `scan` | Run the scan loop: `node scan-loop.mjs next` and do what *it* says, until it reports `finish` or `halt`, then `node scan-loop.mjs finish`. This is `modes/scan.md` in full — load it. When the loop is done, the next `run-all.mjs next` rolls the stage forward on its own. |
-| `evaluate` | Load `modes/pipeline.md` and follow it end to end: Gmail sweep, liveness sweep, pre-screen gate, then one evaluation per surviving URL. **Do not build CVs here** — stage 3 does that once every row has a score. |
+| `scan` | Run the scan loop: `node scan-loop.mjs next` and do what *it* says, until it reports `finish` or `halt`, then `node scan-loop.mjs finish`. This is `modes/scan.md` in full — load it. **Then sweep the agent-driven sources below** — the loop cannot reach them. When both are done, the next `run-all.mjs next` rolls the stage forward on its own. |
+| `evaluate` | Load `modes/pipeline.md` and follow it end to end: Gmail sweep, liveness sweep, pre-screen gate, then one evaluation per surviving URL. **Do not build CVs here** — stage 3 does that once every row has a score. **Every pre-screen discard must be marked `- [x]` in Processed, not merely logged** — see below. |
 | `build-kits` | For each row in `candidates`, build the kit (below). |
 | `sync` | `node run-all.mjs sync`. Zero tokens; it runs the five reconciliation steps itself. |
 | `done` | The pass is complete. Report the summary (below). |
 | `halt` | A stage could not clear. Report `reason` to the user plainly and stop. Do not work around it. |
 
 `next` auto-completes any stage whose exit condition is already satisfied, so a pass resumed after a crash — or after another session drained the inbox — rolls straight past what is already done instead of asking you to go and look.
+
+## Stage 1b: the sources the scan loop cannot reach
+
+Several high-value sources have no zero-token HTTP provider and never will. They
+produced **zero** jobs for months despite being `enabled: true` in `portals.yml`,
+because the agent had nowhere to put what it found. `ingest-jobs.mjs` is that
+landing pad — it dedups against `data/scan-history.tsv` *and* the inbox,
+canonicalises URLs (stripping `utm_*`/`fbclid`/`refid`/`eid`), and writes rows in
+the shape `scan.mjs` uses, so the prefilter, liveness sweep and pipeline stage
+read them unchanged.
+
+Collect `{url, company, title, location?, postedAt?}` into a JSON array, then:
+
+```bash
+node ingest-jobs.mjs --file offers.json --source <label>
+```
+
+| Source | How | Verified |
+|---|---|---|
+| **Indeed** | the Indeed MCP `search_jobs` (needs `search`, `location`, `country_code: "DE"`). Not a `providers/` module — the MCP is a tool only the agent can call. | ✅ found a Siemens Healthineers Werkstudent in Forchheim |
+| **StepStone** | `scrapling` `stealthy_fetch` on `stepstone.de/jobs/<query>/in-<city>?radius=50`. No credentials, no session cookie. | ✅ HTTP 200, 79 results |
+| **BMW** | **Do not scrape it.** `bmwgroup.jobs` runs Akamai Bot Manager: the shell returns 200 but the job-search component never initialises for an automated client, so there is no API call to intercept. Its SuccessFactors instance is the RCM application portal, not the public RMK board `providers/successfactors.mjs` reads. BMW arrives through the **Arbeitsagentur — BMW Group** board instead. | ✅ 16 found, 1 queued |
+| **LinkedIn** | Not supported. Reaching it needs the user's `li_at` session cookie — a credential — and breaches LinkedIn's ToS with real account-restriction risk against a profile that is a live asset in this search. Do not build it without an explicit, informed instruction. | — |
+
+**Arbeitsagentur is the highest-yield source and the least fought-over.** It is
+the federal job database, every German employer posts there as routine, and it
+reaches BMW, Siemens, Bosch and Schaeffler without credentials. When a source
+looks unreachable, check whether Arbeitsagentur already carries it before
+building a scraper.
+
+## Stage 2: pre-screen discards must be marked, not just logged
+
+`modes/pipeline.md` requires every posting the pre-screen gate drops to be both
+logged to `data/discard.log` **and** marked `- [x] #-- | {url} | skipped
+(pre-screen mismatch: {reason})` in Processed. Logging alone is not enough and
+the failure is silent: a pass once logged 47 discards without marking them, so
+the same 47 stayed `- [ ]`, were re-discarded on every later run, duplicated
+their log lines, and kept the inbox permanently inflated at 60 pending when the
+real figure was 13.
+
+If `next` keeps reporting the same pending count after an evaluation pass, this
+is why.
 
 ## Stage 3: building the kits
 
@@ -51,7 +93,25 @@ node build-application.mjs --report NNN --cv <cv.json> --cover <cover.json>
 
 **Both artifacts, every time.** A CV with no letter leaves the user writing the letter themselves, which is the part they wanted automated. This is the same rule as `modes/pipeline.md` → Application kit.
 
-`build-application.mjs` checks the posting is still open **before** rendering anything and aborts if it is not — a closed posting costs one HTTP round trip instead of two PDFs. If it aborts, do not pass `--skip-liveness` to get around it; mark the row `Discarded` via `set-status.mjs` and move on.
+### Rows held back: `needsDecision`
+
+`next` returns two lists. `candidates` are safe to build. **`needsDecision` are rows whose own report says not to send them** — "DO NOT APPLY", "do NOT apply as posted", "send a one-question enquiry instead".
+
+Score cannot see this. ZEISS and Manex both scored 3.9, above the bar, while their reports said full-time against a 20 h/week cap, and Munich at ~190 km, and asked for an enquiry rather than an application. **Do not build these unprompted** — surface them to the user with the report's reason and let them decide. If the user overrides and asks for the kit anyway, build it, but write the letter so it *acknowledges* the blocker and proposes the accommodation. A letter that reads as though the candidate had not noticed a full-time contract or a 190 km commute is worse than none.
+
+### When liveness aborts
+
+`build-application.mjs` checks the posting is still open **before** rendering anything and aborts if it is not — a closed posting costs one HTTP round trip instead of two PDFs.
+
+**Do not reach for `--skip-liveness` reflexively.** But the checker has known false negatives, and all three cost a real build this session:
+
+| Symptom | Cause | What to do |
+|---|---|---|
+| "content present but no visible apply control found" | the posting **applies by email** and legitimately has no Apply button | confirm the contact address is in the JD, then `--skip-liveness` |
+| `uncertain` on a JS-rendered portal | anti-bot 403, or a blocked third-party request (SAP fetches an internal VPN host) | re-verify by browser, then `--skip-liveness` |
+| the checker lands on a careers homepage | the report's `**URL:**` header is a portal root, not a deep link | **fix the header** — `readReportUrl` takes only the first whitespace-delimited token |
+
+Verify by hand *before* overriding, and say in the summary which rows were overridden and why. If the posting is genuinely closed, mark the row `Discarded` via `set-status.mjs` and move on.
 
 **The kit threshold** is `loop.min_score` from `config/profile.yml` (default `3.8`), falling back to `auto_pdf_score_threshold` only when there is no `loop:` block. One bar decides what the scan loop shortlists and what this stage builds for.
 
