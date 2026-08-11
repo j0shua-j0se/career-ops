@@ -728,6 +728,43 @@ export function markPrescreenSkips(md, skips) {
   return { text: out.join('\n'), marked, lines };
 }
 
+/**
+ * Mark postings that could not be read at all as `- [!]`, per
+ * `modes/pipeline.md` step 2b ("If the URL is not accessible → mark as `- [!]`
+ * with a note and continue").
+ *
+ * This is NOT a discard. A discard is a judgement about the posting's content;
+ * this records that no content was obtainable, which is a different fact and
+ * must stay distinguishable — a later session with a real browser session may
+ * be able to read what a headless fetch could not.
+ *
+ * It exists because a full-dataset iCIMS sweep puts hundreds of postings behind
+ * an AWS WAF human-verification wall. They cannot be evaluated and they cannot
+ * honestly be discarded on merit, so without this state they sit pending
+ * forever and every later pass re-attempts them.
+ *
+ * Both `check-liveness.mjs` and this filter already ignore `- [!]` rows, so
+ * marking one removes it from the pending set without deleting anything.
+ *
+ * @param {string} md
+ * @param {Array<{url:string, reason:string}>} entries
+ * @returns {{ text: string, marked: number }}
+ */
+export function markUnreachable(md, entries) {
+  const reasonByUrl = new Map(entries.map((e) => [e.url, e.reason]));
+  if (reasonByUrl.size === 0) return { text: md, marked: 0 };
+
+  const out = [];
+  let marked = 0;
+  for (const line of String(md ?? '').split(/\r?\n/)) {
+    const entry = parsePipelineLine(line);
+    if (!entry || entry.done || !reasonByUrl.has(entry.url)) { out.push(line); continue; }
+    out.push(`${line.replace(/^(\s*[-*]\s*)\[ \]/, '$1[!]')} | unreachable (${reasonByUrl.get(entry.url)})`);
+    marked++;
+  }
+  return { text: out.join('\n'), marked };
+}
+
 // ── Self-test ───────────────────────────────────────────────────────────────
 
 function selfTest() {
@@ -797,6 +834,22 @@ function selfTest() {
     const again = markPrescreenSkips(text, [{ url: 'https://ex.com/a', reason: 'outside Germany' }]);
     check(again.marked === 0, 'running twice is a no-op — no double-marking, no duplicate log lines');
     check(markPrescreenSkips(inbox, []).marked === 0, 'an empty skip list changes nothing');
+
+    // ── markUnreachable ──
+    // "could not be read" is a different fact from "read and rejected", and the
+    // two must stay distinguishable: a later session with a real browser may
+    // read what a headless fetch could not.
+    const un = markUnreachable(inbox, [{ url: 'https://ex.com/b', reason: 'AWS WAF human-verification wall' }]);
+    check(un.marked === 1, 'marks the unreachable entry');
+    check(/- \[!\] https:\/\/ex\.com\/b .*unreachable \(AWS WAF human-verification wall\)/.test(un.text),
+      'the unreachable row uses [!] and carries its reason');
+    check(!/- \[x\] https:\/\/ex\.com\/b/.test(un.text), 'unreachable is NOT recorded as a discard');
+    // parsePipelineLine only accepts [ ], [x] and [X], so a [!] row is neither
+    // pending nor processed — which is what removes it from future sweeps.
+    check(parsePipelineLine('- [!] https://ex.com/b | Beta | Werkstudent ML | Erlangen') === null,
+      'a [!] row is not parsed as pending, so later passes stop re-attempting it');
+    check(markUnreachable(un.text, [{ url: 'https://ex.com/b', reason: 'x' }]).marked === 0,
+      'marking unreachable twice is a no-op');
   }
 
   check(classifyReach('US-TX-REMOTE') === 'abroad', 'US-scoped remote is abroad, not remote');
