@@ -157,6 +157,21 @@ function cmdNext() {
     saveState(state);
     log(state, 'halt', decision.reason);
   }
+  // Say which COMMAND advances the loop, not just which strategy is due.
+  //
+  // A scan decision carries `strategy.command`/`strategy.args`, and an agent
+  // reading that naturally runs it directly — but only `wave` snapshots the
+  // inbox, records the rung and advances the state. Running the strategy by
+  // hand scans for real, adds postings, and leaves the loop exactly where it
+  // was, so the next `next` returns the identical wave: a loop that never
+  // terminates while looking like it is working. Observed on a wave-2
+  // reverse-ATS sweep that added 311 postings and moved the counters zero.
+  if (decision.action === 'scan') {
+    decision.instructions = decision.strategy?.kind === 'agent'
+      ? 'Run `node scan-loop.mjs wave` — it will hand this rung back to you with an ingest contract.'
+      : 'Run `node scan-loop.mjs wave` (NOT strategy.command directly — only `wave` records the rung '
+        + 'and advances the loop). `strategy` is shown so you know what it will run.';
+  }
   return decision;
 }
 

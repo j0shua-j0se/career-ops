@@ -28,7 +28,7 @@ node run-all.mjs next         # ask what to do; repeat until action = done|halt
 
 | Action | What you do |
 |---|---|
-| `scan` | Run the scan loop: `node scan-loop.mjs next` and do what *it* says, until it reports `finish` or `halt`, then `node scan-loop.mjs finish`. This is `modes/scan.md` in full — load it. **Then sweep the agent-driven sources below** — the loop cannot reach them. When both are done, the next `run-all.mjs next` rolls the stage forward on its own. |
+| `scan` | Run the scan loop: `node scan-loop.mjs next` to see what is due, then **`node scan-loop.mjs wave`** to actually run it — repeat until `next` reports `finish` or `halt`, then `node scan-loop.mjs finish`. **Never run `strategy.command` yourself.** `next` prints it so you know what is coming; only `wave` snapshots the inbox, records the rung and advances the state. Running the strategy by hand scans for real and leaves the counters untouched, so `next` returns the same wave forever — a loop that never terminates while looking busy. This is `modes/scan.md` in full — load it. **Then sweep the agent-driven sources below** — the loop cannot reach them. When both are done, the next `run-all.mjs next` rolls the stage forward on its own. |
 | `evaluate` | Load `modes/pipeline.md` and follow it end to end: Gmail sweep, liveness sweep, pre-screen gate, then one evaluation per surviving URL. **Do not build CVs here** — stage 3 does that once every row has a score. **Every pre-screen discard must be marked `- [x]` in Processed, not merely logged** — see below. |
 | `build-kits` | For each row in `candidates`, build the kit (below). |
 | `sync` | `node run-all.mjs sync`. Zero tokens; it runs the five reconciliation steps itself. |
