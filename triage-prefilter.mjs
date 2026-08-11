@@ -42,13 +42,14 @@
  * unlike --max-age-days, which is the user guessing at how long a listing lives.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PIPELINE_PATH = join(ROOT, 'data', 'pipeline.md');
 const SHORTLIST_PATH = join(ROOT, 'data', 'shortlist.md');
+const DISCARD_LOG_PATH = join(ROOT, 'data', 'discard.log');
 
 // ── Pipeline parsing ────────────────────────────────────────────────────────
 // Line shape written by scan.mjs:
@@ -536,6 +537,10 @@ export function buildReport(parsed, { maxAgeDays = null, now = Date.now() } = {}
     },
     look,
     maybe,
+    // The skipped rows themselves, not just their reason tally. `--mark-skips`
+    // needs the URLs to tick them off in the inbox, and a caller auditing a
+    // drop needs to see which posting it was.
+    skip,
     stale,
     skipReasons: [...skipReasons.entries()].sort((a, b) => b[1] - a[1]).map(([reason, count]) => ({ reason, count })),
   };
@@ -682,6 +687,47 @@ export function pruneStale(md, staleUrls) {
   return { text, moved: moved.length };
 }
 
+/**
+ * Mark pre-screen discards as processed, in place.
+ *
+ * `modes/pipeline.md` requires every posting the pre-screen gate drops to be
+ * both logged AND marked `- [x]` in the inbox. Doing it by hand is mechanical,
+ * high-volume and easy to skip, and skipping it fails silently: a pass once
+ * logged 47 discards without marking them, so the same 47 stayed `- [ ]`, were
+ * re-discarded on every later run, duplicated their log lines, and held the
+ * inbox at 60 pending when the real figure was 13. There was no tooling for the
+ * one step whose omission is invisible — this is that tooling.
+ *
+ * Only `skip` rows are touched. `maybe` is explicitly left pending: it means
+ * "not decidable from title and location alone", which is a reason to open the
+ * posting, not to drop it.
+ *
+ * @param {string} md         current data/pipeline.md
+ * @param {Array<{url:string, reason:string}>} skips
+ * @returns {{ text: string, marked: number, lines: string[] }}
+ */
+export function markPrescreenSkips(md, skips) {
+  const reasonByUrl = new Map(skips.map((s) => [s.url, s.reason]));
+  if (reasonByUrl.size === 0) return { text: md, marked: 0, lines: [] };
+
+  const out = [];
+  const lines = [];
+  let marked = 0;
+  for (const line of String(md ?? '').split(/\r?\n/)) {
+    const entry = parsePipelineLine(line);
+    if (!entry || entry.done || !reasonByUrl.has(entry.url)) { out.push(line); continue; }
+    const reason = reasonByUrl.get(entry.url);
+    // Rewrite only the checkbox and append the reason, preserving the rest of
+    // the row verbatim — company, title, location and `via:` stay readable, and
+    // a later reader can see what was dropped and why without another tool.
+    const rewritten = `${line.replace(/^(\s*[-*]\s*)\[ \]/, '$1[x]')} | skipped (pre-screen mismatch: ${reason})`;
+    out.push(rewritten);
+    lines.push(`${new Date().toISOString()}\t${entry.url}\t${reason}`);
+    marked++;
+  }
+  return { text: out.join('\n'), marked, lines };
+}
+
 // ── Self-test ───────────────────────────────────────────────────────────────
 
 function selfTest() {
@@ -728,6 +774,31 @@ function selfTest() {
 
   // "Remote" scoped to a foreign country is remote WITHIN that country. These
   // were scoring 4.5 — the second-best tier — and reaching the shortlist.
+  // ── markPrescreenSkips ──
+  // The one step in modes/pipeline.md whose omission is silent: a pass once
+  // logged 47 discards without marking them, so the inbox sat at 60 pending
+  // when the real figure was 13.
+  {
+    const inbox = [
+      '# Pipeline',
+      '- [ ] https://ex.com/a | Acme | Substation Engineer Intern | Texas',
+      '- [ ] https://ex.com/b | Beta | Werkstudent ML | Erlangen',
+      '- [x] https://ex.com/c | Gamma | Old Role | Berlin',
+    ].join('\n');
+    const { text, marked, lines } = markPrescreenSkips(inbox, [{ url: 'https://ex.com/a', reason: 'outside Germany' }]);
+    check(marked === 1, 'marks exactly the skipped entry');
+    check(/- \[x\] https:\/\/ex\.com\/a .*skipped \(pre-screen mismatch: outside Germany\)/.test(text),
+      'the skipped row is ticked and carries its reason');
+    check(/- \[ \] https:\/\/ex\.com\/b/.test(text), 'a non-skipped pending row is left pending');
+    check(text.includes('| Acme | Substation Engineer Intern | Texas'), 'the rest of the row is preserved verbatim');
+    check(lines.length === 1 && lines[0].includes('https://ex.com/a'), 'an audit line is produced per marked row');
+    // An already-processed row must not be re-marked or re-logged: that is what
+    // duplicated discard-log lines on every later run.
+    const again = markPrescreenSkips(text, [{ url: 'https://ex.com/a', reason: 'outside Germany' }]);
+    check(again.marked === 0, 'running twice is a no-op — no double-marking, no duplicate log lines');
+    check(markPrescreenSkips(inbox, []).marked === 0, 'an empty skip list changes nothing');
+  }
+
   check(classifyReach('US-TX-REMOTE') === 'abroad', 'US-scoped remote is abroad, not remote');
   check(classifyReach('US - Remote') === 'abroad', '"US - Remote" is abroad');
   check(classifyReach('Remote (USA)') === 'abroad', '"Remote (USA)" is abroad');
@@ -906,6 +977,19 @@ function main() {
       writeFileSync(PIPELINE_PATH, text, 'utf-8');
       console.log(`Moved ${moved} stale entr${plural} to ## Expired in data/pipeline.md`);
     }
+    process.exit(0);
+  }
+
+  if (argv.includes('--mark-skips')) {
+    const { text, marked, lines } = markPrescreenSkips(md, report.skip.map((x) => ({ url: x.url, reason: x.reason })));
+    if (!argv.includes('--write')) {
+      console.log(`Dry run: ${marked} pre-screen discard(s) would be marked processed. Re-run with --write to apply.`);
+      process.exit(0);
+    }
+    writeFileSync(PIPELINE_PATH, text, 'utf-8');
+    // The audit log is append-only and lives beside the inbox it explains.
+    if (lines.length) appendFileSync(DISCARD_LOG_PATH, `${lines.join('\n')}\n`, 'utf-8');
+    console.log(`Marked ${marked} pre-screen discard(s) processed in data/pipeline.md and logged them to data/discard.log.`);
     process.exit(0);
   }
 
