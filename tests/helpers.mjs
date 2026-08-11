@@ -310,25 +310,37 @@ function warnFallbackShell(exe) {
  *
  * @returns {string} Bash executable path or command name.
  */
+/**
+ * Cap on each bash/wsl discovery probe.
+ *
+ * These probes ask a yes/no question a healthy toolchain answers in
+ * milliseconds, but had no timeout — so a broken WSL registration (`wsl`
+ * failing with REGDB_E_CLASS_NOT_REG, what a half-installed WSL does) blocked
+ * ~60s and pushed tests/shell-discovery.test.mjs past test-all's runner limit.
+ * The suite then reported a failure whose real cause was an absent OPTIONAL
+ * dependency. A probe that cannot answer in 5s has answered: unusable.
+ */
+const PROBE_TIMEOUT_MS = 5000;
+
 export function getBash() {
   if (bashCache !== null) return bashCache;
   if (process.platform !== 'win32') { bashSourceCache = 'posix'; return (bashCache = 'bash'); }
   for (const cmd of WINDOWS_BASH_CANDIDATES) {
     try {
-      execFileSync(cmd, ['-c', 'true'], { stdio: 'ignore' });
+      execFileSync(cmd, ['-c', 'true'], { stdio: 'ignore', timeout: PROBE_TIMEOUT_MS });
       bashSourceCache = 'git-bash';
       return (bashCache = cmd);
     } catch {}
   }
   try {
     // Probe via argv vector — no shell string, nothing to interpolate.
-    execFileSync('wsl', ['-e', 'bash', '-c', 'true'], { stdio: 'ignore' });
+    execFileSync('wsl', ['-e', 'bash', '-c', 'true'], { stdio: 'ignore', timeout: PROBE_TIMEOUT_MS });
     bashSourceCache = 'wsl';
     return (bashCache = 'bash');
   } catch {}
   for (const cmd of ['bash']) {
     try {
-      execFileSync(cmd, ['-c', 'true'], { stdio: 'ignore' });
+      execFileSync(cmd, ['-c', 'true'], { stdio: 'ignore', timeout: PROBE_TIMEOUT_MS });
       bashSourceCache = 'path';
       return (bashCache = cmd);
     } catch {}
@@ -356,7 +368,7 @@ export function toBashPath(wpath) {
     if (out) return out;
   } catch {}
   try {
-    execFileSync('wsl', ['-e', 'bash', '-c', 'true'], { stdio: 'ignore' });
+    execFileSync('wsl', ['-e', 'bash', '-c', 'true'], { stdio: 'ignore', timeout: PROBE_TIMEOUT_MS });
     const out = execFileSync('wsl', ['wslpath', '-u', forwardSlashed], { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
     if (out) return out;
   } catch {}
