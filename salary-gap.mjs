@@ -58,9 +58,55 @@ export function parseAmount(raw) {
   // three letters, so the lone "k" magnitude suffix ("80k") is never eaten, and
   // prose ("competitive") still fails the numeric match below even after losing
   // its last three letters.
-  s = s.replace(/[€$£¥]/g, '').replace(/\s*[A-Za-z]{3}\s*$/, '').trim();
+  s = s.replace(/[€$£¥]/g, '').trim();
+
+  // Pay period, BEFORE any alpha-token stripping. Working-student and HiWi roles
+  // in this market advertise an HOURLY rate, so without this every advertised
+  // figure in the pipeline parsed as null and the gap analysis came back empty.
+  //
+  // Order matters: the trailing 3-letter strip below is blind to word boundaries
+  // and would turn "19/Stunde" into "19/Stu" and "pro Monat" into "pro Mo",
+  // destroying the very token this needs to read.
+  //
+  // Capturing the period is not cosmetic. An hourly rate compared against an
+  // annual target produces a gap percentage that looks authoritative and means
+  // nothing, so the period travels with the amount and callers refuse to compare
+  // across periods — the same rule already applied to currency.
+  let period = null;
+  const periodMatch = s.match(
+    /(?:\/|\s*per\s+|\s*pro\s+|\s*p\.?\s*)(stunden?|hours?|hrs?|h|tage?|days?|wochen?|weeks?|wk|monat(?:e|s)?|months?|mo|jahr(?:e|s)?|years?|yr|annum|a)\b\.?/i
+  );
+  if (periodMatch) {
+    const unit = periodMatch[1].toLowerCase();
+    if (/^(stunden?|hours?|hrs?|h)$/.test(unit)) period = 'hour';
+    else if (/^(tage?|days?)$/.test(unit)) period = 'day';
+    else if (/^(wochen?|weeks?|wk)$/.test(unit)) period = 'week';
+    else if (/^(monat(?:e|s)?|months?|mo)$/.test(unit)) period = 'month';
+    else period = 'year';
+    s = s.replace(periodMatch[0], '').trim();
+  }
+
+  // Now the ISO-4217-style alpha token, in whichever position it sits: trailing
+  // ("450k SEK", "80-90k eur"), leading ("EUR 25"), or between the amount and
+  // the period ("14 EUR/h" — by now the period is already removed, leaving the
+  // code trailing). Exactly three letters, so the lone "k" magnitude suffix is
+  // never eaten; the leading form is anchored to a following digit so prose is
+  // untouched. "competitive" survives all of this and still fails the numeric
+  // match below, which is the outcome that matters.
+  s = s.replace(/\s*[A-Za-z]{3}\s*$/, '').trim();
+  s = s.replace(/^[A-Za-z]{3}\s*(?=[\d.,])/, '').trim();
   const toNum = (numStr, kFlag) => {
-    const n = parseFloat(numStr.replace(/,/g, ''));
+    // A comma is a THOUSANDS separator in "123,684" and a DECIMAL point in the
+    // German "12,50". Stripping all commas turns €12.50/hour into €1250/hour —
+    // a 100x error, and German postings write hourly rates that way as a matter
+    // of course. The two are distinguishable by group length: a thousands
+    // separator is always followed by exactly three digits, a decimal comma by
+    // one or two.
+    let t = numStr;
+    if (/^\d{1,3}(?:\.\d{3})+,\d{1,2}$/.test(t)) t = t.replace(/\./g, '').replace(',', '.'); // 1.234,56
+    else if (/^\d+,\d{1,2}$/.test(t)) t = t.replace(',', '.');                                // 12,50
+    else t = t.replace(/,/g, '');                                                             // 123,684
+    const n = parseFloat(t);
     return Number.isNaN(n) ? null : (kFlag ? n * 1000 : n);
   };
   const range = s.match(/^([\d.,]+)\s*(k)?\s*[-–—]\s*([\d.,]+)\s*(k)?$/i);
@@ -69,12 +115,12 @@ export function parseAmount(raw) {
     const hi = toNum(range[3], range[4] || range[2]);
     if (lo === null || hi === null) return null;
     const min = Math.min(lo, hi), max = Math.max(lo, hi);
-    return { min, max, mid: (min + max) / 2 };
+    return { min, max, mid: (min + max) / 2, period };
   }
   const single = s.match(/^([\d.,]+)\s*(k)?$/i);
   if (single) {
     const v = toNum(single[1], single[2]);
-    return v === null ? null : { min: v, max: v, mid: v };
+    return v === null ? null : { min: v, max: v, mid: v, period };
   }
   return null;
 }
@@ -168,7 +214,9 @@ function pickEffective(type, candidates) {
   if (!usable.length) return null;
   usable.sort((a, b) => (tiers[b.source] - tiers[a.source]) || (a.date < b.date ? 1 : -1));
   const top = usable[0];
-  return { value: top.parsed.mid, source: top.source, date: top.date, currency: top.currency, raw: top.amount };
+  // `period` is carried through: it is what stops an hourly rate being compared
+  // against — or printed as — an annual figure.
+  return { value: top.parsed.mid, period: top.parsed.period ?? null, source: top.source, date: top.date, currency: top.currency, raw: top.amount };
 }
 
 // --- Fold + aggregates ---
@@ -214,10 +262,16 @@ export function fold(observations, apps, profileDesired) {
     // string equality AND neither side UNKNOWN (two UNKNOWNs could be different real
     // currencies, so UNKNOWN is never comparable — not even with itself). Skips are
     // reported in quality.currencyMismatches, never dropped silently.
-    const advComparable = advertised && actual && advertised.currency === actual.currency && advertised.currency !== 'UNKNOWN';
-    const desComparable = desired && actual && desired.currency === actual.currency && desired.currency !== 'UNKNOWN';
-    if (advertised && actual && !advComparable) currencyMismatches.push({ num, comparison: 'advertised-vs-actual', currencies: [advertised.currency, actual.currency] });
-    if (desired && actual && !desComparable) currencyMismatches.push({ num, comparison: 'desired-vs-actual', currencies: [desired.currency, actual.currency] });
+    // Pay period is subject to the same rule as currency, and for the same
+    // reason: EUR 25/hour against a EUR 48,000/year target is not a -99.9% gap,
+    // it is a category error. Comparable only when both periods agree — two
+    // unknowns count as agreeing, which preserves the annual-vs-annual default
+    // for figures that state no period at all.
+    const samePeriod = (a, b) => (a?.period ?? null) === (b?.period ?? null);
+    const advComparable = advertised && actual && advertised.currency === actual.currency && advertised.currency !== 'UNKNOWN' && samePeriod(advertised, actual);
+    const desComparable = desired && actual && desired.currency === actual.currency && desired.currency !== 'UNKNOWN' && samePeriod(desired, actual);
+    if (advertised && actual && !advComparable) currencyMismatches.push({ num, comparison: 'advertised-vs-actual', currencies: [advertised.currency, actual.currency], periods: [advertised.period ?? null, actual.period ?? null] });
+    if (desired && actual && !desComparable) currencyMismatches.push({ num, comparison: 'desired-vs-actual', currencies: [desired.currency, actual.currency], periods: [desired.period ?? null, actual.period ?? null] });
     applications.push({
       num, company: apps[num].company, role: apps[num].role,
       desired, advertised, actual, trail,
@@ -377,6 +431,29 @@ function selfTest() {
   assert(parseAmount('$123,684-$254,644 USD')?.mid === 189164, 'US range, symbol on both bounds, hyphen');
   assert(parseAmount('€80,000-€90,000')?.min === 80000, 'EUR range, symbol on both bounds');
   assert(parseAmount('$150,000')?.mid === 150000, 'single value with symbol still works');
+
+  // Hourly rates: the advertised format for working-student and HiWi roles.
+  // Before these, every advertised figure in such a pipeline parsed as null and
+  // the gap analysis came back empty on a tracker full of data.
+  assert(parseAmount('EUR 25/hour')?.mid === 25, 'leading ISO code + /hour');
+  assert(parseAmount('EUR 25/hour')?.period === 'hour', 'period captured as hour');
+  assert(parseAmount('EUR 15 per hour')?.mid === 15, '"per hour" form');
+  assert(parseAmount('14 EUR/h')?.mid === 14, 'ISO code between amount and period');
+  assert(parseAmount('€19/Stunde')?.period === 'hour', 'German "/Stunde"');
+  assert(parseAmount('2400 EUR pro Monat')?.period === 'month', 'German "pro Monat"');
+  assert(parseAmount('2400 EUR pro Monat')?.mid === 2400, 'monthly amount survives period strip');
+  // Order guard: the trailing 3-letter strip is blind to word boundaries and
+  // would eat "nde" from "Stunde" if it ran before the period match.
+  assert(parseAmount('€19/Stunde')?.mid === 19, 'period is read BEFORE the alpha-token strip');
+
+  // A comma is a decimal point in German and a thousands separator in English.
+  // Conflating them turns EUR 12.50/hour into EUR 1250/hour.
+  assert(parseAmount('12,50 EUR/Stunde')?.mid === 12.5, 'German decimal comma -> 12.50, not 1250');
+  assert(parseAmount('1.234,56 EUR')?.mid === 1234.56, 'German dot-thousands + comma-decimal');
+  assert(parseAmount('$123,684-$254,644 USD')?.min === 123684, 'English thousands comma unaffected');
+
+  // Period travels with the amount so callers can refuse cross-period math.
+  assert(parseAmount('80-90k EUR')?.period === null, 'no stated period -> null (annual default)');
 
   // parseObservations
   const obs = parseObservations(OBS_FIXTURE);
@@ -584,7 +661,14 @@ function loadProfileDesired() {
 
 // --- Output ---
 const fmtVal = (v) => (v >= 1000 && v % 500 === 0 ? `${v / 1000}k` : String(v));
-const fmtEff = (e) => (e ? `${fmtVal(e.value)} ${e.currency || ''} (${e.source}, ${e.date})`.replace('  ', ' ') : '—');
+// The period is printed whenever the figure carries one. "25 EUR" for an hourly
+// working-student rate reads as an annual salary and is off by four orders of
+// magnitude; "25 EUR/hour" cannot be misread.
+const fmtEff = (e) => {
+  if (!e) return '—';
+  const period = e.period ? `/${e.period}` : '';
+  return `${fmtVal(e.value)} ${e.currency || ''}${period} (${e.source}, ${e.date})`.replace('  ', ' ');
+};
 const fmtPct = (p) => (p === null || p === undefined ? '—' : `${p >= 0 ? '+' : ''}${p.toFixed(1)}%`);
 const daysOld = (date) => Math.max(0, Math.round((Date.now() - Date.parse(date)) / 86400000));
 
