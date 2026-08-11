@@ -199,6 +199,22 @@ export function reportToObservation(content, num, date) {
   };
 }
 
+/**
+ * Company/role from a report's `# Evaluation: {Company} — {Role}` heading.
+ *
+ * The fallback for pre-Machine-Summary reports. Splits on the em/en dash the
+ * heading format uses, not the hyphen, because both company and role names
+ * routinely contain hyphens ("Werkstudent (m/w/d) - KI" would split wrongly).
+ * Returns nulls rather than guessing when the heading is absent or unsplittable.
+ */
+export function parseReportHeading(content) {
+  const m = String(content || '').match(/^#\s*Evaluation:\s*(.+)$/m);
+  if (!m) return { company: null, role: null };
+  const parts = m[1].split(/\s+[—–]\s+/);
+  if (parts.length < 2) return { company: parts[0].trim() || null, role: null };
+  return { company: parts[0].trim() || null, role: parts.slice(1).join(' — ').trim() || null };
+}
+
 const pctDelta = (from, to) => ((to - from) / from) * 100;
 const median = (nums) => {
   const s = [...nums].sort((a, b) => a - b);
@@ -455,6 +471,18 @@ function selfTest() {
   // Period travels with the amount so callers can refuse cross-period math.
   assert(parseAmount('80-90k EUR')?.period === null, 'no stated period -> null (annual default)');
 
+  // Legacy reports (no Machine Summary) still name company and role in their
+  // heading; without reading it those rows printed as "(unknown company/role)".
+  {
+    const h = parseReportHeading('# Evaluation: Fraunhofer IIS — Working Student, ML for Audio\n\n**Date:** 2026-08-05');
+    assert(h.company === 'Fraunhofer IIS', 'heading company parsed');
+    assert(h.role === 'Working Student, ML for Audio', 'heading role parsed');
+    // Split on the em/en dash only: hyphens are common INSIDE both fields.
+    const hy = parseReportHeading('# Evaluation: Primetals — Werkstudent (m/w/d) - KI');
+    assert(hy.role === 'Werkstudent (m/w/d) - KI', 'hyphen inside the role is not a split point');
+    assert(parseReportHeading('no heading here').company === null, 'absent heading -> nulls, not a guess');
+  }
+
   // parseObservations
   const obs = parseObservations(OBS_FIXTURE);
   assert(obs.length === 10, `10 observations, got ${obs.length}`);
@@ -632,9 +660,12 @@ function collectSources() {
         apps[num] = { company: r.company, role: r.role };
         if (r.observation) observations.push(r.observation);
       } else {
-        // report exists but has no Machine Summary (legacy) — still a valid
-        // tracker row, so log observations against it are NOT orphans
-        apps[num] = { company: null, role: null };
+        // Report exists but has no Machine Summary (legacy) — still a valid
+        // tracker row, so log observations against it are NOT orphans. Its
+        // `# Evaluation: {Company} — {Role}` header carries the identity the
+        // fence would have, and without reading it those rows printed as
+        // "(unknown company/role)" while the name sat on line 1 of the file.
+        apps[num] = { ...parseReportHeading(content) };
       }
     }
   }
