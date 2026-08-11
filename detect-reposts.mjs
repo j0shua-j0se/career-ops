@@ -33,6 +33,9 @@ import { flagValue } from './lib/cli-flags.mjs';
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const SCAN_HISTORY_PATH = join(CAREER_OPS, 'data/scan-history.tsv');
 const DEFAULT_WINDOW_DAYS = 90;
+// Minimum days between a cluster's first and last sighting for it to count as a
+// repost. See buildRepostCluster: a 0-day span is parallel headcount, not churn.
+const MIN_SPAN_DAYS = 1;
 
 // --- CLI args ---
 
@@ -380,6 +383,19 @@ function buildRepostCluster(clusterRows, windowDays) {
   const span = daysBetween(first.date, last.date);
   if (span > windowDays) return null;
 
+  // A cluster that spans a single day is not a repost. "Repost" means the role
+  // was listed, went away, and came back — which is the churn signal this tool
+  // exists to surface (a seat nobody accepts, a ghost posting, a revolving
+  // door). Several distinct requisitions opened on the SAME day are the
+  // opposite: ordinary parallel headcount, and usually good news.
+  //
+  // The distinction is not academic. Steampunk's four "AI Evaluation Scientist"
+  // rows are iCIMS reqs 7999/8000/8001/8003, all first seen 2026-08-06 — four
+  // seats, not four reposts. Without this guard 58 clusters were reported for
+  // this history and only ONE (Flix, 6-day span) was a real repost, so the
+  // genuine signal was buried under ~57 false ones and the report was unusable.
+  if (span < MIN_SPAN_DAYS) return null;
+
   const role = last.title;
   const appearances = sorted.map(r => ({ url: r.url, date: r.dateStr, title: r.title }));
 
@@ -479,6 +495,27 @@ function runSelfTest() {
   // The skipped_expired row must never appear.
   const expiredClusters = clusters.filter(c => c.appearances.some(a => a.url === 'https://acme.com/jobs/sre-4'));
   check(expiredClusters.length === 0, 'rows with skipped_expired status must be ignored');
+
+  // Several distinct requisitions for one role opened the SAME day are parallel
+  // headcount, not a repost — the role never went away and came back. Real case:
+  // Steampunk's iCIMS reqs 7999/8000/8001/8003, all first seen 2026-08-06. Left
+  // unguarded these dominated the report (58 clusters, 1 of them real).
+  const sameDay = [
+    { url: 'https://x.icims.com/jobs/7999/ai-eval/job', date: parseDate('2026-08-06'), dateStr: '2026-08-06', title: 'AI Evaluation Scientist', company: 'Steampunk', status: 'added', portal: 'icims-full', location: '' },
+    { url: 'https://x.icims.com/jobs/8000/ai-eval/job', date: parseDate('2026-08-06'), dateStr: '2026-08-06', title: 'AI Evaluation Scientist', company: 'Steampunk', status: 'added', portal: 'icims-full', location: '' },
+    { url: 'https://x.icims.com/jobs/8001/ai-eval/job', date: parseDate('2026-08-06'), dateStr: '2026-08-06', title: 'AI Evaluation Scientist', company: 'Steampunk', status: 'added', portal: 'icims-full', location: '' },
+  ];
+  check(detectReposts(sameDay, DEFAULT_WINDOW_DAYS).length === 0,
+    'distinct same-day requisitions for one role are parallel headcount, NOT a repost');
+
+  // One day apart is the smallest genuine repost and must still be caught, so
+  // the span guard cannot be widened without losing real signal.
+  const oneDayApart = [
+    sameDay[0],
+    { ...sameDay[1], date: parseDate('2026-08-07'), dateStr: '2026-08-07' },
+  ];
+  check(detectReposts(oneDayApart, DEFAULT_WINDOW_DAYS).length === 1,
+    'a 1-day span is still a repost — the span guard must not swallow real signal');
 
   // Empty input -> empty output, no crash.
   check(detectReposts([], DEFAULT_WINDOW_DAYS).length === 0, 'empty input should return no clusters');
