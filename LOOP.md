@@ -70,12 +70,21 @@ sliding the bar to 3.2 is a broken one.
 Each wave widens the search rather than repeating it:
 
 1. `portals` — `scan.mjs` over configured companies/providers (zero-token)
-2. `ats-recent` — `scan-ats-full.mjs --since 7`
-3. `ats-wide` — `--since 21`
-4. `ats-deep` — `--since 45 --include-undated`
-5. `agent-web` — `modes/scan.md` Level 1 (Playwright on tracked careers pages) and Level 3 (WebSearch)
+2. `interamt` — `scan-interamt.mjs`, the German public-sector portal (universities, Studierendenwerke, public research). Browser-driven, so slower per posting than an API rung — but far cheaper than sweeping ~38k companies, and in the same institutional neighbourhood as this tracker's highest-scoring rows.
+3. `ats-recent` — `scan-ats-full.mjs --since 7`
+4. `ats-wide` — `--since 21`
+5. `ats-deep` — `--since 45 --include-undated`
+6. `agent-web` — `modes/scan.md` Level 1 (Playwright on tracked careers pages) and Level 3 (WebSearch)
 
 Cheapest and most precise first; the agent is the last rung, not the first.
+
+**The order is measured, not assumed.** Tracing every report in `reports/` back
+to the portal that surfaced it — exact URL match against `scan-history.tsv` —
+the full-ATS rungs produced 5 reports from 717 scanned rows, of which 2
+qualified, both at exactly 3.9 and neither built into a kit. Every 4.0+ row came
+from a cheap German-market source. That is why the expensive rungs sit late and
+why `loop.target` was lowered from 10 to 5: at 10 the loop essentially never
+stopped early, so every pass escalated into the sweeps that yield least.
 
 ## Dedup
 

@@ -344,3 +344,57 @@ eq(parseTriageLine(''), null, 'an empty line parses to null');
   check(line.includes('qualified=1/5'), 'the run log records progress against target');
   check(line.includes('portals'), 'the run log records the detail it was given');
 }
+
+// ---------------------------------------------------------------------------
+// Wave ORDER encodes cost-vs-yield, and is asserted literally.
+//
+// Interamt — the German public-sector portal covering universities,
+// Studierendenwerke and public research — was not in this ladder at all.
+// portals.yml documented it as "run separately", so it only ever ran by hand,
+// which in practice meant rarely: the same silent gap as the unswept agent
+// sources, except this one is a script and can simply be scheduled.
+//
+// It sits at wave 2, BEFORE the reverse-ATS sweeps, because those are the
+// expensive low-yield end. Tracing every report in reports/ back to the portal
+// that surfaced it (exact URL match against scan-history.tsv): the full-ATS
+// sweeps produced 5 reports from 717 scanned rows, 2 qualifying, both at
+// exactly 3.9 and neither built into a kit — while every 4.0+ row came from a
+// cheap German-market source. Escalation must exhaust the cheap, on-target
+// rungs first.
+console.log('\nloop-core — wave ladder order reflects cost vs measured yield');
+
+{
+  const ids = WAVE_STRATEGIES.map((s) => s.id);
+
+  ids[0] === 'portals'
+    ? pass('wave 1 is the configured-portals sweep (cheapest, highest yield)')
+    : fail(`wave 1 is ${ids[0]}, expected portals`);
+
+  ids.includes('interamt')
+    ? pass('interamt is in the ladder at all (it used to be run-by-hand only)')
+    : fail('interamt missing from the wave ladder');
+
+  ids.indexOf('interamt') < ids.indexOf('ats-recent')
+    ? pass('interamt runs BEFORE the reverse-ATS sweeps')
+    : fail(`interamt (${ids.indexOf('interamt')}) does not precede ats-recent (${ids.indexOf('ats-recent')})`);
+
+  // The ATS rungs must stay in widening order — each is strictly more expensive
+  // than the last, so escalating out of order would spend the big budget early.
+  ids.indexOf('ats-recent') < ids.indexOf('ats-wide') && ids.indexOf('ats-wide') < ids.indexOf('ats-deep')
+    ? pass('the ATS rungs widen in order: recent -> wide -> deep')
+    : fail('ATS rungs are out of widening order');
+
+  ids[ids.length - 1] === 'agent-web'
+    ? pass('the agent rung stays last — it is the only one that costs tokens')
+    : fail(`last wave is ${ids[ids.length - 1]}, expected agent-web`);
+
+  // Every script rung must actually name a command, or `wave` silently no-ops.
+  WAVE_STRATEGIES.filter((s) => s.kind === 'script').every((s) => s.command && Array.isArray(s.args) && s.args.length)
+    ? pass('every script rung carries a runnable command and args')
+    : fail('a script rung is missing its command or args');
+
+  // The ladder must fit under the configured cap, or the last rungs are dead.
+  ids.length <= 6
+    ? pass(`the ladder fits the max_waves cap (${ids.length} <= 6)`)
+    : fail(`ladder has ${ids.length} waves but max_waves is 6 — the tail can never run`);
+}

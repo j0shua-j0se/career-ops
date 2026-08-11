@@ -68,6 +68,32 @@ export const WAVE_STRATEGIES = [
     args: ['scan.mjs'],
     describe: 'configured companies and providers from portals.yml (zero-token)',
   },
+  // Interamt sits at wave 2, ahead of the ATS sweeps, on measured yield.
+  //
+  // It is the German public-sector portal — universities, Studierendenwerke and
+  // Anstalten des öffentlichen Rechts — which is the same institutional
+  // neighbourhood as the highest-scoring rows in this tracker. It was NOT in
+  // this ladder at all: `portals.yml` documents it as "run separately", so it
+  // only ever ran by hand, which in practice meant rarely. That is the same
+  // silent gap as the unswept agent sources, except this one is a script and
+  // can simply be scheduled.
+  //
+  // Placed before the ATS waves because those are the expensive, low-yield end:
+  // tracing every report to its originating portal shows the full-ATS sweeps
+  // produced 5 reports from 717 scanned rows, 2 of which qualified, both at
+  // exactly 3.9 — while cheaper German-market sources produced every 4.0+.
+  // Escalation should exhaust the cheap, on-target rungs first.
+  //
+  // It drives a real browser (Interamt is Apache Wicket with no REST API), so
+  // it is slower per posting than an API rung but far cheaper than sweeping
+  // ~38k companies.
+  {
+    id: 'interamt',
+    kind: 'script',
+    command: 'node',
+    args: ['scan-interamt.mjs'],
+    describe: 'Interamt.de — German public sector: universities, Studierendenwerke, public research (browser-driven)',
+  },
   {
     id: 'ats-recent',
     kind: 'script',
