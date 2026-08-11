@@ -54,6 +54,12 @@ const DEFAULT_CITY = 'erlangen';
 const MAX_QUERIES = 12;
 const FETCH_TIMEOUT_MS = 120_000;
 
+// A search that legitimately matches nothing still renders a full page, so
+// "no cards" alone cannot mean "the parser broke". Without this the provider
+// reads a healthy empty result as a fault — the failure the Indeed board hit
+// in production, where one narrow query aborted four working ones.
+export const EMPTY_RESULT_RE = /keine\s+(?:passenden\s+)?(?:stellenangebote|jobs|treffer)|0\s+passende\s+jobs|nichts\s+gefunden|no\s+(?:matching\s+)?jobs\s+found/i;
+
 /** Decode the HTML entities that actually appear in StepStone card text. */
 function decodeEntities(s) {
   return String(s)
@@ -262,23 +268,50 @@ export default {
     const out = [];
     const seen = new Set();
 
+    // Per-query resilience: one narrow query must not abort the board. See the
+    // Indeed provider for the incident this prevents.
+    const failures = [];
+    let succeeded = 0;
+
     for (const query of queries) {
       const url = buildSearchUrl(query, city, radius);
-      const html = await renderViaScrapling(url);
-      const jobs = parseStepstoneHtml(html);
-      // Zero cards from a page that rendered at all means the markup hooks moved.
-      // Say so — silence here would look exactly like "this query has no jobs".
-      if (jobs.length === 0 && html.length > 50_000) {
-        throw new Error(
-          `stepstone: rendered ${html.length} bytes for "${query}" but found no job cards. `
-          + 'The data-at hooks this provider parses have probably changed — update parseStepstoneHtml.',
-        );
+      let html = '';
+      let jobs = [];
+      try {
+        html = await renderViaScrapling(url);
+        jobs = parseStepstoneHtml(html);
+      } catch (err) {
+        failures.push(`"${query}": ${err?.message ?? err}`);
+        continue;
       }
+
+      if (jobs.length === 0) {
+        // A genuinely empty search is a normal outcome, not a fault.
+        if (EMPTY_RESULT_RE.test(html)) { succeeded++; continue; }
+        // Cards absent AND no empty-marker on a full page: the data-at hooks
+        // this provider parses have probably moved. Record it, keep going.
+        if (html.length > 50_000) {
+          failures.push(
+            `"${query}": rendered ${html.length} bytes with neither job cards nor an empty-results `
+            + 'marker — the data-at hooks may have changed; check parseStepstoneHtml',
+          );
+          continue;
+        }
+      }
+
+      succeeded++;
       for (const j of jobs) {
         if (seen.has(j.url)) continue;
         seen.add(j.url);
         out.push(j);
       }
+    }
+
+    if (succeeded === 0 && failures.length > 0) {
+      throw new Error(`stepstone: every query failed —\n  ${failures.join('\n  ')}`);
+    }
+    if (failures.length > 0) {
+      console.error(`⚠️  stepstone: ${failures.length} of ${queries.length} queries failed (continuing):\n  ${failures.join('\n  ')}`);
     }
 
     return out;

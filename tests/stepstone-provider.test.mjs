@@ -103,3 +103,25 @@ try {
 parseStepstoneHtml('').length === 0 && parseStepstoneHtml('<html><body>nope</body></html>').length === 0
   ? pass('empty or non-listing HTML yields zero jobs without throwing')
   : fail('non-listing HTML mishandled');
+
+// ---------------------------------------------------------------------------
+// Same guard as the Indeed provider, added after that board failed in
+// production: a query that legitimately matches nothing must not be read as a
+// broken parser, and one bad query must not abort the board.
+console.log('\nStepStone provider — empty results vs a broken parser');
+
+{
+  const src = readFileSync(join(ROOT, 'providers/stepstone.mjs'), 'utf-8');
+
+  /EMPTY_RESULT_RE/.test(src)
+    ? pass('an empty-results marker is checked before declaring the parser broken')
+    : fail('a legitimately empty search would still be reported as a parser fault');
+
+  /failures\.push/.test(src) && /succeeded\s*===\s*0/.test(src)
+    ? pass('a failing query is recorded and the board continues; only a total wipeout throws')
+    : fail('one failing query can still abort the whole board');
+
+  /neither job cards nor an empty-results/.test(src)
+    ? pass('a page with no cards and no empty-marker is still reported as a fault')
+    : fail('a real data-at hook change would now pass silently');
+}

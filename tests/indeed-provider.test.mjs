@@ -88,3 +88,46 @@ parseIndeedHtml('').length === 0
   && parseIndeedHtml('<script>window.mosaic.providerData["mosaic-provider-jobcards"]={bad json;</script>').length === 0
   ? pass('empty, non-listing and malformed payloads yield zero jobs without throwing')
   : fail('malformed input mishandled');
+
+// ---------------------------------------------------------------------------
+// A query that legitimately matches nothing is NOT a fault.
+//
+// Indeed OMITS the mosaic payload entirely on a zero-result search — it does not
+// ship an empty results array — so "no payload" is ambiguous between "this query
+// found nothing" and "the format moved". The first version of this provider
+// resolved that ambiguity the wrong way: it threw, which aborted the whole
+// board. One narrow query ("praktikum data science" in Erlangen, a search that
+// genuinely matches nothing) therefore cost the FOUR queries that worked, and
+// the board logged `unknown` in portal-health while contributing zero rows and
+// looking perfectly configured.
+//
+// The marker is in ENGLISH even on de.indeed.com, which is why a German-only
+// pattern missed it.
+console.log('\nIndeed provider — empty results vs a broken parser');
+
+{
+  const { EMPTY_RESULT_RE } = await import('../providers/indeed.mjs');
+  const src = readFileSync(join(ROOT, 'providers/indeed.mjs'), 'utf-8');
+
+  // Behavioural, not a source-text grep: this is the exact string Indeed's own
+  // zero-result page carries, in ENGLISH even on de.indeed.com, which is why a
+  // German-only pattern missed it and the board failed in production.
+  EMPTY_RESULT_RE.test('<div>Sorry, we have no jobs with this search condition.</div>')
+    ? pass('the empty-results marker Indeed actually uses is recognised')
+    : fail('EMPTY_RESULT_RE does not match the live "no jobs with this search condition" string');
+
+  !EMPTY_RESULT_RE.test('<div>15 jobs in Erlangen</div>')
+    ? pass('an ordinary results page is NOT read as empty')
+    : fail('EMPTY_RESULT_RE over-matches a normal results page');
+
+  // Per-query resilience: the board must survive one bad query.
+  /failures\.push/.test(src) && /succeeded\s*===\s*0/.test(src)
+    ? pass('a failing query is recorded and the board continues; only a total wipeout throws')
+    : fail('one failing query can still abort the whole board');
+
+  // A full page with NEITHER cards NOR an empty-marker must still be reported,
+  // or a real format change goes silent.
+  /neither job cards nor an empty-results/.test(src)
+    ? pass('a page with no cards and no empty-marker is still reported as a fault')
+    : fail('the format-changed case is no longer distinguished from an empty search');
+}

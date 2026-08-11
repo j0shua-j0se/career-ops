@@ -51,6 +51,17 @@ const FETCH_TIMEOUT_MS = 120_000;
 // misconfiguration or a redirect somewhere unexpected, and must not be fetched.
 const HOST_RE = /^([a-z]{2}\.)?indeed\.com$/i;
 
+// Indeed OMITS the mosaic payload entirely when a search matches nothing — it
+// does not ship an empty results array. So "no payload" is ambiguous between
+// "this query found nothing" and "the format moved", and these markers are what
+// separate them. Getting this wrong is expensive in the unobvious direction: it
+// makes a perfectly healthy scraper look broken.
+// `no jobs with this search condition` is the exact string Indeed's own page
+// carries on a zero-result search — in ENGLISH even on de.indeed.com, which is
+// why a German-only pattern missed it. Verified against a live empty query
+// ("praktikum data science" in Erlangen, 597 KB, no payload, no CAPTCHA).
+export const EMPTY_RESULT_RE = /no\s+jobs\s+with\s+this\s+search\s+condition|keine\s+(?:passenden\s+)?stellenanzeigen|nichts\s+gefunden|did\s+not\s+match\s+any\s+jobs|no\s+jobs\s+(?:were\s+)?found/i;
+
 /**
  * Pull the job-card payload out of a rendered search page.
  *
@@ -170,24 +181,56 @@ export default {
 
     const out = [];
     const seen = new Set();
+    // One bad query must not take the board down with it. The first version
+    // threw on the first zero-result query, which aborted the whole fetch —
+    // so a single narrow query ("praktikum data science" in Erlangen, a search
+    // that genuinely matches nothing) silently cost the four queries that
+    // worked. The board reported `unknown` in portal-health and contributed
+    // zero rows while looking configured and enabled.
+    const failures = [];
+    let succeeded = 0;
+
     for (const query of queries) {
       const url = buildSearchUrl(query, { domain, city, radius });
-      const html = await renderViaScrapling(url);
-      const jobs = parseIndeedHtml(html, domain);
-      // A large page with no cards means the payload key moved, or a challenge
-      // was served. Either way say so — silence is indistinguishable from
-      // "this query genuinely has no results".
-      if (jobs.length === 0 && html.length > 200_000) {
-        throw new Error(
-          `indeed: rendered ${html.length} bytes for "${query}" but found no job cards. Either the `
-          + 'mosaic-provider-jobcards payload moved, or a bot challenge was served instead of results.',
-        );
+      let jobs = [];
+      let html = '';
+      try {
+        html = await renderViaScrapling(url);
+        jobs = parseIndeedHtml(html, domain);
+      } catch (err) {
+        failures.push(`"${query}": ${err?.message ?? err}`);
+        continue;
       }
+
+      if (jobs.length === 0) {
+        // A genuinely empty search is a normal outcome, not a fault.
+        if (EMPTY_RESULT_RE.test(html)) { succeeded++; continue; }
+        // No cards, no empty-marker, and a substantial page: the payload moved
+        // or a challenge was served. Record it — but keep going.
+        if (html.length > 200_000) {
+          failures.push(
+            `"${query}": rendered ${html.length} bytes with neither job cards nor an empty-results `
+            + 'marker — the mosaic-provider-jobcards payload may have moved, or a challenge was served',
+          );
+          continue;
+        }
+      }
+
+      succeeded++;
       for (const j of jobs) {
         if (seen.has(j.url)) continue;
         seen.add(j.url);
         out.push(j);
       }
+    }
+
+    // Only a total wipeout is a board-level fault worth failing on: that is the
+    // signal that something systemic changed, rather than one query being narrow.
+    if (succeeded === 0 && failures.length > 0) {
+      throw new Error(`indeed: every query failed —\n  ${failures.join('\n  ')}`);
+    }
+    if (failures.length > 0) {
+      console.error(`⚠️  indeed: ${failures.length} of ${queries.length} queries failed (continuing):\n  ${failures.join('\n  ')}`);
     }
     return out;
   },
