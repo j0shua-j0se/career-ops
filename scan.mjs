@@ -1964,6 +1964,30 @@ function guardStatusFor(code) {
 
 async function main() {
   const args = process.argv.slice(2);
+
+  // Reject unknown flags BEFORE doing anything. Without this, an unrecognized
+  // option is silently ignored and scan.mjs falls through to its default
+  // behaviour — a full portal scan that writes data/pipeline.md and
+  // data/scan-history.tsv. So a command a reader would take for a query
+  // (`node scan.mjs --list-boards`) is in fact a live, side-effectful scan; that
+  // exact typo added 113 postings to the inbox during a session where the inbox
+  // had deliberately been driven to zero.
+  //
+  // Same failure as check-liveness.mjs's `--url`: a flag that does not exist
+  // must be an error, never a silent no-op, whenever the default action writes.
+  const KNOWN_FLAGS = new Set([
+    '--company', '--dry-run', '--headed-fallback', '--include-blacklisted',
+    '--posted-after', '--posted-before', '--quiet', '--rediscover-404',
+    '--since', '--throttle', '--verify', '--help', '-h',
+  ]);
+  const unknownFlags = args.filter((a) => a.startsWith('-') && !KNOWN_FLAGS.has(a.split('=')[0]));
+  if (unknownFlags.length > 0) {
+    console.error(`scan: unknown option(s): ${unknownFlags.join(', ')}`);
+    console.error('Known options: ' + [...KNOWN_FLAGS].filter((f) => f !== '-h').sort().join(' '));
+    console.error('Note: running scan.mjs with no options performs a full portal scan and WRITES to data/pipeline.md.');
+    process.exit(2);
+  }
+
   const dryRun = args.includes('--dry-run');
   const verify = args.includes('--verify');
   // Opt-in: on an anti-bot challenge (e.g. pracuj.pl Cloudflare wall), retry the
