@@ -5011,10 +5011,10 @@ console.log('\n12c. Materialized skill index mode');
     const fixtureSkill = '---\nname: career-ops\n---\n\n# canonical skill\n';
     const pointer = '../../../.agents/skills/career-ops/SKILL.md';
 
-    // -b pins the initial branch name. Without it git emits its "using 'master'
-    // as the name for the initial branch" advice to stderr, which is the only
-    // thing making an otherwise-clean run report "passed with warnings" — a
-    // standing yellow that trains the reader to ignore the warning count.
+    // -b pins the initial branch name, which keeps four lines of git advice
+    // ("using 'master' as the name for the initial branch") out of the run
+    // output. It does NOT affect the warning count — that comes from explicit
+    // warn() calls in tests/helpers.mjs, not from anything on stderr.
     gitRun(['init', '-b', 'main']);
     // core.excludesFile is only the GLOBAL layer. `git init` also seeds
     // .git/info/exclude from a template, which GIT_TEMPLATE_DIR can still point

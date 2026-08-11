@@ -125,6 +125,13 @@ const MUNICH_CITY_RE = /(?<![a-zäöüß])(m[üu]nchen|munich|garching|ismaning|
 // location strings ("Ciudad de México") and would file them as German.
 const GERMANY_RE = /(?<![a-zäöüß])(deutschland|germany)(?![a-zäöüß])/i;
 
+// Explicit non-German country markers, used ONLY to stop a foreign-scoped
+// "remote" from claiming the remote tier (see classifyReach). Deliberately
+// limited to unambiguous country names and the "US"/"USA" forms that dominate
+// full-dataset ATS location cells ("US-TX-REMOTE", "US - Remote"). The lookaround
+// guards keep "us" from matching inside a word such as "Aarhus" or "Cottbus".
+const FOREIGN_COUNTRY_RE = /(?<![a-zäöüß0-9])(u\.?s\.?a?|united states|canada|u\.?k\.?|united kingdom|england|scotland|ireland|india|australia|singapore|japan|china|brazil|mexico|philippines|argentina)(?![a-zäöüß0-9])/i;
+
 // Remote markers. A local copy rather than an import of scan.mjs's
 // REMOTE_TITLE_RE: scan.mjs has top-level side effects (see
 // providers/_registry.mjs), so importing it to reuse one regex would run a
@@ -203,7 +210,19 @@ export function classifyReach(location, title = '') {
 
   if (HOME_CITY_RE.test(loc)) return 'home';
   if (MUNICH_CITY_RE.test(loc)) return 'munich';
-  if (!REMOTE_NEGATED_RE.test(both) && REMOTE_RE.test(both)) return 'remote';
+  if (!REMOTE_NEGATED_RE.test(both) && REMOTE_RE.test(both)) {
+    // "Remote" scoped to a foreign country is remote WITHIN that country, not
+    // remote-reachable from Erlangen. "US-TX-REMOTE" was scoring 4.5 (the
+    // second-best tier) and reaching the shortlist, because the remote marker
+    // was checked before the abroad fall-through and won outright.
+    //
+    // Only when the location names no German marker at all: "Remote, Germany"
+    // and "Remote — Germany or US" are both genuinely reachable and must stay.
+    const germanMarker = GERMANY_RE.test(loc) || OTHER_DE_CITY_RE.test(loc)
+      || HOME_CITY_RE.test(loc) || MUNICH_CITY_RE.test(loc);
+    if (!germanMarker && FOREIGN_COUNTRY_RE.test(loc)) return 'abroad';
+    return 'remote';
+  }
   // A location that carries no information is 'unknown', not 'abroad'. Falling
   // through to 'abroad' scores 1.0 and hard-skips the posting, so a scanner row
   // whose location cell was never captured — or was filled with a placeholder —
@@ -250,6 +269,37 @@ export const TECH_RE = new RegExp([
   '|backend|frontend|full[- ]?stack|cloud|devops|platform|kubernetes|gpu|docker',
   '|informatik|computer science|algorithm\\w*|modellier\\w*|forecasting|prognose|prediction',
   '|datenbank|database|automation|automatisier\\w*|simulation|digitalisierung|robotics|robotik',
+  ')(?![a-zäöüß])',
+].join(''), 'i');
+
+/**
+ * The DOMAIN subset of TECH_RE: words that name the candidate's actual field,
+ * with the generic role nouns (engineer, developer, software, ingenieur,
+ * entwickl…) deliberately left out.
+ *
+ * TECH_RE is broad on purpose — it answers "is this a technical role at all?"
+ * That is the right question when the location already says the job is nearby.
+ * It is the wrong question when there is no location at all: `engineer\w*`
+ * matches "Substation Electrical Engineer", "MEP Engineering Intern",
+ * "Transmission Line Engineer" and "2027 Project Engineer Intern", every one of
+ * which is technical, none of which is remotely this search.
+ *
+ * A full-dataset ATS sweep returns thousands of rows with no location field, so
+ * without this distinction they all clear the reach gate on no evidence and
+ * crowd the shortlist — 18 "worth a look" of which 11 were US construction and
+ * pharmacy internships, burying the three real Erlangen postings.
+ */
+export const DOMAIN_RE = new RegExp([
+  '(?<![a-zäöüß])(',
+  'ai|a\\.i\\.|artificial intelligence|k[üu]nstliche[rn]? intelligenz|ki',
+  '|machine learning|maschinelles lernen|deep learning|ml|mlops|llms?|genai|gen ai|generative ai',
+  '|agentic|agents?|rag|nlp|computer vision|bildverarbeitung|sprachverarbeitung',
+  '|data scien\\w*|datenwissenschaft\\w*|data analy\\w*|datenanaly\\w*|analytics|analyst\\w*',
+  '|data engineer\\w*|dateningenieur\\w*|big data|business intelligence|bi|statistik|statistics|statistical',
+  '|python|sql|informatik|computer science|algorithm\\w*|modellier\\w*',
+  '|forecasting|prognose|prediction|datenbank|database',
+  '|backend|frontend|full[- ]?stack|cloud|devops|kubernetes|gpu|docker',
+  '|robotics|robotik|simulation|digitalisierung',
   ')(?![a-zäöüß])',
 ].join(''), 'i');
 
@@ -366,7 +416,18 @@ export function rankEntry(entry) {
 
   // Student tier is the primary target; full-time collides with the MSc until
   // Aug 2028 (config/profile.yml → student_constraints.enrolled_until).
-  if (student) return { bucket: 'look', reason: `student archetype, ${reach}`, reach, score, flags };
+  if (student) {
+    // With NO location evidence, a generic technical word is not enough to earn
+    // a place on the shortlist — less evidence on one axis has to mean more is
+    // required on the other, or "unknown" becomes a free pass. Demoted, never
+    // dropped: an unknown location is also how a real local posting looks when
+    // the board omits the field, which is exactly how the DLR row nearly got
+    // discarded (#classifyReach placeholder fix).
+    if (reach === 'unknown' && !DOMAIN_RE.test(title)) {
+      return { bucket: 'maybe', reason: 'student archetype, but no location and no domain signal in the title', reach, score, flags };
+    }
+    return { bucket: 'look', reason: `student archetype, ${reach}`, reach, score, flags };
+  }
   if (entryLevel) return { bucket: 'maybe', reason: `entry-level full-time, ${reach} — collides with the MSc until Aug 2028`, reach, score, flags };
   return { bucket: 'maybe', reason: `technical but full-time, ${reach} — collides with the MSc until Aug 2028`, reach, score, flags };
 }
@@ -664,6 +725,28 @@ function selfTest() {
   check(classifyReach('Ciudad de México') === 'abroad', 'a Spanish "de" is not read as Deutschland');
   check(classifyReach('') === 'unknown', 'an empty location is unknown, not abroad');
   check(classifyReach('Munich', 'Program Manager - Non-Remote') === 'munich', 'a negated remote marker does not create a remote tier');
+
+  // "Remote" scoped to a foreign country is remote WITHIN that country. These
+  // were scoring 4.5 — the second-best tier — and reaching the shortlist.
+  check(classifyReach('US-TX-REMOTE') === 'abroad', 'US-scoped remote is abroad, not remote');
+  check(classifyReach('US - Remote') === 'abroad', '"US - Remote" is abroad');
+  check(classifyReach('Remote (USA)') === 'abroad', '"Remote (USA)" is abroad');
+  check(classifyReach('India - Remote') === 'abroad', '"India - Remote" is abroad');
+  // ...but a German marker anywhere in the cell keeps the remote tier.
+  check(classifyReach('Remote, Germany, Cologne') === 'remote', 'German-scoped remote is still remote');
+  check(classifyReach('Remote — Germany or US') === 'remote', 'a dual German/US remote posting stays reachable');
+  check(classifyReach('Remote') === 'remote', 'an unscoped remote marker is still remote');
+  // The country lookarounds must not fire inside a word.
+  check(classifyReach('Remote, Aarhus') === 'remote', '"us" inside Aarhus is not the United States');
+
+  // With no location at all, a generic technical word must not earn a shortlist
+  // slot — otherwise every location-less row in a full-dataset ATS sweep does.
+  check(rankEntry({ title: 'Substation Electrical Engineer Intern - Grid', location: '' }).bucket === 'maybe',
+    'unknown location + generic technical title is demoted, not shortlisted');
+  check(rankEntry({ title: 'Working student (f/m/d) - Machine Learning', location: '' }).bucket === 'look',
+    'unknown location + a real domain signal still reaches the shortlist (the DLR case)');
+  check(rankEntry({ title: 'Werkstudent Software Development Edge AI (m/w/d)', location: 'Erlangen' }).bucket === 'look',
+    'a known home location is unaffected by the domain gate');
 
   // ── D1: the term whose absence dropped both Healthineers thesis postings ──
   check(TECH_RE.test('Masterarbeit: User Experience in a Medical Remote Desktop Application (Agentic Coding Project)'), 'TECH_RE matches "Agentic"');
