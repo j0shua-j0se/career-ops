@@ -27,22 +27,33 @@ export const STAGES = ['scan', 'pipeline', 'kits', 'sync'];
 
 /**
  * Sources that have no HTTP provider and therefore cannot run inside
- * `scan.mjs` — the agent has to fetch them and hand the results to
+ * `scan.mjs` — the agent has to search them and hand the results to
  * `ingest-jobs.mjs`. Listed here so the scan stage can name them rather than
  * relying on the agent remembering that `modes/run.md` → Stage 1b exists.
  *
- * StepStone is deliberately NOT here: it became a real provider
- * (`providers/stepstone.mjs`, via the scrapling CLI) and now runs in wave 1
- * with everything else. BMW likewise arrives through the `arbeitsagentur`
- * provider. Anything that can be automated should leave this list.
+ * **Anything that CAN be automated must leave this list.** Three already have:
+ * StepStone and Indeed became real providers (via the scrapling CLI), and BMW
+ * arrives through `arbeitsagentur`. Each was previously recorded as impossible;
+ * two of those records were simply wrong. Before adding anything here, try it.
+ *
+ * What remains is blocked by robots.txt, not by difficulty — which is a
+ * different kind of "no" and is not reconsidered by trying harder:
+ *   · LinkedIn — `User-agent: * → Disallow: /`, plus an explicit prohibition on
+ *     automated access in the robots header itself.
+ *   · XING — `Disallow: /jobs/search/` and `/jobs/search?*`.
+ * Both stay reachable only through the `site:` WebSearch queries in
+ * `portals.yml` → `search_queries`, which no script reads.
  */
 export const AGENT_DRIVEN_SOURCES = [
   {
-    id: 'indeed',
-    how: 'the Indeed MCP `search_jobs` — an MCP tool only the agent can call, so it can never be a '
-      + 'providers/ module. No public API; the RSS feed 403s.',
-    plan: 'node indeed-plan.mjs --summary',
-    ingest: 'node ingest-jobs.mjs --file <offers.json> --source indeed-mcp',
+    id: 'linkedin',
+    how: 'robots.txt Disallows everything for `*` and prohibits automated access outright. Reach it '
+      + 'ONLY via the `site:linkedin.com/jobs` queries in portals.yml → search_queries, run as WebSearch.',
+  },
+  {
+    id: 'xing',
+    how: 'robots.txt Disallows /jobs/search/ and /jobs/search?*. Reach it ONLY via the '
+      + '`site:xing.com/jobs` queries in portals.yml → search_queries, run as WebSearch.',
   },
 ];
 
@@ -307,14 +318,14 @@ export function decideNextStage(state, facts = {}) {
           ...base,
           action: 'scan-agent-sources',
           agent: true,
-          reason: 'the scan loop finished, but the agent-driven sources (Stage 1b) have not been swept this pass',
+          reason: 'the scan loop finished, but the robots-blocked sources (Stage 1b) have not been swept this pass',
           sources: AGENT_DRIVEN_SOURCES,
-          instructions: 'Run `node indeed-plan.mjs --summary`. It prints the exact `search_jobs` '
-            + 'argument objects for this profile — call the Indeed MCP once per row, collect '
-            + '{url, company, title, location} for every hit into a JSON array, then '
-            + '`node ingest-jobs.mjs --file <file> --source indeed-mcp`. Finally record it with '
-            + '`node run-all.mjs note-sources --note "..."`, which is what lets this stage complete. '
-            + 'Full context in `modes/run.md` → Stage 1b.',
+          instructions: 'Run the `site:` queries for these sources from `portals.yml` → `search_queries` '
+            + 'as WebSearch — NOTHING reads that section automatically, which is why 32 configured '
+            + 'queries have never run. Collect {url, company, title, location} for each hit and '
+            + '`node ingest-jobs.mjs --file <file> --source websearch`. Do NOT fetch these hosts '
+            + 'directly: both Disallow it in robots.txt. Then record it with '
+            + '`node run-all.mjs note-sources --note "..."`, which is what lets this stage complete.',
         };
       }
       return {

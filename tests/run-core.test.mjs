@@ -401,9 +401,20 @@ console.log('\nrun-core — the scan stage accounts for agent-driven sources');
     ? pass('the Stage 1b action is handed to the agent, not a script')
     : fail('scan-agent-sources should be agent-driven');
 
-  Array.isArray(pending.sources) && pending.sources.some((s) => s.id === 'indeed')
+  Array.isArray(pending.sources) && pending.sources.some((s) => s.id === 'linkedin')
     ? pass('the action names the sources to sweep rather than assuming the agent recalls them')
-    : fail('scan-agent-sources did not list Indeed');
+    : fail('scan-agent-sources did not list LinkedIn');
+
+  // Anything that CAN be automated must leave the list, or the gate nags about
+  // work the scanner already does. Indeed and StepStone both became providers
+  // after being recorded as impossible.
+  !AGENT_DRIVEN_SOURCES.some((s) => s.id === 'indeed')
+    ? pass('Indeed is no longer agent-driven — it is a provider now')
+    : fail('Indeed still listed as agent-driven despite having a provider');
+
+  AGENT_DRIVEN_SOURCES.every((s) => /robots/i.test(s.how))
+    ? pass('every remaining entry is blocked by robots.txt, not merely by difficulty')
+    : fail('an entry remains for a reason other than robots.txt — try automating it instead');
 
   /note-sources/.test(pending.instructions || '')
     ? pass('the instructions say how to record the sweep')
