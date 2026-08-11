@@ -93,6 +93,53 @@ const APPLY_PATTERNS = [
   /wyslij (cv|aplikacj)/i,
 ];
 
+// Some postings have no Apply button because the application channel IS email:
+// the JD says "send your application to x@y". Academic and public-sector German
+// postings do this routinely — FAU FAPS, the top-scoring row in this pipeline,
+// was blocked by exactly this. Without these patterns such a posting falls to
+// `no_apply_control` → uncertain → `build-application.mjs` aborts, and the only
+// way through was `--skip-liveness`, which disables the check for real closures
+// too. Detecting the channel is strictly better than disabling the gate.
+//
+// Deliberately narrow: an email address alone is NOT enough (career pages carry
+// "questions? careers@…" in body copy). The imperative application phrasing must
+// be present, within a short window of an address, and the window stops at a
+// sentence boundary so two unrelated sentences cannot combine into a match.
+//
+// `W` is that window. A dot only ends a sentence when whitespace follows it, so
+// `.` inside an address must stay legal — the real FAU case is
+// "send your application documents to patrick.ziegler@faps.fau.de", where a
+// dot-free window cannot reach past the local part and the match is lost.
+const W = '(?:[^.!?\\n]|[.!?](?!\\s))';
+const ADDR = '@[a-z0-9.-]+\\.[a-z]{2,}';
+
+const EMAIL_APPLY_PATTERNS = [
+  // EN: "send/submit/email your application|CV|resume|documents ... to x@y"
+  new RegExp(`(?:send|submit|e-?mail|forward)${W}{0,60}(?:application|applications|cv|resume|résumé|documents)${W}{0,80}${ADDR}`, 'i'),
+  // EN: "apply by/via email", "applications by email to"
+  /(?:apply|application|applications)\s+(?:by|via|per|through)\s+e-?mail/i,
+  // DE: "Bewerbung(en) ... per/an/via E-Mail", "Bewerbung an x@y",
+  // "richten/senden Sie Ihre Bewerbung an x@y"
+  /bewerbung(?:en|sunterlagen)?[^.!?\n]{0,80}(?:per|via|an)\s+e-?-?mail/i,
+  new RegExp(`bewerbung(?:en|sunterlagen)?${W}{0,80}${ADDR}`, 'i'),
+  new RegExp(`(?:richten|senden|schicken)\\s+sie${W}{0,100}${ADDR}`, 'i'),
+  // FR: "envoyez/adressez votre candidature à x@y", "candidature par e-mail"
+  /candidature[^.!?\n]{0,80}(?:par|via)\s+e-?-?mail/i,
+  new RegExp(`(?:envoyez|adressez)${W}{0,100}${ADDR}`, 'i'),
+  // ES: "envía tu candidatura/CV a x@y"
+  new RegExp(`(?:envi[aá]|remite|manda)${W}{0,100}${ADDR}`, 'i'),
+];
+
+// A visible `mailto:` control inside the posting body (nav/header/footer are
+// already excluded upstream) is the strongest form of the same signal.
+const MAILTO_CONTROL = /\bmailto:/i;
+
+function hasEmailApplyChannel(bodyText = '', applyControls = []) {
+  if (applyControls.some((control) => MAILTO_CONTROL.test(control))) return 'mailto control';
+  const matched = firstMatch(EMAIL_APPLY_PATTERNS, bodyText);
+  return matched ? matched.source : null;
+}
+
 const MIN_CONTENT_CHARS = 300;
 
 // A job-detail URL almost always carries the posting's identity: a numeric req id
@@ -221,6 +268,18 @@ export function classifyLiveness({ status = 0, requestedUrl = '', finalUrl = '',
 
   if (bodyText.trim().length < MIN_CONTENT_CHARS) {
     return { result: 'expired', code: 'insufficient_content', reason: 'insufficient content — likely nav/footer only' };
+  }
+
+  // No Apply control, but the posting says how to apply: by email. Checked last,
+  // so every expiry signal above still wins — a filled req that happens to print
+  // a contact address is expired, not "applies by email".
+  const emailChannel = hasEmailApplyChannel(bodyText, applyControls);
+  if (emailChannel) {
+    return {
+      result: 'active',
+      code: 'email_apply_channel',
+      reason: `no apply control, but the posting applies by email (${emailChannel})`,
+    };
   }
 
   return { result: 'uncertain', code: 'no_apply_control', reason: 'content present but no visible apply control found' };

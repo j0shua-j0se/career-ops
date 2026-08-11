@@ -119,3 +119,65 @@ try {
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
+
+// ---------------------------------------------------------------------------
+// A trigger inside a NEGATED clause is not a claim.
+//
+// "I have not worked with FastAPI" registered a FastAPI *tool claim*, so the
+// gate demanded source evidence for a technology the sentence explicitly
+// disclaims — a cover letter could not name a technology in order to say it is
+// absent. The fix is deliberately tight: the negator must sit in the same
+// clause, within two words of the trigger. Dropping a real claim is the unsafe
+// direction (an unflagged fabrication), so every guard below matters as much as
+// the fix itself.
+console.log('\nNon-metric fact gate — negated clauses are not claims');
+
+const toolValues = (text) => factClaims(text).filter(c => c.kind === 'tool').map(c => c.value);
+const allValues = (text) => factClaims(text).map(c => c.value);
+
+// The reported bug.
+!toolValues('I have not worked with FastAPI.').includes('fastapi')
+  ? pass('"have not worked with FastAPI" is not a tool claim')
+  : fail('negated tool claim still extracted — a technology cannot be disclaimed by name');
+
+!toolValues('I have never worked with Kubernetes.').includes('kubernetes')
+  ? pass('"never worked with Kubernetes" is not a tool claim')
+  : fail('"never" did not suppress the tool claim');
+
+!toolValues('Delivered the migration without using Terraform.').includes('terraform')
+  ? pass('"without using Terraform" is not a tool claim')
+  : fail('"without" did not suppress the tool claim');
+
+!toolValues('I have no commercial experience using Scala.').includes('scala')
+  ? pass('"no commercial experience using Scala" is not a tool claim')
+  : fail('"no ... experience using" did not suppress the tool claim');
+
+// Negation suppresses employer and title triggers on the same terms.
+!allValues('I have not worked at Initech as a Principal Engineer.').includes('initech')
+  ? pass('"have not worked at Initech" is not an employer claim')
+  : fail('negated employer claim still extracted');
+
+// --- Guards: the gate must keep flagging everything it flagged before.
+
+toolValues('Built the service using FastAPI and Postgres.').includes('fastapi')
+  ? pass('an ordinary affirmative tool claim is still extracted')
+  : fail('REGRESSION: affirmative tool claim lost — fabrications would ship unflagged');
+
+allValues('I worked at Acme Labs as a Senior Platform Engineer.').includes('acme labs')
+  ? pass('an ordinary affirmative employer claim is still extracted')
+  : fail('REGRESSION: affirmative employer claim lost');
+
+// A negation in a PREVIOUS sentence must not suppress the next one's claim.
+toolValues('That project did not ship. Built the API using FastAPI.').includes('fastapi')
+  ? pass('a negation in a previous sentence does not suppress the next claim')
+  : fail('REGRESSION: negation leaked across a sentence boundary');
+
+// Nor across a clause boundary inside one sentence.
+toolValues('Testing was not automated; the service was built using FastAPI.').includes('fastapi')
+  ? pass('a negation in a previous clause does not suppress the claim')
+  : fail('REGRESSION: negation leaked across a clause boundary');
+
+// Distance guard: a negator far from the trigger is not treated as negating it.
+toolValues('We did not have a platform team, a data team or any SRE cover, so I built it using FastAPI.').includes('fastapi')
+  ? pass('a distant negator does not suppress the claim')
+  : fail('REGRESSION: distant negation suppressed a real claim');

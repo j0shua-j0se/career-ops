@@ -271,11 +271,22 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
           return Array.from(element.getClientRects()).some((rect) => rect.width > 0 && rect.height > 0);
         })
         .map((element) => {
+          // The href is included ONLY for mailto: links. A posting whose
+          // application channel is email has no Apply button, and its anchor
+          // label is usually the bare address ("jobs@example.com"), which
+          // matches no apply pattern. Carrying the scheme through lets
+          // classifyLiveness recognise the channel instead of dead-ending at
+          // `no_apply_control`. Other hrefs stay out: they are long, noisy, and
+          // routinely contain the word "apply" on controls that are not one.
+          const href = element.getAttribute?.('href') ?? '';
+          const mailto = /^mailto:/i.test(href) ? href : '';
+
           const label = [
             element.innerText,
             element.value,
             element.getAttribute('aria-label'),
             element.getAttribute('title'),
+            mailto,
           ]
             .filter(Boolean)
             .join(' ')

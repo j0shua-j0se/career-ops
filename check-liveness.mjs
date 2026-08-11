@@ -47,6 +47,20 @@ async function main() {
   const throttleBaseMs = throttleArg ? (Number(throttleArg.split('=')[1]) || 5000) : 0;
   const positional = args.filter((a) => a !== '--no-fallback' && a !== throttleArg);
 
+  // Reject unknown flags instead of letting them fall through as URLs. Without
+  // this, a typo (or a plausible-but-wrong flag like `--url https://…`) is
+  // checked as if it were a posting, reports "invalid URL" as an `uncertain`
+  // result, and flips the exit code to 1 — so a caller reading only the exit
+  // status sees a liveness failure that never happened.
+  const unknownFlags = positional.filter((a) => a.startsWith('--') && a !== '--file');
+  if (unknownFlags.length > 0) {
+    console.error(`check-liveness: unknown option(s): ${unknownFlags.join(', ')}`);
+    console.error('Usage: node check-liveness.mjs [--no-fallback] [--throttle[=ms]] <url1> [url2] ...');
+    console.error('       node check-liveness.mjs [--no-fallback] [--throttle[=ms]] --file urls.txt');
+    console.error('Note: URLs are positional — there is no --url flag.');
+    process.exit(2);
+  }
+
   if (positional.length === 0) {
     console.error('Usage: node check-liveness.mjs [--no-fallback] [--throttle[=ms]] <url1> [url2] ...');
     console.error('       node check-liveness.mjs [--no-fallback] [--throttle[=ms]] --file urls.txt');

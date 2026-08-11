@@ -205,6 +205,28 @@ function isLikelyTool(value) {
   return TOOL_PHRASE_PATTERN.test(value.trim());
 }
 
+// A trigger inside a NEGATED clause asserts the opposite of a claim, but the
+// extractor read only the trigger word — so "I have not worked with FastAPI"
+// registered a FastAPI tool claim and the gate demanded source evidence for a
+// technology the sentence explicitly disclaims. A cover letter therefore could
+// not name a technology in order to say it is absent, which is a legitimate and
+// sometimes necessary thing to write.
+//
+// Deliberately tight. The unsafe direction here is dropping a claim: a missed
+// claim is a fabrication that ships unflagged, while a spurious one only costs
+// the user an edit. So the negator must sit in the same clause and within two
+// words of the trigger — no sentence-wide search, and no crossing punctuation.
+const NEGATION_BEFORE_TRIGGER = /\b(?:not|never|no|without|nor|n't|nicht|kein(?:e|en|er)?)\b(?:\s+\w+){0,2}[\s,]*$/i;
+
+function isNegatedAt(clean, index) {
+  if (!(index > 0)) return false;
+  // Only the text since the last clause boundary counts, so a negation in a
+  // previous sentence cannot suppress a claim in this one.
+  const before = clean.slice(Math.max(0, index - 60), index);
+  const clause = before.split(/[.;:!?\n]/).pop() ?? '';
+  return NEGATION_BEFORE_TRIGGER.test(clause);
+}
+
 /** Extract explicitly asserted employer, title, and tool claims from text. */
 export function factClaims(text) {
   const clean = stripMarkup(text);
@@ -238,6 +260,7 @@ export function factClaims(text) {
   ];
   for (const [kind, pattern] of patterns) {
     for (const match of clean.matchAll(pattern)) {
+      if (isNegatedAt(clean, match.index)) continue;
       const rawText = kind === 'tool' ? match[1].trim() : '';
       const rawValues = kind === 'tool'
         ? (/^the\s+/i.test(rawText) ? [] : rawText.split(/,|\band\b|\bwith\b|\bin\b/i))

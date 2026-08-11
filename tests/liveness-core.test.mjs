@@ -125,3 +125,99 @@ for (const status of [404, 410]) {
   if (geo) pass('the extractor still rejects display:none, visibility:hidden and zero-geometry elements');
   else fail('the geometric visibility checks are missing — dropping the aria-hidden rule is only safe alongside them');
 }
+
+// ---------------------------------------------------------------------------
+// Postings that apply BY EMAIL have no Apply button by design.
+//
+// FAU FAPS — the highest-scoring row in this pipeline — is an academic posting
+// whose JD says to send the application to a named address. It has no Apply
+// control, so classifyLiveness dead-ended at `no_apply_control` → uncertain, and
+// `build-application.mjs` aborted the kit. The only workaround was
+// `--skip-liveness`, which disables the gate for genuine closures too.
+//
+// The check is deliberately last: every expiry signal still wins, so a filled
+// req that happens to print a contact address stays expired.
+console.log('\nliveness-core — email-application postings classify as active, not uncertain');
+
+const BODY = 'Werkstudent Machine Learning. '.repeat(20); // clears MIN_CONTENT_CHARS
+
+const classify = (bodyText, applyControls = []) =>
+  classifyLiveness({ status: 200, requestedUrl: 'https://www.faps.fau.de/stellen/123', finalUrl: 'https://www.faps.fau.de/stellen/123', bodyText, applyControls });
+
+{
+  const r = classify(`${BODY} Please send your application documents to patrick.ziegler@faps.fau.de`);
+  r.result === 'active' && r.code === 'email_apply_channel'
+    ? pass('EN "send your application documents to x@y" -> active (email_apply_channel)')
+    : fail(`EN email-application posting classified ${r.result}/${r.code}, expected active/email_apply_channel`);
+}
+
+{
+  const r = classify(`${BODY} Bitte richten Sie Ihre Bewerbung an bewerbung@example.de`);
+  r.result === 'active' && r.code === 'email_apply_channel'
+    ? pass('DE "richten Sie Ihre Bewerbung an x@y" -> active')
+    : fail(`DE email-application posting classified ${r.result}/${r.code}`);
+}
+
+{
+  const r = classify(`${BODY} Bewerbungen bitte per E-Mail.`);
+  r.result === 'active'
+    ? pass('DE "Bewerbungen bitte per E-Mail" -> active')
+    : fail(`DE "per E-Mail" classified ${r.result}`);
+}
+
+{
+  const r = classify(`${BODY} Applications by email only.`);
+  r.result === 'active'
+    ? pass('EN "applications by email" -> active')
+    : fail(`EN "applications by email" classified ${r.result}`);
+}
+
+// A visible mailto: control is the strongest form of the signal, and works even
+// when the body copy never spells out the channel.
+{
+  const r = classify(BODY, ['patrick.ziegler@faps.fau.de mailto:patrick.ziegler@faps.fau.de']);
+  r.result === 'active' && r.code === 'email_apply_channel'
+    ? pass('a visible mailto: control alone -> active')
+    : fail(`mailto: control classified ${r.result}/${r.code}`);
+}
+
+// --- False-positive guards: the expensive error is calling a dead posting live.
+
+{
+  const r = classify(`${BODY} This position has been filled. Questions? Send your CV to careers@example.com`);
+  r.result === 'expired'
+    ? pass('an expired req printing an application address stays expired (expiry wins)')
+    : fail(`expired req with a contact address classified ${r.result} — expiry must win`);
+}
+
+{
+  const r = classify(`${BODY} For questions about this role contact careers@example.com`);
+  r.result === 'uncertain'
+    ? pass('a bare contact address is NOT an application channel (stays uncertain)')
+    : fail(`bare contact address classified ${r.result} — imperative phrasing is required`);
+}
+
+// The window must stop at a sentence boundary, so an unrelated sentence about
+// applications cannot combine with a later, unrelated address.
+{
+  const r = classify(`${BODY} We review every application carefully. Our privacy officer is dpo@example.com`);
+  r.result === 'uncertain'
+    ? pass('phrasing and address in different sentences do NOT combine into a match')
+    : fail(`cross-sentence match leaked: classified ${r.result}`);
+}
+
+// A real Apply control still wins outright and reports the original code.
+{
+  const r = classify(`${BODY} Send your application to jobs@example.com`, ['Apply now']);
+  r.result === 'active' && r.code === 'apply_control_visible'
+    ? pass('a real apply control still reports apply_control_visible, not the email path')
+    : fail(`apply control regressed: ${r.result}/${r.code}`);
+}
+
+// 404 must not be rescued by an address in the error page.
+{
+  const r = classifyLiveness({ status: 404, bodyText: `${BODY} send your application to jobs@example.com`, applyControls: [] });
+  r.result === 'expired'
+    ? pass('HTTP 404 stays expired regardless of an application address in the body')
+    : fail(`404 rescued by the email path — classified ${r.result}`);
+}
