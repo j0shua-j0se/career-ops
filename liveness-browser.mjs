@@ -207,6 +207,41 @@ async function validateUrlSecurity(urlString) {
   }
 }
 
+/**
+ * Rewrite a posting URL into the form that actually serves its content.
+ *
+ * iCIMS renders the job description inside a CROSS-ORIGIN content iframe. The
+ * outer page returns HTTP 200 carrying only nav, footer and cookie chrome — or,
+ * on some tenants, an AWS WAF human-verification challenge — so every check
+ * came back "insufficient content" or "no visible apply control" on postings
+ * that were perfectly alive. Three independent triage passes over 152 iCIMS
+ * rows hit this, and all three found the same answer: `?in_iframe=1` serves the
+ * iframe's own document, JD text and apply control included.
+ *
+ * This is not a bot-detection bypass. It is the parameter iCIMS itself uses for
+ * embedded rendering — `scan-ats-full.mjs` already requests iCIMS SEARCH pages
+ * with `?ss=1&in_iframe=1`; only the job-detail URLs it writes to the inbox
+ * lacked it.
+ *
+ * Applied at navigation time only. The stored URL stays the human-facing one,
+ * because that is what the user clicks and what goes in a report header — an
+ * `in_iframe=1` link opens a bare frameless fragment for a person.
+ *
+ * @param {string} url
+ * @returns {string} the URL to actually fetch
+ */
+export function fetchableUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!/(^|\.)icims\.com$/i.test(u.hostname)) return url;
+    if (u.searchParams.has('in_iframe')) return url;
+    u.searchParams.set('in_iframe', '1');
+    return u.toString();
+  } catch {
+    return url; // not a parseable URL — leave it exactly as given
+  }
+}
+
 export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
   const guardError = rejectPrivateOrInvalid(url);
   if (guardError) {
@@ -236,7 +271,7 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
     });
   }
   try {
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
+    const response = await page.goto(fetchableUrl(url), { waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
     const status = response?.status() ?? 0;
 
     // Give SPAs (Ashby, Lever, Workday) time to hydrate. extraSettleMs adds slack

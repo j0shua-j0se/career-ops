@@ -221,3 +221,59 @@ const classify = (bodyText, applyControls = []) =>
     ? pass('HTTP 404 stays expired regardless of an application address in the body')
     : fail(`404 rescued by the email path — classified ${r.result}`);
 }
+
+// ---------------------------------------------------------------------------
+// iCIMS serves the job description from a CROSS-ORIGIN content iframe.
+//
+// The outer page returns HTTP 200 carrying only nav, footer and cookie chrome —
+// or, on some tenants, an AWS WAF human-verification challenge — so a live
+// posting classified as "insufficient content" or "no visible apply control".
+// Three independent triage passes over 152 iCIMS rows hit this and all three
+// landed on the same answer: `?in_iframe=1` serves the iframe's own document.
+// (A second working form, `?mobile=true&needsRedirect=false`, returns the
+// server-rendered page; `in_iframe` is preferred because scan-ats-full.mjs
+// already uses it for iCIMS search URLs.)
+//
+// Not a bot-detection bypass: it is iCIMS's own embedded-rendering parameter.
+console.log('\nliveness-browser — iCIMS job URLs are fetched via their content iframe');
+
+{
+  const { fetchableUrl } = await import('../liveness-browser.mjs');
+
+  const u = fetchableUrl('https://careers-otterproducts.icims.com/jobs/6912/ai-intern/job');
+  /[?&]in_iframe=1/.test(u)
+    ? pass('an iCIMS job URL gains in_iframe=1')
+    : fail(`iCIMS URL not rewritten: ${u}`);
+
+  // The rest of the URL must survive intact — path and existing query.
+  const keep = fetchableUrl('https://careers-x.icims.com/jobs/1/job?foo=bar');
+  keep.includes('/jobs/1/job') && keep.includes('foo=bar') && /in_iframe=1/.test(keep)
+    ? pass('path and existing query parameters are preserved')
+    : fail(`iCIMS rewrite damaged the URL: ${keep}`);
+
+  // Idempotent, and an explicit opt-out is respected rather than overwritten.
+  fetchableUrl('https://careers-x.icims.com/jobs/1/job?in_iframe=0') === 'https://careers-x.icims.com/jobs/1/job?in_iframe=0'
+    ? pass('an existing in_iframe value is left alone')
+    : fail('an explicit in_iframe value was overwritten');
+
+  // Non-iCIMS hosts must be untouched — this is a vendor-specific quirk.
+  for (const other of [
+    'https://boards.greenhouse.io/acme/jobs/123',
+    'https://jobs.lever.co/acme/uuid',
+    'https://acme.wd3.myworkdayjobs.com/careers/job/Berlin/Engineer_R1',
+  ]) {
+    fetchableUrl(other) === other
+      ? pass(`non-iCIMS URL untouched: ${new URL(other).hostname}`)
+      : fail(`non-iCIMS URL was rewritten: ${other}`);
+  }
+
+  // Hostname matching must be anchored: a lookalike domain is not iCIMS.
+  fetchableUrl('https://noticims.com/jobs/1') === 'https://noticims.com/jobs/1'
+    ? pass('a lookalike hostname (noticims.com) is not treated as iCIMS')
+    : fail('hostname match is not anchored — a lookalike domain was rewritten');
+
+  // A non-URL string must pass through rather than throw.
+  fetchableUrl('local:jds/acme.md') === 'local:jds/acme.md'
+    ? pass('an unparseable URL is returned unchanged instead of throwing')
+    : fail('unparseable input mishandled');
+}
