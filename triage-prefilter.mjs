@@ -1033,6 +1033,52 @@ function main() {
     process.exit(0);
   }
 
+  // --mark-file <path>: apply verdicts decided OUTSIDE this filter.
+  //
+  // The zero-token prefilter ranks on title and location alone. A JD-level pass
+  // (agent workers reading each posting) produces better verdicts, and they need
+  // the same one write path into the inbox — otherwise every such pass invents
+  // its own inbox editing, which is how discards end up logged but never marked.
+  //
+  // Input: a JSON array of {url, decision, reason, status}. `discard` rows are
+  // ticked `- [x]`, `unreachable` rows are marked `- [!]`, and everything else
+  // is left pending.
+  const markFileIdx = argv.indexOf('--mark-file');
+  if (markFileIdx !== -1) {
+    const path = argv[markFileIdx + 1];
+    if (!path) {
+      console.error('triage-prefilter: --mark-file needs a path to a JSON array of {url, decision, reason, status}.');
+      process.exit(1);
+    }
+    let rows;
+    try {
+      rows = JSON.parse(readFileSync(path, 'utf-8'));
+    } catch (err) {
+      console.error(`triage-prefilter: could not read ${path} — ${err.message}`);
+      process.exit(1);
+    }
+    if (!Array.isArray(rows)) {
+      console.error('triage-prefilter: --mark-file expects a JSON array.');
+      process.exit(1);
+    }
+    const discards = rows.filter((r) => r?.url && r.decision === 'discard')
+      .map((r) => ({ url: r.url, reason: r.reason || 'no reason recorded' }));
+    const unreachable = rows.filter((r) => r?.url && r.decision !== 'discard' && r.status === 'unreachable')
+      .map((r) => ({ url: r.url, reason: r.reason || 'could not fetch the posting' }));
+
+    const first = markPrescreenSkips(md, discards);
+    const second = markUnreachable(first.text, unreachable);
+
+    if (!argv.includes('--write')) {
+      console.log(`Dry run: ${first.marked} discard(s) and ${second.marked} unreachable entr(y/ies) would be marked. Re-run with --write to apply.`);
+      process.exit(0);
+    }
+    writeFileSync(PIPELINE_PATH, second.text, 'utf-8');
+    if (first.lines.length) appendFileSync(DISCARD_LOG_PATH, `${first.lines.join('\n')}\n`, 'utf-8');
+    console.log(`Marked ${first.marked} discard(s) and ${second.marked} unreachable entr(y/ies) in data/pipeline.md; logged ${first.lines.length} to data/discard.log.`);
+    process.exit(0);
+  }
+
   if (argv.includes('--mark-skips')) {
     const { text, marked, lines } = markPrescreenSkips(md, report.skip.map((x) => ({ url: x.url, reason: x.reason })));
     if (!argv.includes('--write')) {
