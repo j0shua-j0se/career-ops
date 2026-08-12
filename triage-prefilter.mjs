@@ -42,7 +42,7 @@
  * unlike --max-age-days, which is the user guessing at how long a listing lives.
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 
@@ -750,6 +750,42 @@ export function markPrescreenSkips(md, skips) {
  * @param {Array<{url:string, reason:string}>} entries
  * @returns {{ text: string, marked: number }}
  */
+/**
+ * Mark inbox rows processed when a report already exists for their URL.
+ *
+ * `modes/pipeline.md` step 2g says an evaluated URL moves from Pending to
+ * Processed. Nothing enforces it, so an evaluation can complete — report
+ * written, tracker row merged, kit built — while the inbox row stays `- [ ]`.
+ * The posting is then re-triaged on every later pass, and the pending count
+ * stays permanently inflated. It had to be corrected by hand twice in one day,
+ * which is the argument for a command.
+ *
+ * Matching is by exact URL against each report's `**URL:**` header, so a report
+ * whose header was never filled in simply does not match — no guessing.
+ *
+ * @param {string} md            data/pipeline.md contents
+ * @param {Map<string,{num:string,score:string,pdf?:boolean}>} byUrl  report URL -> report meta
+ * @returns {{ text: string, marked: number }}
+ */
+export function markEvaluated(md, byUrl) {
+  if (!byUrl || byUrl.size === 0) return { text: md, marked: 0 };
+
+  const out = [];
+  let marked = 0;
+  for (const line of String(md ?? '').split(/\r?\n/)) {
+    const entry = parsePipelineLine(line);
+    if (!entry || entry.done || !byUrl.has(entry.url)) { out.push(line); continue; }
+    const r = byUrl.get(entry.url);
+    // Same shape modes/pipeline.md prescribes: `- [x] #NNN | URL | Company | Role | Score/5 | PDF ✅/❌`
+    out.push(
+      `${line.match(/^\s*[-*]\s*/)[0]}[x] #${r.num} | ${entry.url} | ${entry.company} | ${entry.title}`
+      + ` | ${r.score}/5 | PDF ${r.pdf ? '✅' : '❌'}`,
+    );
+    marked++;
+  }
+  return { text: out.join('\n'), marked };
+}
+
 export function markUnreachable(md, entries) {
   const reasonByUrl = new Map(entries.map((e) => [e.url, e.reason]));
   if (reasonByUrl.size === 0) return { text: md, marked: 0 };
@@ -850,6 +886,21 @@ function selfTest() {
       'a [!] row is not parsed as pending, so later passes stop re-attempting it');
     check(markUnreachable(un.text, [{ url: 'https://ex.com/b', reason: 'x' }]).marked === 0,
       'marking unreachable twice is a no-op');
+
+    // ── markEvaluated ──
+    // modes/pipeline.md step 2g moves an evaluated URL from Pending to
+    // Processed. Nothing enforced it, so an evaluation could complete — report
+    // written, tracker merged, kit built — while the inbox row stayed `- [ ]`,
+    // and the posting was re-triaged on every later pass. Corrected by hand
+    // twice in one day before this existed.
+    const evMap = new Map([['https://ex.com/b', { num: '043', score: '4.0', pdf: true }]]);
+    const ev = markEvaluated(inbox, evMap);
+    check(ev.marked === 1, 'marks a pending row that already has a report');
+    check(/- \[x\] #043 \| https:\/\/ex\.com\/b .*4\.0\/5 \| PDF/.test(ev.text),
+      'the row gets the #NNN | URL | Company | Role | Score | PDF shape pipeline.md prescribes');
+    check(/- \[ \] https:\/\/ex\.com\/a/.test(ev.text), 'a row with no report stays pending');
+    check(markEvaluated(ev.text, evMap).marked === 0, 'running twice is a no-op');
+    check(markEvaluated(inbox, new Map()).marked === 0, 'no reports means nothing is marked');
   }
 
   check(classifyReach('US-TX-REMOTE') === 'abroad', 'US-scoped remote is abroad, not remote');
@@ -1076,6 +1127,33 @@ function main() {
     writeFileSync(PIPELINE_PATH, second.text, 'utf-8');
     if (first.lines.length) appendFileSync(DISCARD_LOG_PATH, `${first.lines.join('\n')}\n`, 'utf-8');
     console.log(`Marked ${first.marked} discard(s) and ${second.marked} unreachable entr(y/ies) in data/pipeline.md; logged ${first.lines.length} to data/discard.log.`);
+    process.exit(0);
+  }
+
+  // --mark-evaluated: tick inbox rows that already have a report.
+  if (argv.includes('--mark-evaluated')) {
+    const reportsDir = join(ROOT, 'reports');
+    const byUrl = new Map();
+    if (existsSync(reportsDir)) {
+      for (const f of readdirSync(reportsDir).filter((n) => /^\d{3}-.*\.md$/.test(n))) {
+        let txt = '';
+        try { txt = readFileSync(join(reportsDir, f), 'utf-8'); } catch { continue; }
+        // First whitespace-delimited token only — the same rule readReportUrl
+        // uses, so a header with a trailing note cannot poison the match.
+        const url = (/^\*\*URL:\*\*\s*(\S+)/m.exec(txt) || [])[1];
+        if (!url) continue;
+        const score = (/^\*\*Score:\*\*\s*([\d.]+)/m.exec(txt) || [])[1] ?? '?';
+        const pdf = !/^\*\*PDF:\*\*\s*(?:not generated|pending|—|-)\s*$/im.test(txt);
+        byUrl.set(url, { num: f.slice(0, 3), score, pdf });
+      }
+    }
+    const { text, marked } = markEvaluated(md, byUrl);
+    if (!argv.includes('--write')) {
+      console.log(`Dry run: ${marked} pending entr(y/ies) already have a report and would be marked processed. Re-run with --write.`);
+      process.exit(0);
+    }
+    writeFileSync(PIPELINE_PATH, text, 'utf-8');
+    console.log(`Marked ${marked} evaluated entr(y/ies) processed in data/pipeline.md.`);
     process.exit(0);
   }
 
