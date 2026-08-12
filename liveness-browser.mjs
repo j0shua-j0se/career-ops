@@ -249,15 +249,45 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
   }
   if (page) {
     page._blockedByGuard = null;
+    page._blockedSubresources = 0;
   }
   if (page && typeof page.route === 'function' && !page._routeInterceptorRegistered) {
     page._routeInterceptorRegistered = true;
     await page.route('**/*', async (route) => {
-      const requestUrl = route.request().url();
+      const request = route.request();
+      const requestUrl = request.url();
+      // Only a blocked MAIN DOCUMENT can decide the verdict. A blocked
+      // subresource — an analytics beacon, a font, a tracking pixel — is still
+      // aborted (the security guard is unchanged), but it must not poison the
+      // liveness result: the page's own content is the evidence.
+      //
+      // Without this split, `aastat.stepstone.de` — StepStone's analytics
+      // subdomain, which does not resolve in a sandboxed network — made every
+      // StepStone posting return `uncertain`, however healthy. That forced
+      // `--skip-liveness` twice in one pass on postings later confirmed live by
+      // hand (Mitsubishi Erlangen, ZEISS Munich), which is the worst outcome
+      // available: it trains the operator to bypass the gate that exists to
+      // stop kits being built for dead postings.
+      // Defensive: a mock or an older Playwright may not expose the full
+      // Request API. When the answer cannot be determined, treat the request as
+      // the MAIN DOCUMENT — that keeps the pre-split behaviour (a block makes
+      // the check uncertain), which is the conservative direction: it can only
+      // over-report uncertainty, never under-report a genuine SSRF block.
+      let isMainDocument = true;
+      try {
+        if (typeof request.isNavigationRequest === 'function') {
+          isMainDocument = request.isNavigationRequest();
+          if (isMainDocument && typeof request.frame === 'function' && typeof page.mainFrame === 'function') {
+            isMainDocument = request.frame() === page.mainFrame();
+          }
+        }
+      } catch { /* keep the conservative default */ }
+
       const errGuard = rejectPrivateOrInvalid(requestUrl);
       if (errGuard) {
         console.warn(`Blocked request to restricted destination: ${requestUrl}`);
-        page._blockedByGuard = errGuard;
+        if (isMainDocument) page._blockedByGuard = errGuard;
+        else page._blockedSubresources = (page._blockedSubresources ?? 0) + 1;
         return route.abort('blockedbyclient');
       }
       try {
@@ -265,7 +295,8 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
         return route.continue();
       } catch (err) {
         console.warn(`Blocked request to restricted destination (DNS): ${requestUrl} - ${err.message}`);
-        page._blockedByGuard = { code: 'blocked_host', reason: err.message };
+        if (isMainDocument) page._blockedByGuard = { code: 'blocked_host', reason: err.message };
+        else page._blockedSubresources = (page._blockedSubresources ?? 0) + 1;
         return route.abort('blockedbyclient');
       }
     });

@@ -588,6 +588,27 @@ export function runCli(args = process.argv.slice(2)) {
     console.error(`ERROR: target file not found: ${parsed.targetArg}`);
     return 1;
   }
+  // Refuse binary input instead of "finding" claims in it.
+  //
+  // This gate is the last thing between a generated document and the user's
+  // name on it, so what it reports has to be trustworthy. Handed a PDF it
+  // dutifully scanned the compressed byte stream and reported metric-like
+  // claims that do not exist in any document a human could read — "$4k",
+  // "60353 %", "9x". That is worse than being unable to check: a reviewer
+  // either believes fabrications were found and hunts for them, or learns the
+  // gate cries wolf and stops reading it.
+  //
+  // Real case: a cover-letter payload set `output_path` to a `.md` path, so
+  // generate-cover-letter wrote a PDF there. The extension said markdown; the
+  // magic bytes said otherwise, and only the bytes are evidence.
+  const head = readFileSync(targetPath).subarray(0, 5).toString('binary');
+  if (head.startsWith('%PDF')) {
+    console.error(`ERROR: ${parsed.targetArg} is a PDF, not text.`);
+    console.error('This gate reads prose. Point it at the markdown or HTML the PDF was rendered FROM —');
+    console.error('checking the binary would report claims that exist nowhere a human can read.');
+    return 2;
+  }
+
   try {
     const result = verifyFacts(readFileSync(targetPath, 'utf-8'), {
       sourcePaths: parsed.sourcePaths.length ? parsed.sourcePaths : DEFAULT_SOURCES,

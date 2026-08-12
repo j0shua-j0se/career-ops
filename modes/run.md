@@ -144,6 +144,15 @@ Score cannot see this. ZEISS and Manex both scored 3.9, above the bar, while the
 | "content present but no visible apply control found" | the posting **applies by email** and legitimately has no Apply button | confirm the contact address is in the JD, then `--skip-liveness` |
 | `uncertain` on a JS-rendered portal | anti-bot 403, or a blocked third-party request (SAP fetches an internal VPN host) | re-verify by browser, then `--skip-liveness` |
 | the checker lands on a careers homepage | the report's `**URL:**` header is a portal root, not a deep link | **fix the header** — `readReportUrl` takes only the first whitespace-delimited token |
+| `no_apply_control` on a **stepstone.de** posting | StepStone renders its apply button CLIENT-SIDE; it is absent from fetched HTML entirely. The only "bewerben" strings in the markup are the footer's "Bewerbende" (Applicants) nav label | verify by other evidence — title present, no expiry banner, JD body readable — then `--skip-liveness`. Do NOT grep for "bewerben" as proof of an apply control: it matches that footer label and reads as a false positive |
+
+**A blocked THIRD-PARTY request no longer decides the verdict.** The egress guard
+still aborts requests to unresolvable or private hosts, but only a blocked MAIN
+DOCUMENT makes the result `uncertain`. Before that split, StepStone's analytics
+subdomain `aastat.stepstone.de` — which does not resolve in a sandboxed network —
+made every StepStone posting `uncertain` however healthy, forcing
+`--skip-liveness` on postings that were confirmed live by hand. Training the
+operator to bypass the gate is worse than any single wrong verdict.
 
 Verify by hand *before* overriding, and say in the summary which rows were overridden and why. If the posting is genuinely closed, mark the row `Discarded` via `set-status.mjs` and move on.
 
