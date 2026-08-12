@@ -180,6 +180,29 @@ for (const e of entries) {
 }
 if (brokenReports === 0) ok('All report links valid');
 
+// --- Check 3b: `Evaluated` without a report ---
+// templates/states.yml defines Evaluated as "Report completed, pending
+// decision". A row can reach that status WITHOUT a report: the scan loop's
+// `finish` promotes triage-qualified candidates straight into the tracker with
+// a score and no evaluation behind it. The notes say "triage-only", but the
+// STATUS claims a report exists, and check 3 above only validates links that
+// are present — an absent link passes silently.
+//
+// Reported as a warning, not an error: promoting is legitimate and the row is
+// a real lead. What is not acceptable is the tracker asserting a completed
+// evaluation that nothing has to back up, which is how a score with no
+// reasoning behind it ends up driving a kit build.
+let evaluatedWithoutReport = 0;
+for (const e of entries) {
+  if (!/^evaluated$/i.test(String(e.status || '').trim())) continue;
+  const hasLink = /\]\(([^)]+)\)/.test(e.report || '');
+  if (!hasLink) {
+    warn(`#${e.num}: status "Evaluated" but no report link — triage score only, evaluation still owed`);
+    evaluatedWithoutReport++;
+  }
+}
+if (evaluatedWithoutReport === 0) ok('Every Evaluated row has a report behind it');
+
 // --- Check 4: Score format ---
 let badScores = 0;
 for (const e of entries) {
