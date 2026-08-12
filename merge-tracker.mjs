@@ -732,6 +732,10 @@ const newLines = [];
 // of merged/ so a re-run picks them up, and they make the process exit non-zero
 // instead of reporting a success that did not happen.
 const failedAdditions = [];
+// TSVs that could not be parsed at all. Kept OUT of merged/ so the next run
+// retries them — an unparseable file is usually one being written right now,
+// not a corrupt one. See the parse guard below.
+const unparseableAdditions = [];
 
 /**
  * Replace one tracker row line wherever it currently lives.
@@ -762,7 +766,25 @@ function replaceTrackerLine(oldLine, updatedLine) {
 for (const file of tsvFiles) {
   const content = readFileSync(join(ADDITIONS_DIR, file), 'utf-8').trim();
   const addition = parseTsvContent(content, file);
-  if (!addition) { skipped++; continue; }
+  if (!addition) {
+    skipped++;
+    // An unparseable TSV must NOT be archived. It is usually not corrupt — it is
+    // a file being WRITTEN RIGHT NOW: an evaluation worker creates the TSV and a
+    // merge that fires in between reads an empty or truncated file. Before this,
+    // that path incremented `skipped` and fell through to the archival step,
+    // which renamed the file into merged/ as though it had landed. The row never
+    // reached the tracker, applications.md is gitignored, and no backup is
+    // written — so the evaluation was silently and permanently lost.
+    //
+    // Observed live: reports 049 (Pricenow, 3.8 — above the kit threshold) and
+    // 050 vanished from the tracker while their TSVs sat in merged/, and were
+    // only noticed because a kit-candidate query came back empty.
+    //
+    // Keeping the file in place makes the next run pick it up, which is exactly
+    // what recovery looked like by hand.
+    unparseableAdditions.push(file);
+    continue;
+  }
 
   // A via= tag can only be stored if the tracker has a Via column — warn
   // instead of dropping the channel silently (#1596). Clear the value too:
@@ -1026,7 +1048,18 @@ if (!DRY_RUN) {
   // into permanent data loss, since applications.md is gitignored and no backup
   // is written.
   if (!existsSync(MERGED_DIR)) mkdirSync(MERGED_DIR, { recursive: true });
-  const archivable = tsvFiles.filter(f => !failedAdditions.includes(f));
+  const archivable = tsvFiles.filter(
+    f => !failedAdditions.includes(f) && !unparseableAdditions.includes(f),
+  );
+  if (unparseableAdditions.length > 0) {
+    // stdout, not stderr: this belongs with the run summary a human reads. The
+    // whole failure mode was silence, so the warning must be where the counts are.
+    console.log(`
+⚠️  ${unparseableAdditions.length} TSV(s) could not be parsed and were LEFT IN PLACE `
+      + `(not archived): ${unparseableAdditions.join(', ')}`);
+    console.log('   If a worker was still writing them, re-run merge-tracker. If they are genuinely '
+      + 'malformed, fix or delete them — archiving one would lose its evaluation.');
+  }
   for (const file of archivable) {
     renameSync(join(ADDITIONS_DIR, file), join(MERGED_DIR, file));
   }
