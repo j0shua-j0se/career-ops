@@ -115,6 +115,14 @@ package-lock.json
 # Planning (local scratchpad)
 plan/
 
+# Third-party tooling cloned locally. `vendor/` carries its own git history, so
+# it cannot be committed here anyway; the skill copy is ignored for a sharper
+# reason — `.claude/skills/` is in SYSTEM_PATHS, and anything committed there is
+# shipped to every career-ops user on update. A vendored third-party skill is a
+# local install, not part of this project's system layer.
+vendor/
+.claude/skills/remove-ai-marks/
+
 # graphify knowledge-graph artifacts (machine-local, regenerable, can be tens of
 # MB). Unanchored so it is caught wherever graphify is run — it defaults to the
 # cwd, which is how a graphify-out/ ended up nested under providers/. That

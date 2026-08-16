@@ -335,6 +335,14 @@ Run:
 node generate-cover-letter.mjs --payload /tmp/cover-payload-{company-slug}.json
 ```
 
+Then scrub the rendered PDF's toolchain metadata — Chromium stamps `/Creator (Chromium)` and `/Producer (Skia/PDF …)` into everything it prints:
+
+```bash
+node clean-artifacts.mjs {output-path}
+```
+
+The edit is byte-for-byte in place, so the PDF's structure is untouched. `build-application.mjs` runs this for you; the step is spelled out here for the standalone path.
+
 Report the output path and file size.
 
 ---

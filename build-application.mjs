@@ -10,8 +10,9 @@
  *
  * Runs, in order:
  *   1. liveness  — check-liveness.mjs against the report's **URL:** header
- *   2. CV        — build-cv-html.mjs -> verify-cv-facts.mjs -> generate-pdf.mjs
- *   3. cover     — generate-cover-letter.mjs (only with --cover)
+ *   2. CV        — build-cv-html.mjs -> clean-artifacts.mjs -> verify-cv-facts.mjs
+ *                  -> generate-pdf.mjs -> clean-artifacts.mjs
+ *   3. cover     — generate-cover-letter.mjs -> clean-artifacts.mjs (only with --cover)
  *
  * Why this exists: the chain above was reassembled by hand for every
  * application, which is both tedious and easy to get subtly wrong — most
@@ -24,6 +25,19 @@
  * check-liveness.mjs exits non-zero for "uncertain" as well as "expired", and
  * uncertain is treated as a stop here — the cost of asking the user to look is
  * far below the cost of applying into a void.
+ *
+ * The clean step runs in two places, and the ordering of the first one matters
+ * more than it looks. Cleaning the HTML *before* verify-cv-facts is not
+ * cosmetic: the fact gate matches metrics against the CV's visible text, and a
+ * zero-width character sitting inside "40%" makes that metric invisible to the
+ * regex while a human reader still sees it. An unsupported claim would sail
+ * through the gate. Stripping invisible Unicode first means the gate reads the
+ * same characters the reader does.
+ *
+ * The second pass scrubs the rendered PDFs, where the payload is metadata
+ * rather than text: Chromium stamps every PDF it prints with `/Creator
+ * (Chromium)` and `/Producer (Skia/PDF ...)`, which is a toolchain fingerprint
+ * on a document that is supposed to read as the candidate's own.
  */
 
 import { spawnSync } from 'child_process';
@@ -31,11 +45,29 @@ import { existsSync, readFileSync, readdirSync, appendFileSync, mkdirSync } from
 import { dirname, join, resolve, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
+import { resolveCoverOutputPath } from './generate-cover-letter.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR = join(ROOT, 'reports');
 const LIVENESS_LOG = join(ROOT, 'data', 'liveness-log.tsv');
 const LIVENESS_LOG_HEADER = 'checked_on\treport\tstatus\turl\n';
+
+/**
+ * Where generate-cover-letter.mjs will write this payload's PDF.
+ *
+ * Delegated to that script's own resolver rather than reimplemented, so the
+ * scrub step cannot end up pointed at a path the renderer never wrote. Pinned
+ * to ROOT/output because the resolver's default is relative to the working
+ * directory, and this script may be invoked from anywhere.
+ */
+export function resolveCoverPdfPath(coverPayloadPath, outOverride = '', root = ROOT) {
+  try {
+    const payload = JSON.parse(readFileSync(coverPayloadPath, 'utf-8'));
+    return resolveCoverOutputPath(payload, outOverride ? resolve(outOverride) : '', join(root, 'output'));
+  } catch {
+    return '';
+  }
+}
 
 /** Locate reports/NNN-*.md for a report number, tolerating unpadded input. */
 export function findReport(reportNum, reportsDir = REPORTS_DIR) {
@@ -77,6 +109,7 @@ function usage() {
   --out-cover PATH  Cover PDF path (default: generate-cover-letter's own default)
   --format FMT      letter | a4 (default: a4)
   --skip-liveness   Do not check whether the posting is still open
+  --skip-clean      Do not strip invisible Unicode / scrub PDF toolchain metadata
   --allow-reorder   Pass through to generate-pdf.mjs
   --allow-stale     Pass through to generate-pdf.mjs
   --dry-run         Print the commands without running them`;
@@ -94,6 +127,7 @@ async function main() {
         'out-cover': { type: 'string' },
         format: { type: 'string', default: 'a4' },
         'skip-liveness': { type: 'boolean', default: false },
+        'skip-clean': { type: 'boolean', default: false },
         'allow-reorder': { type: 'boolean', default: false },
         'allow-stale': { type: 'boolean', default: false },
         'dry-run': { type: 'boolean', default: false },
@@ -178,11 +212,19 @@ async function main() {
   if (values['allow-reorder']) pdfArgs.push('--allow-reorder');
   if (values['allow-stale']) pdfArgs.push('--allow-stale');
 
+  const skipClean = values['skip-clean'];
+  const cleanStep = (label, target) =>
+    skipClean ? null : [label, ['clean-artifacts.mjs', target]];
+
   const cvSteps = [
     ['Build CV HTML', ['build-cv-html.mjs', cvPayload, htmlPath]],
+    // Before the gate, not after: an invisible character inside a metric hides
+    // that metric from the fact gate but not from the reader.
+    cleanStep('Clean CV HTML', htmlPath),
     ['Fact gate', ['verify-cv-facts.mjs', htmlPath]],
     ['Render CV PDF', pdfArgs],
-  ];
+    cleanStep('Scrub CV PDF metadata', cvPdfPath),
+  ].filter(Boolean);
   for (const [label, args] of cvSteps) {
     if (!run(label, args)) {
       console.error(`\n❌ ${label} failed. Nothing further was built.`);
@@ -202,14 +244,27 @@ async function main() {
       return;
     }
     coverBuilt = true;
+
+    if (!skipClean) {
+      const coverPdfPath = resolveCoverPdfPath(coverPayload, values['out-cover']);
+      if (!coverPdfPath) {
+        console.error('\n⚠️  Cover PDF path could not be resolved, so its metadata was not scrubbed.');
+        console.error('   Run: node clean-artifacts.mjs <cover.pdf>');
+      } else if (!run('Scrub cover PDF metadata', ['clean-artifacts.mjs', coverPdfPath])) {
+        console.error('\n❌ Cover PDF metadata scrub failed. Both PDFs above were still built.');
+        process.exitCode = 1;
+        return;
+      }
+    }
   }
 
   console.log('\n================== SUMMARY ==================');
   if (dryRun) console.log('  (dry run — nothing was built)');
   console.log(`  report      : ${reportNum}`);
   console.log(`  liveness    : ${values['skip-liveness'] ? 'SKIPPED' : 'live'}`);
+  console.log(`  cleaned     : ${skipClean ? 'SKIPPED' : 'invisible Unicode + PDF toolchain metadata'}`);
   console.log(`  cv pdf      : ${cvPdfPath}`);
-  console.log(`  cover pdf   : ${coverBuilt ? (values['out-cover'] || 'generate-cover-letter default') : 'none'}`);
+  console.log(`  cover pdf   : ${coverBuilt ? (resolveCoverPdfPath(coverPayload, values['out-cover']) || 'generate-cover-letter default') : 'none'}`);
   console.log('=============================================');
   console.log('\nReview both PDFs before sending. Nothing here submits anything.');
 }

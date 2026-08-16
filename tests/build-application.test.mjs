@@ -215,6 +215,44 @@ try {
     fail('verify-cv-facts is not planned before generate-pdf');
   }
 
+  // The HTML clean step has to sit between build and gate. Cleaning after the
+  // gate would leave the gate reading characters the reader never sees: a
+  // zero-width space inside "40%" hides that metric from the metric regex while
+  // the rendered PDF still shows it, which is exactly the claim the gate exists
+  // to catch. Cleaning after the render would be worse still — too late.
+  const cleanHtmlAt = plan.stdout.indexOf('clean-artifacts.mjs');
+  if (cleanHtmlAt !== -1 && cleanHtmlAt > positions[0] && cleanHtmlAt < positions[1]) {
+    pass('the CV HTML is cleaned after it is built and before the fact gate reads it');
+  } else {
+    fail(`the HTML clean step is not planned between build and gate (offset ${cleanHtmlAt})`);
+  }
+
+  // Both rendered PDFs carry Chromium's /Creator + /Producer stamp, so both need
+  // scrubbing — a clean CV beside an unscrubbed cover letter is not a clean set.
+  const cleanCalls = plan.stdout.match(/clean-artifacts\.mjs/g) || [];
+  if (cleanCalls.length === 3) {
+    pass('three clean steps are planned: CV HTML, CV PDF, cover PDF');
+  } else {
+    fail(`expected 3 clean steps, planned ${cleanCalls.length}`);
+  }
+  if (/clean-artifacts\.mjs\s+\S+-cover\.pdf/.test(plan.stdout)) {
+    pass('the cover PDF path is resolved for scrubbing, not left to a default');
+  } else {
+    fail('no cover PDF path was resolved for the scrub step');
+  }
+
+  const noClean = cli(['--report', '010', '--cv', payload, '--cover', payload, '--skip-liveness', '--skip-clean', '--dry-run']);
+  if (!/clean-artifacts\.mjs/.test(noClean.stdout)) {
+    pass('--skip-clean plans no clean steps at all');
+  } else {
+    fail('--skip-clean still planned a clean step');
+  }
+  if (/cleaned\s*:\s*SKIPPED/.test(noClean.stdout)) {
+    pass('the summary reports cleaning as SKIPPED rather than staying silent');
+  } else {
+    fail('--skip-clean is not reported in the summary');
+  }
+
   if (/nothing was built/.test(plan.stdout)) pass('the dry-run summary says nothing was built');
   else fail('the dry-run summary does not state that nothing was built');
 

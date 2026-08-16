@@ -157,6 +157,22 @@ export function resolveCoverTemplatePath(payload = {}, opts = {}) {
   }
 }
 
+/**
+ * Where this cover letter's PDF will land: an explicit --out wins, then the
+ * payload's own `output_path`, then a slug derived from company and role.
+ *
+ * Exported because callers that wrap this script — build-application.mjs, which
+ * has to hand the finished PDF to the metadata scrubber — otherwise have to
+ * reimplement the derivation and drift out of sync with it.
+ */
+export function resolveCoverOutputPath(payload = {}, outOverride = "", outputRoot = OUTPUT_ROOT) {
+  const explicit = outOverride || payload.output_path;
+  if (explicit) return safeOutputPath(explicit);
+  const company = (payload.letter?.company || "company").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const role    = (payload.letter?.role_title || "role").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30);
+  return join(outputRoot, `${company}-${role}-cover.pdf`);
+}
+
 export function buildHtml(payload, templatePath) {
   _require(payload, ["candidate", "letter"], "payload");
   const candidate = payload.candidate;
@@ -262,17 +278,7 @@ Usage:
 
   const payload = JSON.parse(readFileSync(payloadPath, "utf-8"));
 
-  if (args.out) {
-    payload.output_path = args.out;
-  }
-
-  if (!payload.output_path) {
-    const company = (payload.letter?.company || "company").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    const role    = (payload.letter?.role_title || "role").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30);
-    payload.output_path = join(OUTPUT_ROOT, `${company}-${role}-cover.pdf`);
-  } else {
-    payload.output_path = safeOutputPath(payload.output_path);
-  }
+  payload.output_path = resolveCoverOutputPath(payload, args.out);
 
   if (!existsSync(OUTPUT_ROOT)) mkdirSync(OUTPUT_ROOT, { recursive: true });
 
