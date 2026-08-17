@@ -43,6 +43,42 @@ export function checkCompanyMatch(text, company) {
   return false;
 }
 
+/**
+ * Normalize a company name for the subject/body fallback match below:
+ * lowercased, legal-form suffixes stripped (GmbH, e.V., SE, AG, Ltd, ...), and
+ * collapsed to single-space-separated word tokens. Tracker company fields and
+ * prose mentions in an email subject rarely agree on legal form (a shared ATS
+ * sender might say "... GmbH" where the tracker recorded "... AG", or vice
+ * versa), so a raw substring check misses matches an alert reader would make
+ * instantly. Word-token normalization (rather than just stripping whitespace)
+ * is what makes that tolerance possible.
+ */
+export function normalizeCompanyForSubjectMatch(s) {
+  if (!s) return '';
+  let out = s.toLowerCase();
+  out = out.replace(/\b(gmbh\s*&\s*co\.?\s*kg|gmbh|mbh|e\.?\s*v\.?|ag|se|ltd\.?|inc\.?|llc|corp\.?|co\.?|kg|ug|bv|b\.v\.|plc|s\.a\.|sa|nv|n\.v\.)\b\.?/g, ' ');
+  out = out.replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ');
+  return out;
+}
+
+/**
+ * Subject/body company-name fallback for shared-service ATS senders (see
+ * matchCandidates): a normalized, legal-form-tolerant match, anchored on word
+ * boundaries so "ag" cannot match inside an unrelated word. Requires a
+ * reasonably specific (>= 4 char) normalized core name — a bare 2-3 letter
+ * name is too easy to hit incidentally in unrelated prose, so it is excluded
+ * rather than risk a false match feeding a tracker write.
+ */
+export function checkSubjectCompanyMatch(text, company) {
+  const normCompany = normalizeCompanyForSubjectMatch(company);
+  if (!normCompany || normCompany.length < 4) return false;
+  const normText = normalizeCompanyForSubjectMatch(text);
+  if (!normText) return false;
+  const escaped = normCompany.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(^|\\s)${escaped}(\\s|$)`);
+  return re.test(normText);
+}
+
 export function checkRoleMatch(text, role) {
   if (!role || !text) return false;
   
@@ -161,50 +197,77 @@ export function getAppDomains(app, followups) {
 
 export function matchCandidates(candidates, apps, followups = []) {
   const results = [];
-  
+
   for (const cand of candidates) {
     const textContext = `${cand.from || ''} ${cand.subject || ''} ${cand.body_snippet || ''}`;
     const fromDomain = extractDomain(cand.from);
-    
+
+    // Sender-domain match, computed once per app so both the scoring loop below
+    // and the "did the domain match ANY row" check share one result. A
+    // shared-service ATS sender (SuccessFactors, Workday, Recruitee, HRworks,
+    // Mitsubishi's mssa.com, ...) never matches any app's domain by design —
+    // that is exactly the case the subject/body fallback below exists for.
+    const domainMatchFlags = apps.map((app) => {
+      if (!fromDomain) return false;
+      const appDomains = getAppDomains(app, followups);
+      return appDomains.some((d) => fromDomain === d || fromDomain.endsWith(`.${d}`));
+    });
+    const anyDomainMatch = domainMatchFlags.some(Boolean);
+
     let bestMatches = [];
     let highestScore = -1;
-    
-    for (const app of apps) {
+
+    for (let appIndex = 0; appIndex < apps.length; appIndex++) {
+      const app = apps[appIndex];
       let score = 0;
       let signals = [];
       let companyHint = '';
       let roleHint = '';
-      
+
       const isCompanyMatch = checkCompanyMatch(textContext, app.company);
       if (isCompanyMatch) {
         score += 2;
         signals.push('company-name');
         companyHint = app.company;
       }
-      
+
       const isRoleMatch = checkRoleMatch(textContext, app.role);
       if (isRoleMatch) {
         score += 1.5;
         signals.push('role-title');
         roleHint = app.role;
       }
-      
-      let hasDomainMatch = false;
-      if (fromDomain) {
-        const appDomains = getAppDomains(app, followups);
-        if (appDomains.some(d => fromDomain === d || fromDomain.endsWith(`.${d}`))) {
-          hasDomainMatch = true;
-          score += 2;
-          signals.push('sender-domain');
+
+      const hasDomainMatch = domainMatchFlags[appIndex];
+      if (hasDomainMatch) {
+        score += 2;
+        signals.push('sender-domain');
+        companyHint = companyHint || app.company;
+      }
+
+      // Subject/body company-name fallback, gated to run ONLY when sender-domain
+      // matching found nothing anywhere (anyDomainMatch is false) and the strict
+      // substring check above (checkCompanyMatch) did not already find this
+      // company. It never overrides or duplicates a stronger signal — it only
+      // fills the gap those leave for a shared ATS sender whose domain has no
+      // relationship to the employer, when the subject names the employer using
+      // a legal form the tracker's company field doesn't share.
+      let hasSubjectFallbackMatch = false;
+      if (!isCompanyMatch && !anyDomainMatch) {
+        const fallbackText = `${cand.subject || ''} ${cand.body_snippet || ''}`;
+        if (checkSubjectCompanyMatch(fallbackText, app.company)) {
+          hasSubjectFallbackMatch = true;
+          score += 1;
+          signals.push('subject-company-fallback');
           companyHint = companyHint || app.company;
         }
       }
 
       const postAppKeywords = ['interview', 'offer', 'rejection', '邀您面试', '简历通过', 'next steps', 'update on your application'];
       const strongSignals = ['interview_invite', 'offer', 'rejection'];
-      const hasPostAppKeyword = (cand.signal && strongSignals.includes(cand.signal)) 
+      const hasPostAppKeyword = (cand.signal && strongSignals.includes(cand.signal))
         || postAppKeywords.some(k => textContext.toLowerCase().includes(k.toLowerCase()));
-      
+
       if (hasPostAppKeyword && (isCompanyMatch || hasDomainMatch)) {
          signals.push('post-application-keyword');
       }
@@ -217,10 +280,16 @@ export function matchCandidates(candidates, apps, followups = []) {
           confidence = 'high';
         } else if (isCompanyMatch || hasDomainMatch) {
           confidence = 'medium';
+        } else if (hasSubjectFallbackMatch) {
+          // Deliberately capped below the domain-match floor ('medium'): a
+          // company recognized only via a normalized subject/body mention, with
+          // no sender-domain corroboration, must never reach the confidence
+          // tier gmail-sweep auto-applies transitions on ('high').
+          confidence = 'low';
         } else if (isRoleMatch) {
           confidence = 'low';
         }
-        
+
         const matchInfo = {
           message_id: cand.message_id,
           company_hint: companyHint || app.company,
@@ -305,10 +374,25 @@ export function classifyReply(cand) {
     'offer letter', 'employment agreement', 'job offer', 'congratulations on the offer', 'compensation details', 'pleased to offer'
   ];
 
-  // 3. Rejected keywords
+  // 3. Rejected keywords. Every entry here was checked against offerKeywords,
+  //    interviewKeywords, and autoKeywords for substring collisions (e.g. a
+  //    rejection phrase must never contain 'offer letter' or 'interview
+  //    invitation' as a substring) — see the design note above offerKeywords.
+  //    Rejection is also decided before Offer/Interview below, so even a
+  //    rejection sentence that happens to mention "interview" in passing
+  //    ("we will not be moving forward to interview") still classifies
+  //    Rejected, never Interview.
   const rejectionKeywords = [
     '很遗憾', '暂不匹配', '不合适', '未能进入下一轮', '感谢您的时间', '未通过', '不再考虑', '决定不推进',
-    'unfortunately', 'not a match', 'not matching', 'decided not to proceed', 'will not be moving forward', 'position has been filled', 'role has been closed', 'unable to offer'
+    'unfortunately', 'not a match', 'not matching', 'decided not to proceed', 'will not be moving forward', 'position has been filled', 'role has been closed', 'unable to offer',
+    'we regret to inform', 'regret to inform you',
+    'pursue other candidates', 'pursuing other candidates', 'moving forward with other candidates', 'proceed with other candidates',
+    'not be able to move forward', 'unable to move forward', 'not moving forward with your application',
+    'was not selected', 'not been selected', 'not selected at this time',
+    'decided to move forward with other',
+    'will not be progressing', 'not progressing your application',
+    'no longer under consideration', 'not under consideration',
+    'we have decided not to'
   ];
 
   // 4. Auto-confirmation keywords
