@@ -16,6 +16,8 @@
  * 11. Via channel consistency (see #1596)
  * 12. No # value reused across 2+ tracker rows (error — see #1704)
  * 13. Every report carries a parseable Machine Summary with a score: field (warning)
+ * 14. Duplicate reports hidden behind an employer-name variant, a shared req/job/
+ *     posting ID, or an identical posting URL (warning — see the ZEISS 012/043 gap)
  *
  * Run: node career-ops/verify-pipeline.mjs
  */
@@ -312,6 +314,29 @@ function extractRole(reportContent) {
   return null;
 }
 
+// Company, mirroring extractRole() above: Machine Summary `company:` field
+// first (exact by contract), else the title line's lead segment before the
+// em/en dash, with the "# Evaluación: " / "# Evaluation: " style prefix
+// stripped. Used by Check 14 below, which needs the company text as WRITTEN
+// (legal-form suffixes and parenthetical qualifiers intact) so its own
+// normalizer can strip them — collapsing here would hide the very variation
+// Check 14 exists to catch.
+function extractCompany(reportContent) {
+  const fence = matchMachineSummaryFence(reportContent);
+  if (fence) {
+    const m = fence[1].match(/^company:\s*["']?(.+?)["']?\s*$/m);
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  const title = reportContent.split('\n').find(l => l.startsWith('# '));
+  if (title) {
+    const parts = title.split(/[—–]/);
+    if (parts.length >= 2 && parts[0].trim()) {
+      return parts[0].replace(/^#\s*[^:]*:\s*/, '').trim();
+    }
+  }
+  return null;
+}
+
 const reportFiles = existsSync(REPORTS_DIR)
   ? readdirSync(REPORTS_DIR).filter(f => REPORT_FILE_RE.test(f))
   : [];
@@ -501,6 +526,276 @@ for (const name of reportFiles) {
   }
 }
 if (missingSummary === 0) ok('Every report has a parseable Machine Summary with a score');
+
+// --- Check 14: employer-name variants, shared req IDs, shared URLs ---
+// Check 9 above catches two reports for the same company+role only when the
+// company text is written IDENTICALLY (normalizeTextKey collapses case,
+// whitespace and punctuation but nothing else). It went green on a repo that
+// had exactly this: report 012's company was "ZEISS (Carl Zeiss Microscopy
+// GmbH)", report 043's was "ZEISS" — same employer, same requisition
+// (Workday req JR_1047706, mirrored as a StepStone syndication), two
+// different-looking rows. That cost two CVs and two cover letters for one
+// job, and the two cover letters silently overwrote each other because both
+// resolved to the same output filename.
+//
+// Three independent signals, checked in descending confidence order so a
+// pair flagged by a strong signal is never ALSO reported under a weaker one:
+//   1. Shared req/job/posting ID (definitive — same opening regardless of
+//      how company or role is written).
+//   2. Shared posting URL, compared canonically (definitive).
+//   3. Employer-name variant + identical role (heuristic — suppressed when
+//      both sides carry a req ID and the IDs differ, since AGENTS.md treats
+//      a confirmed req mismatch as proof the rows are NOT duplicates: two
+//      genuinely different requisitions can share a title, e.g. a leveled
+//      variant and its bare title).
+//
+// Warning-level, like Check 9: a name-variant or shared-URL match can still
+// be a legitimate re-evaluation the human wants to keep.
+
+// Recognized req/job/posting ID forms, per AGENTS.md ("Req/posting ID in
+// notes disambiguates same-title postings") — `job id` / `posting id` /
+// `requisition` / `req` / `jr` / `job` / `posting` / `ref` / `r_` followed by
+// an alphanumeric ID containing at least one digit. merge-tracker.mjs already
+// defines this exact pattern as REQ_NUMBER_RE for the same purpose (Notes-cell
+// req disambiguation), but merge-tracker.mjs has no `export` statements at
+// all — nothing in it is importable — so this is a deliberate, commented
+// duplicate rather than a silent one. Keep the two in sync by hand if either
+// changes.
+const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:#_-]*([a-z][a-z0-9-]*\d[a-z0-9-]*|\d[a-z0-9-]*)\b/i;
+
+/**
+ * The report's structured header — everything before the first `---` rule
+ * that separates the metadata block (Date/URL/Legitimacy/etc.) from the
+ * prose body, per the report format every mode in this repo writes. Falls
+ * back to the whole content when no such rule is found (defensive, for
+ * report shapes that don't use one).
+ *
+ * extractReqId() below scans ONLY this block, not the full report. A report
+ * that recommends against a duplicate application routinely NAMES the other
+ * report's req ID in its own prose, by design — AGENTS.md's own
+ * disambiguation guidance produces exactly this text (e.g. report 054/SAP
+ * quotes report 011's requisition 456991 while explaining they are
+ * DIFFERENT postings; report 029/Schaeffler cites report 020's Req 40922 the
+ * same way). Scanning the whole document would grab that cross-referenced
+ * ID — belonging to the OTHER report — as if it were this report's own,
+ * producing exactly the kind of false "duplicate" this check exists to
+ * avoid creating. Confining the scan to the header, where a report's own
+ * req ID always lives (the URL/Legitimacy/Req ID lines this repo's report
+ * template puts there), sidesteps that without needing to parse intent.
+ */
+function reportHeaderBlock(reportContent) {
+  const content = String(reportContent || '');
+  const m = content.match(/^---+\s*$/m);
+  return m ? content.slice(0, m.index) : content;
+}
+
+/**
+ * First req/job/posting ID found in a report's header block, or null.
+ * Returns both the normalized comparison key (uppercased captured ID, same
+ * shape merge-tracker's extractReqNumber() produces) and the raw matched
+ * text (kept for a human-readable warning, e.g. "JR_1047706" rather than the
+ * bare "1047706" the key strips down to).
+ */
+function extractReqId(reportContent) {
+  const m = reportHeaderBlock(reportContent).match(REQ_NUMBER_RE);
+  if (!m) return null;
+  return { key: m[1].toUpperCase(), display: m[0] };
+}
+
+/** First `**URL:**` header value in a report, or null. */
+function extractReportUrl(reportContent) {
+  const m = String(reportContent || '').match(/^\*\*URL:\*\*\s*(\S+)/m);
+  return m ? m[1].trim() : null;
+}
+
+// Tracking params stripped before URL comparison — utm_* (any suffix) plus
+// the common click-id params that vary per click/campaign without changing
+// what posting the link points at.
+const TRACKING_PARAM_RE = /^utm_|^(?:fbclid|gclid|msclkid|igshid|mc_cid|mc_eid)$/i;
+
+/**
+ * Canonicalize a posting URL for equality comparison: lowercase host, strip
+ * a trailing slash, strip tracking query params. Falls back to a trimmed,
+ * lowercased, trailing-slash-stripped string for a value that doesn't parse
+ * as an absolute URL, so a malformed `**URL:**` cell still gets SOME
+ * comparison instead of silently opting the report out of this signal.
+ */
+function canonicalizeUrl(raw) {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    u.hostname = u.hostname.toLowerCase();
+    for (const key of [...u.searchParams.keys()]) {
+      if (TRACKING_PARAM_RE.test(key)) u.searchParams.delete(key);
+    }
+    const pathname = u.pathname.replace(/\/+$/, '') || '/';
+    const search = u.searchParams.toString();
+    return `${u.protocol}//${u.hostname}${u.port ? ':' + u.port : ''}${pathname}${search ? '?' + search : ''}`;
+  } catch {
+    return String(raw).trim().toLowerCase().replace(/\/+$/, '');
+  }
+}
+
+// Legal-form suffixes stripped from a company name before comparison, longest
+// first so a compound form ("GmbH & Co. KG") is consumed whole rather than
+// leaving a dangling "& Co. KG" behind after a bare "GmbH" match wins first.
+const LEGAL_FORMS = [
+  'GmbH & Co\\.? KG', 'GmbH', 'mbH', 'AG', 'SE', 'KGaA', 'KG',
+  'e\\.V\\.', 'eG',
+  'Ltd\\.', 'Ltd', 'Limited',
+  'Inc\\.', 'Inc',
+  'B\\.V\\.', 'N\\.V\\.', 'S\\.A\\.', 'S\\.r\\.l\\.',
+  'Co\\.', '& Co',
+].sort((a, b) => b.length - a.length);
+const LEGAL_FORM_RE = new RegExp(`,?\\s*(?:${LEGAL_FORMS.join('|')})\\.?\\s*$`, 'i');
+
+function stripLegalForm(s) {
+  let out = s;
+  for (let i = 0; i < 4; i++) {
+    const next = out.replace(LEGAL_FORM_RE, '');
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+// A trailing ", <place> Branch" qualifier, or a bare trailing country name —
+// both examples straight from the spec that motivated this check ("ZEISS
+// (Carl Zeiss Microscopy GmbH)" needs the parenthetical gone; "Primetals
+// Technologies Germany GmbH" needs "Germany" gone too, not just "GmbH").
+// Deliberately a short, explicit list rather than a general gazetteer: a
+// false strip here (turning a real company-name word into noise) is worse
+// than missing an exotic branch qualifier this check was never asked to know.
+const BRANCH_SUFFIX_RE = /,\s*\p{L}[\p{L}\s]*\bBranch\s*$/iu;
+const COUNTRY_SUFFIX_RE = /\b(?:Germany|Deutschland|Austria|Switzerland|USA|U\.S\.A?\.?|United States|UK|United Kingdom|France|Spain|Italy|Netherlands|Japan|China|India|Canada|Australia|Poland|Belgium|Ireland|Sweden|Norway|Denmark|Finland)\s*$/i;
+
+function stripBranchSuffix(s) {
+  return s.replace(BRANCH_SUFFIX_RE, '').replace(COUNTRY_SUFFIX_RE, '').trim().replace(/,\s*$/, '');
+}
+
+/**
+ * Company name -> space-joined token string, normalized for both exact-key
+ * equality and whole-token prefix comparison. Order matters: parenthetical
+ * qualifiers are dropped whole ("ZEISS (Carl Zeiss Microscopy GmbH)" ->
+ * "ZEISS" before anything else runs), then the legal form ("GmbH"), then a
+ * trailing branch/country qualifier that the legal form may have been
+ * masking ("...Germany GmbH" only exposes "...Germany" as trailing text
+ * once "GmbH" is gone) — then Unicode-aware case/punctuation folding shared
+ * with normalizeTextKey (NFKC, letters+marks+digits only) but keeping single
+ * spaces between words instead of collapsing them, since Check 14's
+ * containment rule needs word boundaries normalizeTextKey throws away.
+ */
+function normalizeCompanyTokens(raw) {
+  let s = String(raw ?? '');
+  s = s.replace(/\([^)]*\)/g, ' ');
+  s = stripBranchSuffix(s);
+  s = stripLegalForm(s);
+  s = stripBranchSuffix(s);
+  s = s.normalize('NFKC').toLowerCase();
+  s = s.replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ');
+  return s;
+}
+
+/**
+ * Whether two company names are the same employer once legal-form suffixes,
+ * parenthetical qualifiers and branch/country suffixes are normalized away.
+ * Equal normalized keys always match; otherwise one must be a WHOLE-TOKEN
+ * prefix of the other ("zeiss" vs "zeiss carl zeiss microscopy") so
+ * "siemens" can't accidentally match "siemensenergy", and normalized keys
+ * under 3 characters never participate in the prefix comparison (too short
+ * to carry signal either way).
+ */
+function companyKeysMatch(a, b) {
+  const ta = normalizeCompanyTokens(a);
+  const tb = normalizeCompanyTokens(b);
+  const ka = ta.replace(/\s+/g, '');
+  const kb = tb.replace(/\s+/g, '');
+  if (!ka || !kb) return false;
+  if (ka === kb) return true;
+  if (ka.length < 3 || kb.length < 3) return false;
+  const tokensA = ta.split(' ').filter(Boolean);
+  const tokensB = tb.split(' ').filter(Boolean);
+  const isPrefix = (short, long) =>
+    short.length > 0 && short.length <= long.length && short.every((tok, i) => tok === long[i]);
+  return isPrefix(tokensA, tokensB) || isPrefix(tokensB, tokensA);
+}
+
+const reportMeta = [];
+for (const name of reportFiles) {
+  let reportContent;
+  try {
+    reportContent = readFileSync(join(REPORTS_DIR, name), 'utf-8');
+  } catch {
+    continue; // Unreadable — Check 10's orphan scan already surfaces this file.
+  }
+  const companySlug = name.match(REPORT_FILE_RE)[2];
+  reportMeta.push({
+    name,
+    company: extractCompany(reportContent) || companySlug.replace(/-/g, ' '),
+    role: extractRole(reportContent),
+    reqId: extractReqId(reportContent),
+    url: canonicalizeUrl(extractReportUrl(reportContent)),
+  });
+}
+
+let strongDupes = 0;
+const flaggedPairs = new Set();
+function pairKey(a, b) { return a < b ? `${a} ${b}` : `${b} ${a}`; }
+function flagPair(a, b, reason) {
+  const key = pairKey(a, b);
+  if (flaggedPairs.has(key)) return;
+  flaggedPairs.add(key);
+  warn(`Likely duplicate reports (${reason}): ${a}, ${b}`);
+  strongDupes++;
+}
+
+// Signal 1 (highest confidence): shared req/job/posting ID.
+const byReqId = new Map();
+for (const m of reportMeta) {
+  if (!m.reqId) continue;
+  if (!byReqId.has(m.reqId.key)) byReqId.set(m.reqId.key, []);
+  byReqId.get(m.reqId.key).push(m);
+}
+for (const group of byReqId.values()) {
+  if (group.length < 2) continue;
+  for (let i = 0; i < group.length; i++) {
+    for (let j = i + 1; j < group.length; j++) {
+      flagPair(group[i].name, group[j].name, `same req ID ${group[i].reqId.display}`);
+    }
+  }
+}
+
+// Signal 2: identical posting URL, compared canonically.
+const byUrl = new Map();
+for (const m of reportMeta) {
+  if (!m.url) continue;
+  if (!byUrl.has(m.url)) byUrl.set(m.url, []);
+  byUrl.get(m.url).push(m);
+}
+for (const group of byUrl.values()) {
+  if (group.length < 2) continue;
+  for (let i = 0; i < group.length; i++) {
+    for (let j = i + 1; j < group.length; j++) {
+      flagPair(group[i].name, group[j].name, 'same URL');
+    }
+  }
+}
+
+// Signal 3: employer-name variant + identical role. Suppressed when both
+// sides name a req ID and the IDs disagree — AGENTS.md documents that case
+// (two distinct requisitions sharing a title) as proof the rows are NOT
+// duplicates, and this heuristic must defer to that confirmed signal.
+for (let i = 0; i < reportMeta.length; i++) {
+  for (let j = i + 1; j < reportMeta.length; j++) {
+    const a = reportMeta[i], b = reportMeta[j];
+    if (!a.role || !b.role) continue;
+    if (normalizeKey(a.role) !== normalizeKey(b.role)) continue;
+    if (a.reqId && b.reqId && a.reqId.key !== b.reqId.key) continue;
+    if (!companyKeysMatch(a.company, b.company)) continue;
+    flagPair(a.name, b.name, 'company variant + identical role');
+  }
+}
+if (strongDupes === 0) ok('No employer-variant/req-ID/URL duplicates found');
 
 // --- Summary ---
 console.log('\n' + '='.repeat(50));

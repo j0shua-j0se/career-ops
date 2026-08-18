@@ -14,7 +14,7 @@
 // must not flip a clean pipeline to a non-zero exit code), so every
 // assertion here checks stdout content and exit code 0, never exit 1.
 import { pass, fail, NODE, ROOT } from './helpers.mjs';
-import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'fs';
+import { writeFileSync, mkdirSync, mkdtempSync, rmSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
@@ -143,4 +143,184 @@ try {
   fail(`verify-pipeline Machine Summary tests crashed: ${e.message}`);
 } finally {
   rmSync(box, { recursive: true, force: true });
+}
+
+// ── Check 14: employer-name variants, shared req IDs, shared URLs ──────────
+// The gap this closes: report 012's company was "ZEISS (Carl Zeiss
+// Microscopy GmbH)", report 043's was "ZEISS" — same requisition
+// (JR_1047706), two rows that looked unrelated to Check 9's exact-key
+// comparison. That cost two CVs and two cover letters for one job, with the
+// letters silently overwriting each other because both resolved to the same
+// output filename.
+console.log('\nverify-pipeline.mjs — Check 14: employer-variant / req-ID / URL duplicates');
+
+const box2 = mkdtempSync(join(tmpdir(), 'cops-verify-pipeline-dupes-'));
+const reportsDir2 = join(box2, 'reports');
+const tracker2 = join(box2, 'applications.md');
+mkdirSync(reportsDir2, { recursive: true });
+
+/** One synthetic report with a structured header (URL/Req ID before the `---` rule) and a body. */
+function makeReport({ company, role, url, reqId, extraHeader = '', body = '## Notes\n\nBody text.\n' }) {
+  const reqLine = reqId ? `**Req ID:** ${reqId}\n` : '';
+  const urlLine = url ? `**URL:** ${url}\n` : '';
+  return `# Evaluation: ${company} — ${role}\n\n` +
+    `**Date:** 2026-01-01\n${urlLine}${reqLine}${extraHeader}**Legitimacy:** verified\n\n---\n\n` +
+    `## Machine Summary\n\n\`\`\`yaml\ncompany: "${company}"\nrole: "${role}"\nscore: 4.0\n\`\`\`\n\n${body}`;
+}
+
+function resetDupeFixture() {
+  for (const f of readdirSync(reportsDir2)) rmSync(join(reportsDir2, f));
+}
+
+try {
+  // ── 1. ZEISS-style employer-name variant, identical role → flagged ──────
+  writeFileSync(join(reportsDir2, '012-zeiss-2026-08-06.md'),
+    makeReport({ company: 'ZEISS (Carl Zeiss Microscopy GmbH)', role: 'Internship Machine Learning' }));
+  writeFileSync(join(reportsDir2, '043-zeiss-2026-08-12.md'),
+    makeReport({ company: 'ZEISS', role: 'Internship Machine Learning' }));
+  writeTracker(tracker2, [
+    '| 12 | 2026-08-06 | ZEISS (Carl Zeiss Microscopy GmbH) | Internship Machine Learning | 3.9/5 | Discarded | ❌ | [12](reports/012-zeiss-2026-08-06.md) | dup of 43 |',
+    '| 43 | 2026-08-12 | ZEISS | Internship Machine Learning | 4.0/5 | Evaluated | ❌ | [43](reports/043-zeiss-2026-08-12.md) | ok |',
+  ]);
+  let out = verify(reportsDir2, tracker2);
+  check('ZEISS legal-form/parenthetical variant + identical role is flagged',
+    /⚠️[^\n]*Likely duplicate reports[^\n]*012-zeiss-2026-08-06\.md, 043-zeiss-2026-08-12\.md/.test(out.stdout), out.stdout);
+  check('ZEISS variant finding stays warning-level (exit 0)', out.status === 0, `status=${out.status}`);
+
+  // ── 2. Legal-form + country-suffix variant, identical role → flagged ────
+  resetDupeFixture();
+  writeFileSync(join(reportsDir2, '005-primetals-2026-01-01.md'),
+    makeReport({ company: 'Primetals Technologies Germany GmbH', role: 'Werkstudent Data Science' }));
+  writeFileSync(join(reportsDir2, '006-primetals-2026-01-02.md'),
+    makeReport({ company: 'Primetals Technologies', role: 'Werkstudent Data Science' }));
+  writeTracker(tracker2, [
+    '| 5 | 2026-01-01 | Primetals Technologies Germany GmbH | Werkstudent Data Science | 4.0/5 | Evaluated | ❌ | [5](reports/005-primetals-2026-01-01.md) | ok |',
+    '| 6 | 2026-01-02 | Primetals Technologies | Werkstudent Data Science | 4.0/5 | Evaluated | ❌ | [6](reports/006-primetals-2026-01-02.md) | ok |',
+  ]);
+  out = verify(reportsDir2, tracker2);
+  check('"Primetals Technologies Germany GmbH" vs "Primetals Technologies" is flagged',
+    /⚠️[^\n]*Likely duplicate reports[^\n]*005-primetals-2026-01-01\.md, 006-primetals-2026-01-02\.md/.test(out.stdout), out.stdout);
+
+  // ── 3. CRITICAL false-positive guard: sibling business units must NOT match ──
+  resetDupeFixture();
+  writeFileSync(join(reportsDir2, '007-siemens-2026-01-01.md'),
+    makeReport({ company: 'Siemens Mobility GmbH', role: 'Werkstudent Data Science' }));
+  writeFileSync(join(reportsDir2, '008-siemens-2026-01-02.md'),
+    makeReport({ company: 'Siemens Energy', role: 'Werkstudent Data Science' }));
+  writeTracker(tracker2, [
+    '| 7 | 2026-01-01 | Siemens Mobility GmbH | Werkstudent Data Science | 4.0/5 | Evaluated | ❌ | [7](reports/007-siemens-2026-01-01.md) | ok |',
+    '| 8 | 2026-01-02 | Siemens Energy | Werkstudent Data Science | 4.0/5 | Evaluated | ❌ | [8](reports/008-siemens-2026-01-02.md) | ok |',
+  ]);
+  out = verify(reportsDir2, tracker2);
+  check('"Siemens Mobility GmbH" vs "Siemens Energy" (same role) is NOT flagged — distinct business units',
+    !/Likely duplicate reports[^\n]*007-siemens[^\n]*008-siemens/.test(out.stdout) &&
+    !/Likely duplicate reports[^\n]*008-siemens[^\n]*007-siemens/.test(out.stdout), out.stdout);
+
+  // ── 4. Siemens Mobility GmbH, two genuinely different roles → NOT flagged ──
+  resetDupeFixture();
+  writeFileSync(join(reportsDir2, '009-siemens-2026-01-01.md'),
+    makeReport({ company: 'Siemens Mobility GmbH', role: 'Werkstudent Data Science' }));
+  writeFileSync(join(reportsDir2, '010-siemens-2026-01-02.md'),
+    makeReport({ company: 'Siemens Mobility GmbH', role: 'Werkstudent Embedded Systems' }));
+  writeTracker(tracker2, [
+    '| 9 | 2026-01-01 | Siemens Mobility GmbH | Werkstudent Data Science | 4.0/5 | Evaluated | ❌ | [9](reports/009-siemens-2026-01-01.md) | ok |',
+    '| 10 | 2026-01-02 | Siemens Mobility GmbH | Werkstudent Embedded Systems | 4.0/5 | Evaluated | ❌ | [10](reports/010-siemens-2026-01-02.md) | ok |',
+  ]);
+  out = verify(reportsDir2, tracker2);
+  check('same employer, two different roles, is NOT flagged',
+    !/Likely duplicate reports[^\n]*009-siemens[^\n]*010-siemens/.test(out.stdout) &&
+    !/Likely duplicate reports[^\n]*010-siemens[^\n]*009-siemens/.test(out.stdout), out.stdout);
+
+  // ── 5. Same req ID, different company spelling AND different role title → flagged ──
+  resetDupeFixture();
+  writeFileSync(join(reportsDir2, '020-acme-2026-01-01.md'),
+    makeReport({ company: 'Acme GmbH', role: 'Werkstudent AI', reqId: 'JR_99001' }));
+  writeFileSync(join(reportsDir2, '021-acme-2026-01-02.md'),
+    makeReport({ company: 'Acme Corporation (Acme GmbH)', role: 'Student Assistant Artificial Intelligence', reqId: 'JR_99001' }));
+  writeTracker(tracker2, [
+    '| 20 | 2026-01-01 | Acme GmbH | Werkstudent AI | 4.0/5 | Evaluated | ❌ | [20](reports/020-acme-2026-01-01.md) | ok |',
+    '| 21 | 2026-01-02 | Acme Corporation (Acme GmbH) | Student Assistant Artificial Intelligence | 4.0/5 | Evaluated | ❌ | [21](reports/021-acme-2026-01-02.md) | ok |',
+  ]);
+  out = verify(reportsDir2, tracker2);
+  check('same req ID under different company spelling AND different role title is flagged as same-req',
+    /⚠️[^\n]*Likely duplicate reports[^\n]*same req ID[^\n]*020-acme-2026-01-01\.md, 021-acme-2026-01-02\.md/.test(out.stdout), out.stdout);
+
+  // ── 6. Same URL → flagged ────────────────────────────────────────────────
+  resetDupeFixture();
+  const sharedUrl = 'https://jobs.example.com/job/Munich-Data-Engineer-12345/9988776/?utm_source=newsletter&utm_medium=email';
+  const sharedUrlNoTracking = 'https://JOBS.example.com/job/Munich-Data-Engineer-12345/9988776/';
+  writeFileSync(join(reportsDir2, '030-globex-2026-01-01.md'),
+    makeReport({ company: 'Globex', role: 'Data Engineer', url: sharedUrl }));
+  writeFileSync(join(reportsDir2, '031-globex-2026-01-02.md'),
+    makeReport({ company: 'Globex Direct Posting', role: 'Data Engineer II', url: sharedUrlNoTracking }));
+  writeTracker(tracker2, [
+    '| 30 | 2026-01-01 | Globex | Data Engineer | 4.0/5 | Evaluated | ❌ | [30](reports/030-globex-2026-01-01.md) | ok |',
+    '| 31 | 2026-01-02 | Globex Direct Posting | Data Engineer II | 4.0/5 | Evaluated | ❌ | [31](reports/031-globex-2026-01-02.md) | ok |',
+  ]);
+  out = verify(reportsDir2, tracker2);
+  check('same URL (host case + tracking params normalized away) is flagged',
+    /⚠️[^\n]*Likely duplicate reports[^\n]*same URL[^\n]*030-globex-2026-01-01\.md, 031-globex-2026-01-02\.md/.test(out.stdout), out.stdout);
+
+  // ── 7. Different req IDs, same company, same role title → NOT flagged ───
+  // AGENTS.md's documented case: distinct requisitions can share a title. A
+  // confirmed req mismatch is proof-of-difference and must override the
+  // company+role heuristic.
+  resetDupeFixture();
+  writeFileSync(join(reportsDir2, '040-hooli-2026-01-01.md'),
+    makeReport({ company: 'Hooli', role: 'Werkstudent Backend', reqId: 'REQ-1001' }));
+  writeFileSync(join(reportsDir2, '041-hooli-2026-01-02.md'),
+    makeReport({ company: 'Hooli', role: 'Werkstudent Backend', reqId: 'REQ-1002' }));
+  writeTracker(tracker2, [
+    '| 40 | 2026-01-01 | Hooli | Werkstudent Backend | 4.0/5 | Evaluated | ❌ | [40](reports/040-hooli-2026-01-01.md) | req REQ-1001 |',
+    '| 41 | 2026-01-02 | Hooli | Werkstudent Backend | 4.0/5 | Evaluated | ❌ | [41](reports/041-hooli-2026-01-02.md) | req REQ-1002 |',
+  ]);
+  out = verify(reportsDir2, tracker2);
+  check('same company+role but confirmed DIFFERENT req IDs is NOT flagged (distinct requisitions sharing a title)',
+    !/Likely duplicate reports[^\n]*040-hooli[^\n]*041-hooli/.test(out.stdout) &&
+    !/Likely duplicate reports[^\n]*041-hooli[^\n]*040-hooli/.test(out.stdout), out.stdout);
+  check('different-req fixture prints the all-clear line for Check 14',
+    out.stdout.includes('No employer-variant/req-ID/URL duplicates found'), out.stdout);
+
+  // ── 8. A report's own req ID phrasing the shared regex can't parse must
+  //      not fall back to a DIFFERENT report's cross-referenced req ID ──────
+  // Mirrors the real-repo case (report 029/Schaeffler cites report 020's Req
+  // 40922 while explaining they are different requisitions): scanning must
+  // stay inside the header block, where a report's own IDs live, so a
+  // disambiguation mention elsewhere in the body can't be picked up as if it
+  // were this report's own req.
+  resetDupeFixture();
+  writeFileSync(join(reportsDir2, '050-initech-2026-01-01.md'),
+    makeReport({ company: 'Initech', role: 'Werkstudent Platform', reqId: 'REQ-5001' }));
+  writeFileSync(join(reportsDir2, '051-initech-2026-01-02.md'),
+    makeReport({
+      company: 'Initech', role: 'Werkstudent Data',
+      // No parseable req ID in the header (three-word phrasing the shared
+      // regex does not match) — the only match anywhere in the document is
+      // a cross-reference to report 050's req in the prose body.
+      extraHeader: '',
+      body: '## Notes\n\nThis is a different requisition from report 050 (Initech, REQ-5001) — see that report for the sibling posting.\n',
+    }));
+  writeTracker(tracker2, [
+    '| 50 | 2026-01-01 | Initech | Werkstudent Platform | 4.0/5 | Evaluated | ❌ | [50](reports/050-initech-2026-01-01.md) | ok |',
+    '| 51 | 2026-01-02 | Initech | Werkstudent Data | 4.0/5 | Evaluated | ❌ | [51](reports/051-initech-2026-01-02.md) | ok |',
+  ]);
+  out = verify(reportsDir2, tracker2);
+  check('a req ID cross-referenced only in body prose is not attributed to the citing report',
+    !/same req ID[^\n]*050-initech[^\n]*051-initech/.test(out.stdout) &&
+    !/same req ID[^\n]*051-initech[^\n]*050-initech/.test(out.stdout), out.stdout);
+
+  // ── 9. Findings stay warnings — exit code unaffected ─────────────────────
+  resetDupeFixture();
+  writeFileSync(join(reportsDir2, '060-clean-2026-01-01.md'),
+    makeReport({ company: 'CleanCo', role: 'Analyst' }));
+  writeTracker(tracker2, [
+    '| 60 | 2026-01-01 | CleanCo | Analyst | 4.0/5 | Evaluated | ❌ | [60](reports/060-clean-2026-01-01.md) | ok |',
+  ]);
+  out = verify(reportsDir2, tracker2);
+  check('single clean report: exit 0 and the all-clear line for Check 14',
+    out.status === 0 && out.stdout.includes('No employer-variant/req-ID/URL duplicates found'), `status=${out.status}\n${out.stdout}`);
+} catch (e) {
+  fail(`verify-pipeline Check 14 duplicate-report tests crashed: ${e.message}`);
+} finally {
+  rmSync(box2, { recursive: true, force: true });
 }
