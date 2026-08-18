@@ -53,7 +53,7 @@ try {
 
   // ── Unit: findReport / readReportUrl ───────────────────────────────────────
   const mod = await import(pathToFileURL(SCRIPT).href);
-  const { findReport, readReportUrl } = mod;
+  const { findReport, readReportUrl, resolveCoverPdfPath, resolveStagedCoverPdfPath } = mod;
 
   if (typeof findReport !== 'function' || typeof readReportUrl !== 'function') {
     fail('build-application.mjs does not export findReport and readReportUrl');
@@ -311,6 +311,130 @@ try {
     pass('--allow-reorder and --allow-stale are passed through to generate-pdf');
   } else {
     fail('the generate-pdf passthrough flags did not reach generate-pdf');
+  }
+
+  // ── CLI: --stage ────────────────────────────────────────────────────────────
+  // output/ was split into subfolders (to-apply/, applied/, archive-closed/,
+  // general/), but every build script still defaulted to output/'s flat root.
+  // --stage is the opt-in fix; these tests pin both the opt-in default (no
+  // regression for the thousands of users with no such subfolders) and the
+  // staged behaviour.
+
+  // No --stage at all: the planned CV HTML and PDF paths must carry no
+  // subfolder under output/ — this is the default-behaviour regression guard.
+  const noStage = cli(['--report', '010', '--cv', payload, '--skip-liveness', '--dry-run']);
+  const cvHtmlLine = (noStage.stdout.match(/build-cv-html\.mjs.*$/m) || [''])[0];
+  const cvPdfLine = (noStage.stdout.match(/generate-pdf\.mjs.*$/m) || [''])[0];
+  if (
+    cvHtmlLine &&
+    !/output[\\/](to-apply|applied|archive-closed|general)[\\/]/.test(cvHtmlLine) &&
+    cvPdfLine &&
+    !/output[\\/](to-apply|applied|archive-closed|general)[\\/]/.test(cvPdfLine)
+  ) {
+    pass('omitting --stage plans the CV HTML and PDF straight into output/\'s root');
+  } else {
+    fail(`omitting --stage put a stage subfolder in the plan (html: ${cvHtmlLine}, pdf: ${cvPdfLine})`);
+  }
+
+  // --stage to-apply: CV HTML, CV PDF and cover PDF all sit under
+  // output/to-apply/.
+  const stageToApply = cli([
+    '--report', '010', '--cv', payload, '--cover', payload, '--skip-liveness', '--stage', 'to-apply', '--dry-run',
+  ]);
+  const stageSep = '[\\\\/]'; // Windows and POSIX path separators
+  const toApplyPattern = new RegExp(`output${stageSep}to-apply${stageSep}`);
+  if (stageToApply.code === 0) pass('--stage to-apply exits 0');
+  else fail(`--stage to-apply exited ${stageToApply.code} with stderr ${JSON.stringify(stageToApply.stderr.slice(0, 200))}`);
+  const toApplyHtmlLine = (stageToApply.stdout.match(/build-cv-html\.mjs.*$/m) || [''])[0];
+  const toApplyPdfLine = (stageToApply.stdout.match(/generate-pdf\.mjs.*$/m) || [''])[0];
+  const toApplyCoverLine = (stageToApply.stdout.match(/generate-cover-letter\.mjs.*$/m) || [''])[0];
+  if (toApplyPattern.test(toApplyHtmlLine) && toApplyPattern.test(toApplyPdfLine) && toApplyPattern.test(toApplyCoverLine)) {
+    pass('--stage to-apply routes CV HTML, CV PDF and cover PDF under output/to-apply/');
+  } else {
+    fail(
+      `--stage to-apply did not route all three artifacts under output/to-apply/ ` +
+      `(html: ${toApplyHtmlLine}, pdf: ${toApplyPdfLine}, cover: ${toApplyCoverLine})`
+    );
+  }
+
+  // --stage applied: same check, different folder.
+  const stageApplied = cli([
+    '--report', '010', '--cv', payload, '--cover', payload, '--skip-liveness', '--stage', 'applied', '--dry-run',
+  ]);
+  const appliedPattern = new RegExp(`output${stageSep}applied${stageSep}`);
+  const appliedHtmlLine = (stageApplied.stdout.match(/build-cv-html\.mjs.*$/m) || [''])[0];
+  const appliedPdfLine = (stageApplied.stdout.match(/generate-pdf\.mjs.*$/m) || [''])[0];
+  const appliedCoverLine = (stageApplied.stdout.match(/generate-cover-letter\.mjs.*$/m) || [''])[0];
+  if (appliedPattern.test(appliedHtmlLine) && appliedPattern.test(appliedPdfLine) && appliedPattern.test(appliedCoverLine)) {
+    pass('--stage applied routes CV HTML, CV PDF and cover PDF under output/applied/');
+  } else {
+    fail(
+      `--stage applied did not route all three artifacts under output/applied/ ` +
+      `(html: ${appliedHtmlLine}, pdf: ${appliedPdfLine}, cover: ${appliedCoverLine})`
+    );
+  }
+
+  // An invalid --stage is rejected before anything is planned, and the error
+  // names the valid values — same contract as the existing --format check.
+  const badStage = cli(['--report', '010', '--cv', payload, '--stage', 'bogus', '--dry-run']);
+  if (
+    badStage.code === 1 &&
+    /invalid --stage/.test(badStage.stderr) &&
+    ['to-apply', 'applied', 'archive-closed', 'general'].every((s) => badStage.stderr.includes(s))
+  ) {
+    pass('an invalid --stage is rejected and names the valid values');
+  } else {
+    fail(`--stage bogus exited ${badStage.code} with stderr ${JSON.stringify(badStage.stderr.slice(0, 300))}`);
+  }
+
+  // --out-cv combined with --stage: the explicit --out-cv path must win, not
+  // be silently relocated into the stage folder.
+  const explicitOutCv = join(tmp, 'explicit-cv.pdf');
+  const outCvWithStage = cli([
+    '--report', '010', '--cv', payload, '--skip-liveness', '--stage', 'to-apply', '--out-cv', explicitOutCv, '--dry-run',
+  ]);
+  const outCvPdfLine = (outCvWithStage.stdout.match(/generate-pdf\.mjs.*$/m) || [''])[0];
+  // The line is `generate-pdf.mjs <html> <cv-pdf> --format=... --report=...`;
+  // the CV PDF argument (not the HTML argument, which --out-cv never touches)
+  // must be the explicit path verbatim, not one rewritten into the stage folder.
+  const outCvPdfArg = outCvPdfLine.split(/\s+/)[2] || '';
+  if (outCvPdfArg === explicitOutCv) {
+    pass('--out-cv wins over --stage instead of being relocated into the stage folder');
+  } else {
+    fail(`--out-cv was not honoured over --stage (pdf arg: ${JSON.stringify(outCvPdfArg)}, expected ${JSON.stringify(explicitOutCv)})`);
+  }
+
+  // The SUMMARY reports the stage, so a staged build is visible in the output
+  // rather than something the user has to infer.
+  if (/stage\s*:\s*to-apply/.test(stageToApply.stdout)) {
+    pass('the summary reports the stage');
+  } else {
+    fail('the summary does not report --stage to-apply');
+  }
+  if (/stage\s*:\s*output\/ \(root\)/.test(noStage.stdout)) {
+    pass('the summary reports output/ root when --stage is omitted');
+  } else {
+    fail('the summary does not report the default (no-stage) location');
+  }
+
+  // With --stage, the cover PDF basename must still match what
+  // resolveCoverPdfPath (generate-cover-letter.mjs's own resolver) derives —
+  // only the directory should differ, never the naming.
+  if (typeof resolveCoverPdfPath === 'function' && typeof resolveStagedCoverPdfPath === 'function') {
+    const unstagedCoverPath = resolveCoverPdfPath(payload);
+    const stagedCoverPath = resolveStagedCoverPdfPath(payload, '', 'to-apply');
+    const unstagedBase = unstagedCoverPath.split(/[\\/]/).pop();
+    const stagedBase = stagedCoverPath.split(/[\\/]/).pop();
+    if (unstagedCoverPath && stagedCoverPath && unstagedBase === stagedBase && toApplyPattern.test(stagedCoverPath)) {
+      pass('the staged cover PDF keeps the same basename as resolveCoverPdfPath, only re-rooted under output/to-apply/');
+    } else {
+      fail(
+        `staged cover naming diverged from resolveCoverPdfPath ` +
+        `(unstaged: ${JSON.stringify(unstagedCoverPath)}, staged: ${JSON.stringify(stagedCoverPath)})`
+      );
+    }
+  } else {
+    fail('build-application.mjs does not export resolveCoverPdfPath and resolveStagedCoverPdfPath');
   }
 } catch (e) {
   fail(`build-application tests crashed: ${e.message}`);

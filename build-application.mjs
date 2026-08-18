@@ -38,6 +38,16 @@
  * rather than text: Chromium stamps every PDF it prints with `/Creator
  * (Chromium)` and `/Producer (Skia/PDF ...)`, which is a toolchain fingerprint
  * on a document that is supposed to read as the candidate's own.
+ *
+ * `--stage` files the build directly into output/'s subfolders (to-apply/,
+ * applied/, archive-closed/, general/ — see output/README.md) instead of the
+ * flat root. It exists because output/ was reorganised into those subfolders
+ * but nothing that writes into output/ was made folder-aware, so every build
+ * landed back in the root and had to be filed by hand — a layout that only
+ * survives through manual discipline is not really a layout. The flag is
+ * opt-in and the default is unchanged: this script ships to every career-ops
+ * user, most of whom have no such subfolders, so omitting --stage must be
+ * byte-identical to the old behaviour.
  */
 
 import { spawnSync } from 'child_process';
@@ -51,6 +61,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR = join(ROOT, 'reports');
 const LIVENESS_LOG = join(ROOT, 'data', 'liveness-log.tsv');
 const LIVENESS_LOG_HEADER = 'checked_on\treport\tstatus\turl\n';
+export const STAGES = ['to-apply', 'applied', 'archive-closed', 'general'];
 
 /**
  * Where generate-cover-letter.mjs will write this payload's PDF.
@@ -67,6 +78,23 @@ export function resolveCoverPdfPath(coverPayloadPath, outOverride = '', root = R
   } catch {
     return '';
   }
+}
+
+/**
+ * Same resolution, re-rooted into a stage subfolder.
+ *
+ * An explicit --out-cover always wins outright (own path, own directory —
+ * --stage never relocates it). Otherwise this takes the basename
+ * resolveCoverPdfPath would have produced — including a payload's own
+ * output_path, if it set one — and re-roots it under output/<stage>/, so the
+ * naming stays whatever generate-cover-letter.mjs would have chosen; only the
+ * directory moves.
+ */
+export function resolveStagedCoverPdfPath(coverPayloadPath, outOverride = '', stage = '', root = ROOT) {
+  if (outOverride) return resolveCoverPdfPath(coverPayloadPath, outOverride, root);
+  const unstaged = resolveCoverPdfPath(coverPayloadPath, '', root);
+  if (!unstaged || !stage) return unstaged;
+  return join(root, 'output', stage, basename(unstaged));
 }
 
 /** Locate reports/NNN-*.md for a report number, tolerating unpadded input. */
@@ -107,6 +135,10 @@ function usage() {
   --cover PATH      Cover-letter payload JSON (optional)
   --out-cv PATH     CV PDF path (default: output/<cv-payload-name>.pdf)
   --out-cover PATH  Cover PDF path (default: generate-cover-letter's own default)
+  --stage NAME      to-apply | applied | archive-closed | general
+                     Files CV HTML/PDF and cover PDF into output/<NAME>/ instead
+                     of output/'s root. Opt-in; omitted = today's behaviour.
+                     --out-cv / --out-cover still win when also given.
   --format FMT      letter | a4 (default: a4)
   --skip-liveness   Do not check whether the posting is still open
   --skip-clean      Do not strip invisible Unicode / scrub PDF toolchain metadata
@@ -125,6 +157,7 @@ async function main() {
         cover: { type: 'string' },
         'out-cv': { type: 'string' },
         'out-cover': { type: 'string' },
+        stage: { type: 'string' },
         format: { type: 'string', default: 'a4' },
         'skip-liveness': { type: 'boolean', default: false },
         'skip-clean': { type: 'boolean', default: false },
@@ -152,6 +185,11 @@ async function main() {
     process.exitCode = 1;
     return;
   }
+  if (values.stage && !STAGES.includes(values.stage)) {
+    console.error(`build-application: invalid --stage "${values.stage}" (use ${STAGES.join(', ')})`);
+    process.exitCode = 1;
+    return;
+  }
 
   const dryRun = values['dry-run'];
   const reportNum = String(values.report).padStart(3, '0');
@@ -169,8 +207,13 @@ async function main() {
   }
 
   const stem = basename(cvPayload).replace(/\.json$/i, '');
-  const htmlPath = join(ROOT, 'output', `${stem}.html`);
-  const cvPdfPath = values['out-cv'] ? resolve(values['out-cv']) : join(ROOT, 'output', `${stem}.pdf`);
+  const outputDir = values.stage ? join(ROOT, 'output', values.stage) : join(ROOT, 'output');
+  const htmlPath = join(outputDir, `${stem}.html`);
+  const cvPdfPath = values['out-cv'] ? resolve(values['out-cv']) : join(outputDir, `${stem}.pdf`);
+
+  // Only created when --stage is given, and never on a dry run — --dry-run's
+  // whole point is to print the plan without touching the filesystem.
+  if (values.stage && !dryRun) mkdirSync(outputDir, { recursive: true });
 
   const run = (label, args) => {
     console.log(`\n▶ ${label}`);
@@ -237,7 +280,16 @@ async function main() {
   let coverBuilt = false;
   if (coverPayload) {
     const coverArgs = ['generate-cover-letter.mjs', '--payload', coverPayload, '--format', values.format, '--report', reportNum];
-    if (values['out-cover']) coverArgs.push('--out', resolve(values['out-cover']));
+    if (values['out-cover']) {
+      coverArgs.push('--out', resolve(values['out-cover']));
+    } else if (values.stage) {
+      // No explicit --out-cover, but --stage is set: tell the renderer itself
+      // to write into the stage folder, so the scrub step below (which reads
+      // the same staged path via resolveStagedCoverPdfPath) finds the file it
+      // expects instead of one left behind in output/'s root.
+      const stagedOut = resolveStagedCoverPdfPath(coverPayload, '', values.stage);
+      if (stagedOut) coverArgs.push('--out', stagedOut);
+    }
     if (!run('Cover letter', coverArgs)) {
       console.error('\n❌ Cover letter failed. The CV above was still built.');
       process.exitCode = 1;
@@ -246,7 +298,7 @@ async function main() {
     coverBuilt = true;
 
     if (!skipClean) {
-      const coverPdfPath = resolveCoverPdfPath(coverPayload, values['out-cover']);
+      const coverPdfPath = resolveStagedCoverPdfPath(coverPayload, values['out-cover'], values.stage);
       if (!coverPdfPath) {
         console.error('\n⚠️  Cover PDF path could not be resolved, so its metadata was not scrubbed.');
         console.error('   Run: node clean-artifacts.mjs <cover.pdf>');
@@ -263,8 +315,9 @@ async function main() {
   console.log(`  report      : ${reportNum}`);
   console.log(`  liveness    : ${values['skip-liveness'] ? 'SKIPPED' : 'live'}`);
   console.log(`  cleaned     : ${skipClean ? 'SKIPPED' : 'invisible Unicode + PDF toolchain metadata'}`);
+  console.log(`  stage       : ${values.stage || 'output/ (root)'}`);
   console.log(`  cv pdf      : ${cvPdfPath}`);
-  console.log(`  cover pdf   : ${coverBuilt ? (resolveCoverPdfPath(coverPayload, values['out-cover']) || 'generate-cover-letter default') : 'none'}`);
+  console.log(`  cover pdf   : ${coverBuilt ? (resolveStagedCoverPdfPath(coverPayload, values['out-cover'], values.stage) || 'generate-cover-letter default') : 'none'}`);
   console.log('=============================================');
   console.log('\nReview both PDFs before sending. Nothing here submits anything.');
 }
