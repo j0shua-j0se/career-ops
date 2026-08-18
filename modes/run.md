@@ -156,6 +156,8 @@ operator to bypass the gate is worse than any single wrong verdict.
 
 Verify by hand *before* overriding, and say in the summary which rows were overridden and why. If the posting is genuinely closed, mark the row `Discarded` via `set-status.mjs` and move on.
 
+**A 403 is not proof the posting is fine.** jobs.siemens.com serves a deleted posting's SPA error route ("An error has occurred — Page not found") with **HTTP 403**, because the origin's anti-bot layer and the app's own client-side routing are independent — the app renders its 404 for the dead id regardless of what the edge does with the request. `liveness-core.mjs` now reads that body and returns `expired` for this shape instead of `uncertain`. But when the verdict IS `uncertain` on a 403/503/5xx, that still means the body was empty or genuinely ambiguous — **re-verify by actually reading the page**, never bypass on the assumption that "403 usually means anti-bot, probably fine." Following that assumption on the Siemens posting would have produced a tailored CV and cover letter for a job that no longer exists.
+
 **The kit threshold** is `loop.min_score` from `config/profile.yml` (default `3.8`), falling back to `auto_pdf_score_threshold` only when there is no `loop:` block. One bar decides what the scan loop shortlists and what this stage builds for.
 
 **Between the threshold and 4.0:** build the kit, and say plainly in the summary that `AGENTS.md` → Ethical Use recommends against applying below 4.0/5. The kit existing is not a recommendation to send it.

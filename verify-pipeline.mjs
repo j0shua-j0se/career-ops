@@ -30,6 +30,7 @@ import {
   looksLikeScoreCell, isSeparatorRow, isHeaderRow, resolveColumns,
   normalizeTextKey, normalizeVia,
 } from './tracker-parse.mjs';
+import { REQ_NUMBER_RE } from './merge-tracker.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original).
@@ -555,13 +556,10 @@ if (missingSummary === 0) ok('Every report has a parseable Machine Summary with 
 // Recognized req/job/posting ID forms, per AGENTS.md ("Req/posting ID in
 // notes disambiguates same-title postings") — `job id` / `posting id` /
 // `requisition` / `req` / `jr` / `job` / `posting` / `ref` / `r_` followed by
-// an alphanumeric ID containing at least one digit. merge-tracker.mjs already
-// defines this exact pattern as REQ_NUMBER_RE for the same purpose (Notes-cell
-// req disambiguation), but merge-tracker.mjs has no `export` statements at
-// all — nothing in it is importable — so this is a deliberate, commented
-// duplicate rather than a silent one. Keep the two in sync by hand if either
-// changes.
-const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:#_-]*([a-z][a-z0-9-]*\d[a-z0-9-]*|\d[a-z0-9-]*)\b/i;
+// an alphanumeric ID containing at least one digit. Imported from
+// merge-tracker.mjs (the same pattern, used there for Notes-cell req
+// disambiguation) so the two components can't drift apart from a hand-synced
+// duplicate — see the import above.
 
 /**
  * The report's structured header — everything before the first `---` rule

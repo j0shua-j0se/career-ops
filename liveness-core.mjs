@@ -69,7 +69,67 @@ const BOT_CHALLENGE_PATTERNS = [
   /\bray id\b/i,
   /\bcf-ray\b/i,
   /please complete the security check/i,
+  // A captcha IS a challenge — it invites you to prove you are human.
+  /\bcaptcha\b/i,
 ];
+
+// Generic WAF / access-denial phrasing (Akamai, AWS WAF, F5, reverse proxies).
+// Not a challenge: it does not invite you to prove anything, it refuses. These
+// must outrank NOT_FOUND_BODY_PATTERNS, because a denial page often contains
+// the word "error" — but they must NOT report bot_challenge, because the
+// operator's response differs: a challenge may pass in a real browser, a
+// denial will not.
+const ACCESS_DENIED_PATTERNS = [
+  /access denied/i,
+  /request blocked/i,
+];
+
+// Explicit not-found/gone phrasing, used ONLY to override a blocking status
+// code (401/403/429/503, any 5xx) that would otherwise short-circuit to
+// `uncertain` before the body is ever read. See classifyLiveness for why this
+// exists: jobs.siemens.com serves its SPA's client-side 404 route ("An error
+// has occurred — Page not found") with HTTP 403, because the origin's
+// anti-bot layer and the SPA's own routing are independent — the app renders
+// its error page for the dead id regardless of what the edge does with the
+// request. Reading only the status code there reads a deleted posting as
+// "probably fine, just blocked" — worse than uncertain, because
+// modes/run.md trains the operator to route exactly that verdict through
+// `--skip-liveness`.
+//
+// PRECEDENCE (must hold, and is enforced by call order in classifyLiveness,
+// not by anything in this list): BOT_CHALLENGE_PATTERNS is checked first and
+// unconditionally, before status is even inspected. A challenge page often
+// contains the bare word "error" too ("we hit an error verifying you're
+// human"), so if these ran first a challenge could misread as expired. Every
+// pattern here is deliberately a specific not-found/gone phrase rather than a
+// bare generic word, precisely so it cannot out-rank a challenge marker on
+// meaning alone — but the real guarantee is the check order below.
+const NOT_FOUND_BODY_PATTERNS = [
+  /page not found/i,
+  /the page you(?:'re| are) looking for (?:doesn.t|does not) exist/i,
+  /an error has occurred/i,
+  /\b404\b/,
+  /\bjob not found\b/i,
+  /\bposition not found\b/i,
+  /no longer available/i,
+  /stellenangebot nicht gefunden/i,
+  /seite nicht gefunden/i,
+  /diese seite existiert nicht/i,
+];
+
+/**
+ * Look for an explicit not-found/gone signal in a response body that arrived
+ * with a blocking status code. Returns null (never a guess) for an empty or
+ * whitespace-only body — a blocked response with no body at all carries no
+ * evidence either way, so the existing `uncertain` verdict must stand.
+ *
+ * @param {string} bodyText - Already normalized via normalizeForMatch.
+ * @returns {RegExp|null} The matched pattern, or null.
+ */
+function notFoundBodySignal(bodyText = '') {
+  if (!bodyText || !bodyText.trim()) return null;
+  return firstMatch(NOT_FOUND_BODY_PATTERNS, bodyText);
+}
 
 const EXPIRED_URL_PATTERNS = [
   /[?&]error=true/i,
@@ -220,6 +280,19 @@ export function classifyLiveness({ status = 0, requestedUrl = '', finalUrl = '',
     return { result: 'uncertain', code: 'bot_challenge', reason: `anti-bot challenge: ${botChallenge.source}` };
   }
   if (status === 403 || status === 503) {
+    // The body outranks the status code in both directions (already true for
+    // 200 + not-found via insufficient_content/HARD_EXPIRED_PATTERNS below).
+    // This is the other direction: a blocking status whose body plainly says
+    // the posting is gone. Real Siemens case: HTTP 403, body "An error has
+    // occurred — Page not found".
+    const denied = firstMatch(ACCESS_DENIED_PATTERNS, bodyText);
+    if (denied) {
+      return { result: 'uncertain', code: 'access_blocked', reason: `HTTP ${status} (access denied: ${denied.source})` };
+    }
+    const notFound = notFoundBodySignal(bodyText);
+    if (notFound) {
+      return { result: 'expired', code: 'not_found_body', reason: `HTTP ${status} but body reads not-found: ${notFound.source}` };
+    }
     return { result: 'uncertain', code: 'access_blocked', reason: `HTTP ${status} (access blocked, likely anti-bot)` };
   }
   // Any other 5xx is a transient origin error (502/504 gateway hiccups, 500s
@@ -228,6 +301,10 @@ export function classifyLiveness({ status = 0, requestedUrl = '', finalUrl = '',
   // insufficient-content heuristic and reads as expired — and a false
   // "expired" permanently dedup-filters a real job out of future scans.
   if (status >= 500) {
+    const notFound = notFoundBodySignal(bodyText);
+    if (notFound) {
+      return { result: 'expired', code: 'not_found_body', reason: `HTTP ${status} but body reads not-found: ${notFound.source}` };
+    }
     return { result: 'uncertain', code: 'server_error', reason: `HTTP ${status} (transient server error)` };
   }
 

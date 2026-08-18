@@ -100,6 +100,111 @@ for (const status of [404, 410]) {
     : fail(`HTTP ${status} classified ${gone.result}/${gone.code}, expected expired/http_gone`);
 }
 
+// ---------------------------------------------------------------------------
+// A blocking status code (403/503/5xx) must not out-rank an explicit
+// not-found body. Regression for the Siemens near-miss: jobs.siemens.com
+// redirects a deleted posting to its SPA error route, which renders "An
+// error has occurred — Page not found" — but the server answers that page
+// with HTTP 403. The old code read the status alone and returned
+// uncertain/access_blocked, and modes/run.md trains the operator to route
+// exactly that verdict through --skip-liveness, which would have produced a
+// tailored CV/cover letter for a dead posting.
+console.log('\nliveness-core — a blocking status with a not-found body classifies as expired, not uncertain');
+
+{
+  // The real Siemens shape: HTTP 403, SPA error route body.
+  const r = classifyLiveness({
+    status: 403,
+    requestedUrl: 'https://jobs.siemens.com/en_US/externaljobs/JobDetail/516903',
+    finalUrl: 'https://jobs.siemens.com/en_US/externaljobs/Error',
+    bodyText: 'An error has occurred — Page not found',
+    applyControls: [],
+  });
+  r.result === 'expired' && r.code === 'not_found_body'
+    ? pass('Siemens shape: HTTP 403 + "An error has occurred — Page not found" -> expired/not_found_body')
+    : fail(`Siemens shape classified ${r.result}/${r.code}, expected expired/not_found_body`);
+}
+
+{
+  // Cloudflare challenge markers must still win over a blocking status, even
+  // though the body carries no not-found phrasing at all.
+  const r = classifyLiveness({ status: 403, bodyText: 'Just a moment... checking your browser before accessing this site.', applyControls: [] });
+  r.result === 'uncertain' && r.code === 'bot_challenge'
+    ? pass('HTTP 403 + Cloudflare challenge body -> uncertain/bot_challenge (unchanged)')
+    : fail(`HTTP 403 + challenge body classified ${r.result}/${r.code}, expected uncertain/bot_challenge`);
+}
+
+{
+  // No body at all: no evidence either way, prior behaviour must hold.
+  const r = classifyLiveness({ status: 403, bodyText: '', applyControls: [] });
+  r.result === 'uncertain' && r.code === 'access_blocked'
+    ? pass('HTTP 403 + empty body -> uncertain/access_blocked (unchanged)')
+    : fail(`HTTP 403 + empty body classified ${r.result}/${r.code}, expected uncertain/access_blocked`);
+}
+
+{
+  // No regression: a 200 not-found body (DATEV/Workday shape) was already
+  // caught via the existing insufficient-content / HARD_EXPIRED_PATTERNS path.
+  const r = classifyLiveness({ status: 200, bodyText: "The page you're looking for doesn't exist", applyControls: [] });
+  r.result === 'expired'
+    ? pass('HTTP 200 + not-found body still classifies expired (no regression)')
+    : fail(`HTTP 200 + not-found body classified ${r.result}, expected expired`);
+}
+
+{
+  // Precedence: a WAF denial AND a bare generic error word together must stay
+  // uncertain — the thing that must never happen is a blocked page reading as
+  // `expired`, which would permanently filter a live job out of future scans.
+  // The code is access_blocked, not bot_challenge: this body denies, it does
+  // not invite anyone to prove they are human. (A genuine challenge marker is
+  // covered separately below.)
+  const r = classifyLiveness({ status: 403, bodyText: 'Access Denied. An error occurred while processing your request.', applyControls: [] });
+  r.result === 'uncertain' && r.code === 'access_blocked'
+    ? pass('HTTP 403 + denial + generic "error" word -> uncertain (never expired)')
+    : fail(`HTTP 403 + denial + "error" classified ${r.result}/${r.code}, expected uncertain/access_blocked`);
+}
+
+{
+  // A healthy live posting behind no blocking status is unaffected.
+  const r = classifyLiveness({
+    status: 200,
+    finalUrl: 'https://boards.greenhouse.io/acme/jobs/456',
+    bodyText: 'Senior Backend Engineer. Own the payments platform end to end. Apply now.',
+    applyControls: ['Apply now'],
+  });
+  r.result === 'active' && r.code === 'apply_control_visible'
+    ? pass('a healthy 200 posting still classifies active (no regression)')
+    : fail(`healthy posting classified ${r.result}/${r.code}, expected active/apply_control_visible`);
+}
+
+{
+  // 429 isn't one of the statuses classifyLiveness short-circuits on, so it was
+  // already falling through to the normal body-reading pipeline (HARD_EXPIRED_PATTERNS
+  // catches it there) rather than the new access_blocked/server_error branches.
+  // Asserted here so the scope of this change (403/503/5xx) stays documented and
+  // doesn't silently regress if 429 gains a short-circuit later.
+  const r = classifyLiveness({ status: 429, bodyText: 'This job is no longer available.', applyControls: [] });
+  r.result === 'expired'
+    ? pass('HTTP 429 with a not-found body still classifies expired via the existing body pipeline')
+    : fail(`HTTP 429 + not-found body classified ${r.result}, expected expired`);
+}
+
+{
+  // A 5xx (server_error branch) with an unambiguous not-found body.
+  const r = classifyLiveness({ status: 500, bodyText: 'position not found', applyControls: [] });
+  r.result === 'expired' && r.code === 'not_found_body'
+    ? pass('HTTP 500 + "position not found" body -> expired/not_found_body')
+    : fail(`HTTP 500 + not-found body classified ${r.result}/${r.code}, expected expired/not_found_body`);
+}
+
+{
+  // A 5xx with a generic gateway body (no not-found phrase) must stay uncertain.
+  const r = classifyLiveness({ status: 502, bodyText: '502 Bad Gateway\nnginx', applyControls: [] });
+  r.result === 'uncertain' && r.code === 'server_error'
+    ? pass('HTTP 502 + generic gateway body still classifies uncertain/server_error (no regression)')
+    : fail(`HTTP 502 + gateway body classified ${r.result}/${r.code}, expected uncertain/server_error`);
+}
+
 // ── Drift guard: aria-hidden must not disqualify an apply control ──────────
 // The apply-control extractor runs inside page.evaluate(), so it cannot be unit
 // tested without a browser — this guards the invariant at the source level.
@@ -276,4 +381,32 @@ console.log('\nliveness-browser — iCIMS job URLs are fetched via their content
   fetchableUrl('local:jds/acme.md') === 'local:jds/acme.md'
     ? pass('an unparseable URL is returned unchanged instead of throwing')
     : fail('unparseable input mishandled');
+}
+
+// ── WAF denial vs. not-found precedence ──────────────────────────────────────
+// "Access denied" and "page not found" can appear on the same 403. A denial
+// must win: it is not evidence the posting is gone, only that we were refused.
+// Reporting it as bot_challenge would also be wrong — a challenge may pass in
+// a real browser, a denial will not, so the operator's next move differs.
+{
+  const denied = classifyLiveness({ status: 403, bodyText: 'Access denied', finalUrl: 'https://x.example/j' });
+  if (denied.result === 'uncertain' && denied.code === 'access_blocked') {
+    pass('a 403 "Access denied" body is access_blocked, not bot_challenge');
+  } else {
+    fail(`403 "Access denied" gave ${denied.result} (${denied.code})`);
+  }
+
+  const both = classifyLiveness({ status: 403, bodyText: 'Access Denied - an error has occurred', finalUrl: 'https://x.example/j' });
+  if (both.result === 'uncertain' && both.code === 'access_blocked') {
+    pass('a denial outranks not-found wording on the same 403');
+  } else {
+    fail(`403 denial+not-found gave ${both.result} (${both.code})`);
+  }
+
+  const challenge = classifyLiveness({ status: 403, bodyText: 'Please complete the captcha to continue', finalUrl: 'https://x.example/j' });
+  if (challenge.result === 'uncertain' && challenge.code === 'bot_challenge') {
+    pass('a captcha is still reported as a bot challenge, not a denial');
+  } else {
+    fail(`403 captcha gave ${challenge.result} (${challenge.code})`);
+  }
 }

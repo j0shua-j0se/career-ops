@@ -15,7 +15,7 @@
  */
 
 import { readFileSync, readdirSync, mkdirSync, renameSync, existsSync } from 'fs';
-import { join, basename, dirname } from 'path';
+import { join, basename, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
@@ -66,7 +66,9 @@ function loadFailedReportNumbers(path) {
   }
   return failed;
 }
-const FAILED_REPORT_NUMBERS = loadFailedReportNumbers(BATCH_STATE_FILE);
+// Computed inside main() (it reads batch-state.tsv from disk) so importing
+// this module never touches the filesystem — see the main-guard note above main().
+let FAILED_REPORT_NUMBERS = new Set();
 const DRY_RUN = process.argv.includes('--dry-run');
 const VERIFY = process.argv.includes('--verify');
 const MIGRATE = process.argv.includes('--migrate');
@@ -96,9 +98,36 @@ const PDF_INDEX_FILE = resolvePdfIndexPath(APPS_FILE);
  */
 const normalizeReportLink = (reportField) => normalizeLink(reportField, TRACKER_DIR, REPORTS_ROOT);
 
-// Ensure required directories exist (fresh setup)
-mkdirSync(join(CAREER_OPS, 'data'), { recursive: true });
-mkdirSync(ADDITIONS_DIR, { recursive: true });
+// Matches the req/job-number labels actually seen in this tracker's free-text
+// Notes column: `R_1488728`, `Req PRACT011038`, `Req #1311`, `REQ-2026-32061`,
+// `Job 202606-116491`, `Job ID 65136`, `Posting ID 5340`, `JR00124259`,
+// `Ref R2857957`. The label is required so we don't grab an unrelated number
+// (a salary figure, a date fragment) — only text explicitly tagged as a
+// req/job/posting/reference id counts.
+//
+// Exported (and kept at module scope, above main()) so verify-pipeline.mjs can
+// import the ONE definition instead of carrying a hand-synced duplicate.
+export const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:#_-]*([a-z][a-z0-9-]*\d[a-z0-9-]*|\d[a-z0-9-]*)\b/i;
+
+/**
+ * Extract a req/job/posting number from a tracker Notes cell, if present.
+ *
+ * Tier-3 duplicate detection (company + fuzzy role match) has no awareness of
+ * req numbers on its own, which lets two distinct postings at the same company
+ * with similarly-worded titles collapse into one row (#1524 — e.g. two TD Bank
+ * L&D postings distinguished only by `R_1494379` vs `R_1488728`). This helper
+ * pulls out that number so the caller can treat a confirmed mismatch as proof
+ * the rows are NOT duplicates, without touching cases where no number is
+ * present on either side.
+ *
+ * @param {string} notes - Raw Notes cell from a tracker row or TSV addition.
+ * @returns {string|null} Uppercased req/job number, or null when none is found.
+ */
+export function extractReqNumber(notes) {
+  if (!notes) return null;
+  const m = String(notes).match(REQ_NUMBER_RE);
+  return m ? m[1].toUpperCase() : null;
+}
 
 /**
  * Pause the async merge flow for a fixed number of milliseconds.
@@ -112,25 +141,51 @@ mkdirSync(ADDITIONS_DIR, { recursive: true });
  * @returns {Promise<void>} Resolves after the requested delay.
  */
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(res => setTimeout(res, ms));
 }
 
-let trackerLock;
-try {
-  trackerLock = await acquireTrackerLock(TRACKER_LOCK_DIR, {
-    timeoutMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_TIMEOUT_MS) || 60_000,
-    retryMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_RETRY_MS) || 75,
-    staleMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_STALE_MS) || 10 * 60_000,
-    tracker: APPS_FILE,
-  });
-  process.once('exit', () => trackerLock?.release());
-  if (trackerLock.waitMs > 0 || trackerLock.staleRecovered) {
-    console.log(`🔒 Tracker merge lock acquired (wait_ms=${trackerLock.waitMs} | attempts=${trackerLock.attempts} | stale_recovered=${trackerLock.staleRecovered})`);
+/**
+ * Run the tracker merge CLI: ensure required directories exist, acquire the
+ * shared tracker lock, read pending TSV additions from ADDITIONS_DIR, and
+ * merge them into APPS_FILE.
+ *
+ * Every side effect the script performs (directory creation, the batch-state
+ * read, the lock, every tracker/TSV read and write) lives inside this
+ * function rather than at module scope. Before this refactor the whole merge
+ * ran the instant the file was loaded — as an ES module OR via a plain
+ * `import` — so anything that wanted just REQ_NUMBER_RE (verify-pipeline.mjs)
+ * had to keep a hand-synced duplicate regex instead of importing this one.
+ * The main-guard at the bottom of this file calls main() only when this
+ * script is the process entry point (`node merge-tracker.mjs`), so importing
+ * it now never touches disk or writes the tracker.
+ *
+ * @returns {Promise<void>} Resolves once the run completes normally. Several
+ *   success/failure branches call process.exit() directly instead of
+ *   returning, matching this script's pre-refactor CLI behavior.
+ */
+async function main() {
+  // Ensure required directories exist (fresh setup)
+  mkdirSync(join(CAREER_OPS, 'data'), { recursive: true });
+  mkdirSync(ADDITIONS_DIR, { recursive: true });
+
+  FAILED_REPORT_NUMBERS = loadFailedReportNumbers(BATCH_STATE_FILE);
+
+  let trackerLock;
+  try {
+    trackerLock = await acquireTrackerLock(TRACKER_LOCK_DIR, {
+      timeoutMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_TIMEOUT_MS) || 60_000,
+      retryMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_RETRY_MS) || 75,
+      staleMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_STALE_MS) || 10 * 60_000,
+      tracker: APPS_FILE,
+    });
+    process.once('exit', () => trackerLock?.release());
+    if (trackerLock.waitMs > 0 || trackerLock.staleRecovered) {
+      console.log(`🔒 Tracker merge lock acquired (wait_ms=${trackerLock.waitMs} | attempts=${trackerLock.attempts} | stale_recovered=${trackerLock.staleRecovered})`);
+    }
+  } catch (err) {
+    console.error(`❌ ${err.message}`);
+    process.exit(1);
   }
-} catch (err) {
-  console.error(`❌ ${err.message}`);
-  process.exit(1);
-}
 
 // Canonical states and aliases
 const CANONICAL_STATES = ['Evaluated', 'Applied', 'Responded', 'Interview', 'Offer', 'Hired', 'Rejected', 'Discarded', 'SKIP'];
@@ -196,34 +251,6 @@ function validateStatus(status) {
 function extractReportNum(reportStr) {
   const m = reportStr.match(/\[(\d+)\]/);
   return m ? parseInt(m[1]) : null;
-}
-
-// Matches the req/job-number labels actually seen in this tracker's free-text
-// Notes column: `R_1488728`, `Req PRACT011038`, `Req #1311`, `REQ-2026-32061`,
-// `Job 202606-116491`, `Job ID 65136`, `Posting ID 5340`, `JR00124259`,
-// `Ref R2857957`. The label is required so we don't grab an unrelated number
-// (a salary figure, a date fragment) — only text explicitly tagged as a
-// req/job/posting/reference id counts.
-const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:#_-]*([a-z][a-z0-9-]*\d[a-z0-9-]*|\d[a-z0-9-]*)\b/i;
-
-/**
- * Extract a req/job/posting number from a tracker Notes cell, if present.
- *
- * Tier-3 duplicate detection (company + fuzzy role match) has no awareness of
- * req numbers on its own, which lets two distinct postings at the same company
- * with similarly-worded titles collapse into one row (#1524 — e.g. two TD Bank
- * L&D postings distinguished only by `R_1494379` vs `R_1488728`). This helper
- * pulls out that number so the caller can treat a confirmed mismatch as proof
- * the rows are NOT duplicates, without touching cases where no number is
- * present on either side.
- *
- * @param {string} notes - Raw Notes cell from a tracker row or TSV addition.
- * @returns {string|null} Uppercased req/job number, or null when none is found.
- */
-function extractReqNumber(notes) {
-  if (!notes) return null;
-  const m = String(notes).match(REQ_NUMBER_RE);
-  return m ? m[1].toUpperCase() : null;
 }
 
 /**
@@ -1097,4 +1124,17 @@ if (failedAdditions.length > 0) {
     failedAdditions.join(', '),
   );
   process.exit(1);
+}
+}
+
+// Direct-invocation guard: only run the merge when this file is the process
+// entry point (`node merge-tracker.mjs`, including from sync-pdf-flags.mjs's
+// and the batch runner's own `execFileSync('node', ['merge-tracker.mjs', ...])`
+// calls). A plain `import` — e.g. verify-pipeline.mjs importing REQ_NUMBER_RE
+// above — must never trigger a tracker merge as a side effect.
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  main().catch((err) => {
+    console.error(`❌ ${err?.message ?? err}`);
+    process.exitCode = 1;
+  });
 }
