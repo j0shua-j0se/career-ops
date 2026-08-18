@@ -443,3 +443,32 @@ try {
     try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 }
+
+// ── staged cover letters must land in the stage folder ──────────────────────
+// generate-cover-letter.mjs confined output paths by taking only the basename,
+// which is a correct traversal guard and a wrong path policy: a --stage build
+// rendered the cover to output/<name>.pdf while build-application looked for
+// output/<stage>/<name>.pdf. The render reported success and the scrub failed
+// with "file not found". Subfolders inside output/ are now preserved; anything
+// escaping output/ still collapses to its basename there.
+{
+  const { resolveCoverOutputPath } = await import('../generate-cover-letter.mjs');
+  const root = join(ROOT, 'output');
+  const staged = resolveCoverOutputPath({}, join(root, 'to-apply', 'x-cover.pdf'), root);
+  if (staged.includes('to-apply')) pass('a staged cover path keeps its subfolder');
+  else fail(`staged cover path was flattened: ${staged}`);
+
+  const escaped = resolveCoverOutputPath({}, '../../etc/passwd', root);
+  if (escaped.startsWith(root) && !escaped.includes('..')) {
+    pass('a traversal attempt is still confined to output/');
+  } else {
+    fail(`traversal escaped: ${escaped}`);
+  }
+
+  const inner = resolveCoverOutputPath({}, join(root, 'to-apply', '..', '..', '..', 'evil.pdf'), root);
+  if (inner.startsWith(root) && !inner.includes('..')) {
+    pass('a traversal nested inside output/ is still confined');
+  } else {
+    fail(`nested traversal escaped: ${inner}`);
+  }
+}

@@ -14,7 +14,7 @@
  */
 
 import { readFileSync, existsSync, mkdirSync } from "fs";
-import { dirname, resolve, basename, join } from "path";
+import { dirname, resolve, basename, join, relative, isAbsolute } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { parseArgs } from "util";
 import { assertFacts } from "./verify-cv-facts.mjs";
@@ -23,10 +23,29 @@ import { resolveTemplate } from "./cv-templates.mjs";
 const OUTPUT_ROOT = resolve("output");
 
 /** Sanitize a requested output filename and keep it under the output directory. */
+function sanitizeSegment(seg) {
+  return seg.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/\.{2,}/g, "-");
+}
+
+// Confine an output path to OUTPUT_ROOT without flattening it.
+//
+// This used to take only the basename, so every path landed directly in
+// output/. That is a correct traversal guard and a wrong path policy: once
+// output/ grew subfolders (applied/, to-apply/ — see output/README.md) and
+// build-application.mjs gained --stage, a staged cover letter was rendered to
+// output/<name>.pdf while the caller went looking in output/<stage>/<name>.pdf.
+// The render reported success and the next step failed with "file not found".
+//
+// Subdirectories inside OUTPUT_ROOT are now preserved, each segment sanitized.
+// Anything resolving outside OUTPUT_ROOT still collapses to its basename in the
+// root — the guard is unchanged for the case it was written for.
 function safeOutputPath(raw) {
-  // Derive a sanitized filename from raw string (strip path separators and dots)
-  const filename = basename(raw).replace(/[^a-zA-Z0-9._-]/g, "-").replace(/\.{2,}/g, "-");
-  return join(OUTPUT_ROOT, filename);
+  const rel = relative(OUTPUT_ROOT, resolve(raw));
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+    return join(OUTPUT_ROOT, sanitizeSegment(basename(raw)));
+  }
+  const parts = rel.split(/[/\\]+/).filter(Boolean).map(sanitizeSegment);
+  return join(OUTPUT_ROOT, ...parts);
 }
 
 /** Assert that a payload object contains the required keys. */
@@ -280,7 +299,9 @@ Usage:
 
   payload.output_path = resolveCoverOutputPath(payload, args.out);
 
-  if (!existsSync(OUTPUT_ROOT)) mkdirSync(OUTPUT_ROOT, { recursive: true });
+  // Create the payload's own directory, not just output/ — a staged path
+  // (output/to-apply/...) needs its subfolder to exist before the render.
+  mkdirSync(dirname(payload.output_path), { recursive: true });
 
   try {
     const html = buildHtml(payload);
