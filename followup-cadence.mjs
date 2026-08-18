@@ -164,8 +164,29 @@ export function parseDate(dateStr) {
 export function parseAppliedDate(notes, options = {}) {
   if (!notes) return null;
   const validateCalendar = options.requireValidCalendarDate === true;
-  for (const m of String(notes).matchAll(/\bapplied\s+~?(\d{4}-\d{2}-\d{2})(?![\w-])/gi)) {
-    if (!validateCalendar || isRealCalendarDate(m[1])) return m[1];
+  const text = String(notes);
+  const ok = (d) => !validateCalendar || isRealCalendarDate(d);
+
+  // Prefer a date that OPENS a note segment. set-status.mjs writes its notes as
+  // "Applied YYYY-MM-DD ..." and appends them "; "-separated, so an
+  // authoritative apply date always begins a segment. A date mentioned in
+  // passing sits mid-clause -- and one really did: row 16's notes read
+  // "...distinct requisition from row #5 (same employer, applied 2026-08-05 at
+  // 4.6). ... Applied 2026-08-18 by email...", where the FIRST match describes a
+  // DIFFERENT row, and first-match-wins seeded a follow-up six days in the past.
+  //
+  // This keeps first-match-wins, which is deliberate elsewhere:
+  // merge-tracker.mjs leads with existing notes precisely so a re-evaluation
+  // cannot take over an established apply date, and a later date in the same
+  // cell is usually a different event ("discarded 2026-06-18"). Anchoring
+  // narrows WHICH matches count; it does not reverse their order.
+  for (const m of text.matchAll(/(?:^|[;.\n|])\s*applied\s+~?(\d{4}-\d{2}-\d{2})(?![\w-])/gi)) {
+    if (ok(m[1])) return m[1];
+  }
+  // Fall back to the original unanchored scan so hand-written notes in any
+  // shape keep working exactly as they did before.
+  for (const m of text.matchAll(/\bapplied\s+~?(\d{4}-\d{2}-\d{2})(?![\w-])/gi)) {
+    if (ok(m[1])) return m[1];
   }
   return null;
 }
