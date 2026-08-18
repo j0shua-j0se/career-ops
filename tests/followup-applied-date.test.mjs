@@ -44,3 +44,18 @@ for (const [label, notes, want] of cases) {
 const bad = parseAppliedDate('Applied 2026-02-31 by email', { requireValidCalendarDate: true });
 if (bad === null) pass('an impossible calendar date is rejected under requireValidCalendarDate');
 else fail(`impossible date returned ${JSON.stringify(bad)}`);
+
+// ── cross-reference clauses are stripped, matching extractReqNumber ──────────
+// A Notes cell that names another row must not donate its dates. merge-tracker
+// hit this first (row 5 inheriting row 16's req number); the same stripper is
+// now shared via tracker-parse.mjs so the two scanners cannot drift.
+for (const [label, notes, want] of [
+  ['a parenthesised row reference does not donate its date',
+   'Row 5 (applied 2026-08-05). Applied 2026-08-18 by email', '2026-08-18'],
+  ['a cross-reference opening a segment is still stripped',
+   '. row 16 (Applied 2026-08-05); Applied 2026-08-18', '2026-08-18'],
+]) {
+  const got = parseAppliedDate(notes);
+  if (got === want) pass(label);
+  else fail(`${label} — got ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`);
+}

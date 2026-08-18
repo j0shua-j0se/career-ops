@@ -383,3 +383,30 @@ export function normalizeVia(name) {
 export function normalizeTextKey(value) {
   return String(value).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]/gu, '');
 }
+
+// Clauses in a Notes cell that point at a DIFFERENT tracker row.
+//
+// Notes are free text and rows legitimately cross-reference each other — "row
+// #16 (Job ID 7716), a second Primetals requisition" is good practice and
+// AGENTS.md asks for exactly that disambiguation. But any scanner reading the
+// cell for THIS row's own facts will happily pick up the cited row's instead.
+// It has happened twice, in two different scanners:
+//
+//   extractReqNumber  — row 5 resolved to 7716, which is row 16's requisition,
+//                       silently disarming the same-req duplicate guard.
+//   parseAppliedDate  — row 16 resolved to row 5's apply date, seeding a
+//                       follow-up six days in the past.
+//
+// Lives here because merge-tracker.mjs and followup-cadence.mjs must agree on
+// what a cross-reference looks like; two copies would drift.
+//
+// Cue phrases ("see also") were tried first and were the wrong shape — the
+// real second mention in row 5's notes reads "Applies to the KI requisition
+// only - row 16 (Job ID 7716, DevOps/MLOps)" and carries no cue. The reliable
+// signal is the row reference itself.
+export const CROSS_REFERENCE_RE = /\brow\s*#?\d+\s*\([^)]*\)|\([^)]*\brow\s*#?\d+[^)]*\)/gi;
+
+/** Blank out clauses that describe another row, so a scanner reads only this row's own text. */
+export function stripCrossReferences(notes) {
+  return String(notes || '').replace(CROSS_REFERENCE_RE, ' ');
+}

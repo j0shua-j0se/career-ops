@@ -15,7 +15,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join, dirname, relative, sep } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import yaml from 'js-yaml';
-import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
+import { resolveColumns, parseTrackerRow, stripCrossReferences } from './tracker-parse.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
@@ -164,7 +164,9 @@ export function parseDate(dateStr) {
 export function parseAppliedDate(notes, options = {}) {
   if (!notes) return null;
   const validateCalendar = options.requireValidCalendarDate === true;
-  const text = String(notes);
+  // Blank out clauses describing another row before scanning; merge-tracker's
+  // extractReqNumber was bitten by the same thing and uses the same stripper.
+  const text = stripCrossReferences(notes);
   const ok = (d) => !validateCalendar || isRealCalendarDate(d);
 
   // Prefer a date that OPENS a note segment. set-status.mjs writes its notes as

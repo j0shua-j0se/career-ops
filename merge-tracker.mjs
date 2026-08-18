@@ -21,7 +21,7 @@ import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
 import { roleFuzzyMatch } from './role-matcher.mjs';
 import { parsePdfIndex } from './find.mjs';
-import { LEGACY_COLMAP, detectColumns, resolveScoreStatus, normalizeVia, SEPARATOR_ROW_RE } from './tracker-parse.mjs';
+import { LEGACY_COLMAP, detectColumns, resolveScoreStatus, normalizeVia, SEPARATOR_ROW_RE, stripCrossReferences } from './tracker-parse.mjs';
 import { resolveTrackerPath, resolveWorkspaceRoot, resolvePdfIndexPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, cell } from './tracker-utils.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
@@ -146,7 +146,7 @@ const CROSS_REFERENCE_RE = /\brow\s*#?\d+\s*\([^)]*\)|\([^)]*\brow\s*#?\d+[^)]*\
  */
 export function extractReqNumber(notes) {
   if (!notes) return null;
-  const m = String(notes).replace(CROSS_REFERENCE_RE, ' ').match(REQ_NUMBER_RE);
+  const m = stripCrossReferences(notes).match(REQ_NUMBER_RE);
   return m ? m[1].toUpperCase() : null;
 }
 
