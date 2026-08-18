@@ -166,7 +166,79 @@ export function toCandidate(message) {
  * keeps the read proportionate to the task and cuts the message count the agent
  * has to pull through context.
  */
-export function buildGmailQuery(apps, { days = 30 } = {}) {
+// Legal forms stripped when deriving a searchable variant. A recruiter writes
+// "moresophy", not "MORESOPHY GmbH".
+const LEGAL_FORM_RE = /[\s,]*\b(?:gmbh(?:\s*&\s*co\.?\s*kgaa?)?|mbh|ag|se|kgaa|kg|ohg|eg|e\.?\s?v\.?|ltd\.?|limited|inc\.?|corp\.?|co\.?|b\.?v\.?|n\.?v\.?|s\.?a\.?|s\.?r\.?l\.?|plc|oy|ab|a\/s)\.?$/i;
+
+// Recruiting vocabulary. Two jobs: it rescues mail from outsourced ATS domains
+// that never name the employer in a matchable way (a Primetals rejection came
+// from donotreply@mssa.com, a Craftview acknowledgement from noreply@hrworks.de),
+// and it qualifies company names too common to search bare.
+const JOB_CONTEXT = ['Bewerbung', 'Absage', 'Vorstellungsgespräch', 'application', 'interview', 'Werkstudent', 'Praktikum', 'recruiting'];
+
+// Single short words that are also ordinary nouns or huge consumer brands.
+// Searching "Amazon" bare returns vouchers and newsletters, burying the one
+// real reply. Paired with JOB_CONTEXT they still match recruiting mail.
+const TOO_GENERIC = new Set(['amazon', 'apple', 'orange', 'shell', 'next', 'sky', 'meta', 'square', 'oracle', 'sap']);
+
+/**
+ * Search terms for one tracker company name.
+ *
+ * A tracker label is not a search string. "FAU Erlangen-Nuernberg (Lehrstuhl
+ * FAPS)" is an internal disambiguator: it carries an ASCII-folded "Nuernberg"
+ * and a parenthetical, and no real email contains it — so the row it covers was
+ * invisible to the sweep while being a live application. Emit the shapes a
+ * sender would actually write instead.
+ */
+export function companySearchTerms(rawName) {
+  const name = String(rawName || '').trim();
+  if (!name || name === '?') return [];
+  const terms = new Set();
+  const add = (t) => {
+    const v = String(t || '').trim().replace(/"/g, '');
+    if (v.length >= 3) terms.add(v);
+  };
+
+  const noParen = name.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  add(noParen);
+  add(noParen.replace(LEGAL_FORM_RE, '').trim());
+
+  // A parenthetical often holds the distinctive part ("(Lehrstuhl FAPS)"), so
+  // mine it for the longest all-caps token or a multi-word remainder.
+  for (const inner of name.match(/\(([^)]*)\)/g) || []) {
+    const body = inner.slice(1, -1).trim();
+    const caps = (body.match(/\b[A-Z]{3,}\b/g) || []);
+    caps.forEach(add);
+    if (!caps.length) add(body.replace(LEGAL_FORM_RE, '').trim());
+  }
+  // The leading token of a compound label is usually the institution ("FAU").
+  const lead = noParen.split(/[\s,-]+/)[0];
+  if (lead && lead.length >= 3 && lead.toLowerCase() !== noParen.toLowerCase()) add(lead);
+
+  return [...terms];
+}
+
+/** True when a term is too common to be searched on its own. */
+export function isTooGenericTerm(term) {
+  const t = String(term || '').trim();
+  if (!t || /\s/.test(t)) return false;          // multi-word terms are specific enough
+  return TOO_GENERIC.has(t.toLowerCase()) || t.length <= 4;
+}
+
+/**
+ * Build a Gmail search scoped to the companies actually in flight.
+ *
+ * Sweeping the whole inbox would read mail that has nothing to do with the job
+ * search. Scoping to companies in `Applied`/`Responded`/`Interview`/`Offer`
+ * keeps the read proportionate to the task and cuts the message count the agent
+ * has to pull through context.
+ *
+ * Measured failure this was written against: the old builder emitted the raw
+ * tracker label for every company, so a live FAU application matched nothing
+ * while a bare "Amazon" matched every voucher mail — and the query named none
+ * of the three companies that had actually replied that day.
+ */
+export function buildGmailQuery(apps, { days = 30, maxLength = 1800 } = {}) {
   const active = new Set(['Applied', 'Responded', 'Interview', 'Offer']);
   const companies = [...new Set(
     apps.filter((a) => active.has(a.status))
@@ -174,8 +246,30 @@ export function buildGmailQuery(apps, { days = 30 } = {}) {
       .filter((c) => c && c !== '?'),
   )];
   if (companies.length === 0) return null;
-  const terms = companies.map((c) => `"${c.replace(/"/g, '')}"`).join(' OR ');
-  return `newer_than:${days}d (${terms})`;
+
+  const context = JOB_CONTEXT.join(' OR ');
+  const clauses = [];
+  for (const company of companies) {
+    const variants = companySearchTerms(company);
+    if (!variants.length) continue;
+    const generic = variants.filter(isTooGenericTerm);
+    const specific = variants.filter((v) => !isTooGenericTerm(v));
+    const quote = (t) => (/\s/.test(t) ? `"${t}"` : t);
+    if (specific.length) clauses.push(specific.map(quote).join(' OR '));
+    // A too-generic name still gets in, but only alongside recruiting words.
+    for (const g of generic) clauses.push(`(${quote(g)} (${context}))`);
+  }
+  if (!clauses.length) return null;
+
+  // Cap the length so Gmail does not reject the query outright; dropping the
+  // tail is visible in `companies`, unlike an unusable query.
+  const kept = [];
+  let used = 0;
+  for (const c of clauses) {
+    if (used + c.length + 4 > maxLength) break;
+    kept.push(c); used += c.length + 4;
+  }
+  return `newer_than:${days}d ((${kept.join(') OR (')}) OR (${context}))`;
 }
 
 // ── Plan ────────────────────────────────────────────────────────────────────
