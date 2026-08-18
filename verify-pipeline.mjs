@@ -15,6 +15,7 @@
  * 10. Every report file has a tracker row referencing it (warning — see #1425)
  * 11. Via channel consistency (see #1596)
  * 12. No # value reused across 2+ tracker rows (error — see #1704)
+ * 13. Every report carries a parseable Machine Summary with a score: field (warning)
  *
  * Run: node career-ops/verify-pipeline.mjs
  */
@@ -22,6 +23,7 @@
 import { readFileSync, readdirSync, existsSync, mkdirSync, unlinkSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { load as yamlLoad } from 'js-yaml';
 import {
   looksLikeScoreCell, isSeparatorRow, isHeaderRow, resolveColumns,
   normalizeTextKey, normalizeVia,
@@ -283,13 +285,21 @@ const REPORT_FILE_RE = /^(\d+)-(.+)-\d{4}-\d{2}-\d{2}\.md$/;
 // can never disagree about whether two roles are the same (#2393).
 const normalizeKey = normalizeTextKey;
 
+// Machine Summary YAML fence matcher, shared by extractRole() below and
+// Check 13 further down so the two can never quietly drift on what counts
+// as "the fence" — the same shape analyze-patterns.mjs's parseMachineSummary()
+// uses. Returns the regex match (group 1 is the raw fence body) or null.
+function matchMachineSummaryFence(reportContent) {
+  return reportContent.match(/##\s*Machine Summary\s*\n+```(?:yaml|yml|json)?\s*\n([\s\S]*?)\n```/i);
+}
+
 // Role comes from the report body: the Machine Summary YAML fence when
 // present (field names are exact by contract), else the title line
 // "# Evaluación: {Company} — {Role}". Reports where neither parses are
 // skipped rather than grouped by company alone, which would false-positive
 // on two different roles at the same company.
 function extractRole(reportContent) {
-  const fence = reportContent.match(/##\s*Machine Summary\s*\n+```(?:yaml|yml|json)?\s*\n([\s\S]*?)\n```/i);
+  const fence = matchMachineSummaryFence(reportContent);
   if (fence) {
     const m = fence[1].match(/^role:\s*["']?(.+?)["']?\s*$/m);
     if (m && m[1].trim()) return m[1].trim();
@@ -447,6 +457,50 @@ for (const [num, group] of numGroups) {
   }
 }
 if (dupeNums === 0) ok('No duplicate tracker numbers');
+
+// --- Check 13: Every report has a parseable Machine Summary with score: ---
+// analyze-patterns.mjs, upskill.mjs and salary-gap.mjs all read fields out of
+// the '## Machine Summary' YAML fence. A report missing the block — or
+// carrying an empty/unparseable fence, or one with no score: field — doesn't
+// error in any of those tools; it just contributes nothing, so the analysis
+// comes back quietly smaller instead of complaining. That is the failure
+// mode this codebase keeps getting bitten by (a missing input producing a
+// quieter answer, not a louder one), so this check names the file plainly.
+//
+// Warning, not error: reports/*-RESERVED.md sentinels don't match
+// REPORT_FILE_RE (no trailing date), so reportFiles already excludes them —
+// nothing extra needed to skip reservation placeholders. The remaining
+// offenders are historical, pre-convention reports whose tracker rows are
+// already terminal; failing the whole health check for them would just
+// train the user to ignore it.
+let missingSummary = 0;
+for (const name of reportFiles) {
+  let reportContent;
+  try {
+    reportContent = readFileSync(join(REPORTS_DIR, name), 'utf-8');
+  } catch {
+    continue; // Unreadable — Check 10's orphan scan already surfaces this file.
+  }
+  const fence = matchMachineSummaryFence(reportContent);
+  let parsed = null;
+  if (fence) {
+    const raw = fence[1].trim();
+    if (raw) {
+      try {
+        const loaded = yamlLoad(raw);
+        if (loaded && typeof loaded === 'object' && !Array.isArray(loaded)) parsed = loaded;
+      } catch {
+        // Unparseable fence — parsed stays null, reported below.
+      }
+    }
+  }
+  const hasScore = parsed && parsed.score !== undefined && parsed.score !== null && String(parsed.score).trim() !== '';
+  if (!hasScore) {
+    warn(`No usable Machine Summary (score: missing/unparseable) — invisible to analyze-patterns.mjs, upskill.mjs and salary-gap.mjs: reports/${name}`);
+    missingSummary++;
+  }
+}
+if (missingSummary === 0) ok('Every report has a parseable Machine Summary with a score');
 
 // --- Summary ---
 console.log('\n' + '='.repeat(50));
