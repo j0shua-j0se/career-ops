@@ -67,6 +67,7 @@
  * tracker remains the source of truth for state. Read by funnel-velocity.mjs.
  */
 
+import { spawnSync } from 'child_process';
 import { readFileSync, existsSync, appendFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -122,9 +123,16 @@ for (let i = 0; i < rawArgs.length; i++) {
       failUsage(`Missing value for ${a}`);
     }
     // --row/--report name a row by number; a non-numeric value is a typo, and
-    // silently treating it as "no match" would hide the mistake.
-    if ((a === '--row' || a === '--report') && !/^\d+$/.test(value)) {
-      failUsage(`${a} expects a positive integer, got "${value}"`);
+    // silently treating it as "no match" would hide the mistake. A comma list
+    // is accepted and fanned out below (AGENTS.md documents `--report 3,5,6`).
+    if (a === '--row' || a === '--report') {
+      const tokens = value.split(',');
+      const bad = tokens.find(t => !/^\d+$/.test(t.trim()) || Number(t.trim()) < 1);
+      if (bad !== undefined) {
+        failUsage(tokens.length > 1
+          ? `${a} takes positive integers separated by commas; "${bad.trim()}" is not one`
+          : `${a} expects a positive integer, got "${value}"`);
+      }
     }
     flags[VALUE_FLAGS[a]] = value;
     i++;
@@ -143,6 +151,61 @@ if (flags.row !== null && flags.report !== null) {
   failUsage('--row and --report are mutually exclusive — they name different number spaces');
 }
 const explicitSelector = flags.row !== null || flags.report !== null;
+
+// ── comma fan-out ────────────────────────────────────────────────
+//
+// AGENTS.md documents `--report 3,5,6` and explicitly warns against wrapping
+// this script in a shell loop, because a loop swallows the per-row exit codes.
+// The documented form never worked: the selector had to match /^\d+$/, so a
+// list printed usage and exited 1, and the only way to bulk-update was the
+// loop the docs warn against. Applying a score floor to 16 rows hit exactly
+// that.
+//
+// The fan-out re-invokes THIS script once per selector rather than looping
+// inside it. That is deliberate: every child runs the identical validated,
+// locked, atomic single-row path, so no guard can be weakened or accidentally
+// hoisted out of the loop. One row's failure does not stop the rest, each row
+// reports its own line, and a single failure makes the whole run exit non-zero
+// — the property a shell loop loses.
+const selectorFlag = flags.row !== null ? '--row' : '--report';
+const selectorList = (flags.row ?? flags.report ?? '').split(',').map(t => t.trim()).filter(Boolean);
+const uniqueSelectors = [...new Set(selectorList)];
+
+if (explicitSelector && selectorList.length > 1) {
+  const dropped = selectorList.length - uniqueSelectors.length;
+  if (dropped > 0 && !flags.json) {
+    console.error(`ℹ️  ${dropped} duplicate selector(s) collapsed — each row is written once.`);
+  }
+  const childBase = [];
+  for (let i = 0; i < rawArgs.length; i++) {
+    if (rawArgs[i] === selectorFlag) { i++; continue; }
+    childBase.push(rawArgs[i]);
+  }
+  const results = [];
+  let failed = 0;
+  for (const one of uniqueSelectors) {
+    const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), selectorFlag, one, ...childBase], {
+      encoding: 'utf-8',
+    });
+    const okRow = r.status === 0;
+    if (!okRow) failed++;
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+    results.push({ selector: Number(one), ok: okRow, exitCode: r.status, output: out });
+    if (!flags.json) console.log(out || `${okRow ? '✅' : '❌'} ${selectorFlag} ${one}`);
+  }
+  if (flags.json) {
+    console.log(JSON.stringify({ fanOut: true, flag: selectorFlag, total: uniqueSelectors.length, failed, results }, null, 2));
+  } else {
+    console.log(`\n${uniqueSelectors.length - failed}/${uniqueSelectors.length} row(s) updated${failed ? `, ${failed} failed` : ''}.`);
+  }
+  process.exit(failed > 0 ? EXIT_USAGE : EXIT_OK);
+}
+
+// Past this point exactly one selector is in play.
+if (explicitSelector) {
+  if (flags.row !== null) flags.row = uniqueSelectors[0];
+  else flags.report = uniqueSelectors[0];
+}
 
 if (explicitSelector) {
   if (positional.length !== 1) {
