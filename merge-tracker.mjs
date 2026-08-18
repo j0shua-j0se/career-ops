@@ -109,6 +109,27 @@ const normalizeReportLink = (reportField) => normalizeLink(reportField, TRACKER_
 // import the ONE definition instead of carrying a hand-synced duplicate.
 export const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:#_-]*([a-z][a-z0-9-]*\d[a-z0-9-]*|\d[a-z0-9-]*)\b/i;
 
+// Clauses that point at a DIFFERENT row. A Notes cell is free text and rows
+// legitimately cross-reference each other — "See also row #16 (Job ID 7716), a
+// second Primetals requisition" is good practice, and AGENTS.md asks for
+// exactly that kind of disambiguation. But first-match scanning read the cited
+// number as the row's OWN req: row 5 (Primetals KI) resolved to 7716, which is
+// row 16's DevOps/MLOps requisition, while row 5 never states its own.
+//
+// That silently disarms the guard below rather than breaking it loudly. The
+// guard only fires on DISAGREEMENT, so a wrongly-inherited number cannot create
+// a false split — it removes a true one, letting two genuinely distinct
+// same-company postings fall back to fuzzy title matching, which is precisely
+// what the req number exists to override.
+//
+// Stripped before scanning: a row reference together with the parenthetical
+// that follows it ("row #16 (Job ID 7716)"), and any parenthetical that names
+// another row. Cue phrases like "see also" were tried first and were the wrong
+// shape — the second mention in row 5's notes reads "Applies to the KI
+// requisition only - row 16 (Job ID 7716, DevOps/MLOps)", which carries no cue
+// at all. The reliable signal is the row reference itself.
+const CROSS_REFERENCE_RE = /\brow\s*#?\d+\s*\([^)]*\)|\([^)]*\brow\s*#?\d+[^)]*\)/gi;
+
 /**
  * Extract a req/job/posting number from a tracker Notes cell, if present.
  *
@@ -125,7 +146,7 @@ export const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|
  */
 export function extractReqNumber(notes) {
   if (!notes) return null;
-  const m = String(notes).match(REQ_NUMBER_RE);
+  const m = String(notes).replace(CROSS_REFERENCE_RE, ' ').match(REQ_NUMBER_RE);
   return m ? m[1].toUpperCase() : null;
 }
 
