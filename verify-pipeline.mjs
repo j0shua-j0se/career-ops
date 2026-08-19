@@ -759,10 +759,33 @@ for (const name of reportFiles) {
 let strongDupes = 0;
 const flaggedPairs = new Set();
 function pairKey(a, b) { return a < b ? `${a} ${b}` : `${b} ${a}`; }
+
+// Report filename -> the status of the tracker row that links to it. Built from
+// the report LINK rather than the report number so a row whose link and number
+// disagree resolves to the file actually cited.
+const statusByReportFile = new Map();
+for (const e of entries) {
+  const linked = (e.report || '').match(/\]\(([^)]+)\)/);
+  if (!linked) continue;
+  const file = linked[1].split('/').pop();
+  if (file) statusByReportFile.set(file, e.status);
+}
+
+// Two reports for one requisition stop being a problem once the tracker has
+// reconciled them — one row Discarded, the other carrying the application. That
+// IS the fix, so continuing to warn makes the warning outlive it and re-fire
+// forever; the same rule already governs the tracker-row duplicate check below.
+// A pair with no tracker row on either side is still flagged: nothing has
+// resolved it yet.
+function pairIsReconciled(a, b) {
+  return statusByReportFile.get(a) === 'Discarded' || statusByReportFile.get(b) === 'Discarded';
+}
+
 function flagPair(a, b, reason) {
   const key = pairKey(a, b);
   if (flaggedPairs.has(key)) return;
   flaggedPairs.add(key);
+  if (pairIsReconciled(a, b)) return;
   warn(`Likely duplicate reports (${reason}): ${a}, ${b}`);
   strongDupes++;
 }

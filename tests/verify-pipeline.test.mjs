@@ -179,13 +179,32 @@ try {
   writeFileSync(join(reportsDir2, '043-zeiss-2026-08-12.md'),
     makeReport({ company: 'ZEISS', role: 'Internship Machine Learning' }));
   writeTracker(tracker2, [
-    '| 12 | 2026-08-06 | ZEISS (Carl Zeiss Microscopy GmbH) | Internship Machine Learning | 3.9/5 | Discarded | ❌ | [12](reports/012-zeiss-2026-08-06.md) | dup of 43 |',
+    // Both rows LIVE on purpose: this fixture exercises the employer-variant
+    // signal, and a Discarded row would suppress the pair via the
+    // reconciliation rule tested separately below.
+    '| 12 | 2026-08-06 | ZEISS (Carl Zeiss Microscopy GmbH) | Internship Machine Learning | 3.9/5 | Evaluated | ❌ | [12](reports/012-zeiss-2026-08-06.md) | pending |',
     '| 43 | 2026-08-12 | ZEISS | Internship Machine Learning | 4.0/5 | Evaluated | ❌ | [43](reports/043-zeiss-2026-08-12.md) | ok |',
   ]);
   let out = verify(reportsDir2, tracker2);
   check('ZEISS legal-form/parenthetical variant + identical role is flagged',
     /⚠️[^\n]*Likely duplicate reports[^\n]*012-zeiss-2026-08-06\.md, 043-zeiss-2026-08-12\.md/.test(out.stdout), out.stdout);
   check('ZEISS variant finding stays warning-level (exit 0)', out.status === 0, `status=${out.status}`);
+
+  // ── 1b. Once the tracker has reconciled the pair, it stops being flagged ──
+  // A report cannot be deleted — Check 10 treats a report with no tracker row
+  // as an orphan, and the reports ARE the audit trail. So the only available
+  // resolution for two reports of one requisition is to Discard one row and
+  // let the other carry the application. If that did not clear the warning,
+  // this check would have no reachable clean state and would warn forever,
+  // which is how a health check teaches its reader to skim past warnings.
+  writeTracker(tracker2, [
+    '| 12 | 2026-08-06 | ZEISS (Carl Zeiss Microscopy GmbH) | Internship Machine Learning | 3.9/5 | Discarded | ❌ | [12](reports/012-zeiss-2026-08-06.md) | dup of 43, resolved |',
+    '| 43 | 2026-08-12 | ZEISS | Internship Machine Learning | 4.0/5 | Applied | ❌ | [43](reports/043-zeiss-2026-08-12.md) | the surviving row |',
+  ]);
+  out = verify(reportsDir2, tracker2);
+  check('a duplicate pair reconciled by Discarding one row is NOT flagged',
+    !/Likely duplicate reports[^\n]*012-zeiss/.test(out.stdout), out.stdout);
+  check('the reconciled fixture exits 0', out.status === 0, `status=${out.status}`);
 
   // ── 2. Legal-form + country-suffix variant, identical role → flagged ────
   resetDupeFixture();
