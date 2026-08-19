@@ -358,7 +358,22 @@ function releaseNumbers(ranges) {
   }
 }
 
-/** One 9-column TSV per row, merged by `merge-tracker.mjs` — never edit the tracker directly. */
+/**
+ * One TSV per row, merged by `merge-tracker.mjs` — never edit the tracker directly.
+ *
+ * The posting URL is appended as the optional trailing field, and that is
+ * load-bearing rather than decorative: merge-tracker matches on URL FIRST and
+ * treats a confirmed mismatch on both sides as proof two rows are NOT
+ * duplicates. Without it the only signal left is fuzzy company+role, which
+ * collapses distinct postings whenever the board publishes no employer.
+ *
+ * Observed 2026-08-19: stellenwerk lists postings without a company, so two
+ * different Nuremberg HiWi roles ("Prototype Engineer" and "Test Engineer")
+ * arrived as company `?` with near-identical titles, fuzzy-matched, and the
+ * second overwrote the first as a "downgrade" — nine promoted candidates became
+ * eight tracker rows and one real posting vanished silently. The loop held both
+ * URLs the whole time and was discarding them here.
+ */
 function writeTrackerAdditions(candidates, date) {
   mkdirSync(TSV_DIR, { recursive: true });
   const cell = (v) => String(v ?? '').replace(/[\t\r\n]+/g, ' ').trim();
@@ -367,9 +382,14 @@ function writeTrackerAdditions(candidates, date) {
     if (!c.reportNum) continue;
     const slug = (cell(c.company) || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const note = `triage-only from loop wave ${c.wave} — full evaluation pending`;
+    const url = cell(c.url);
     const row = [
       c.reportNum, date, cell(c.company) || '?', cell(c.title) || 'Unknown role',
       'Evaluated', `${c.score.toFixed(1)}/5`, '❌', '—', note,
+      // Detected by its http(s):// prefix, so it stays order-independent with
+      // the optional location/via fields. Omitted entirely when absent rather
+      // than written empty, which would read as a confirmed-blank URL.
+      ...(/^https?:\/\//i.test(url) ? [url] : []),
     ].join('\t');
     writeFileSync(join(TSV_DIR, `${String(c.reportNum).padStart(3, '0')}-${slug}.tsv`), `${row}\n`, 'utf-8');
     written++;

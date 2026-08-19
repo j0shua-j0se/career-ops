@@ -564,6 +564,92 @@ const HEADER_VIA = `# Applications Tracker
   rmSync(sb.dir, { recursive: true, force: true });
 }
 
+// ── Test 15c: two unknown-employer rows are not merged on a fuzzy title ─────
+// The failure this pins DESTROYED data rather than duplicating it. stellenwerk
+// publishes no employer, so two genuinely different Nuremberg HiWi postings
+// arrived as company `?` with titles differing only in "Prototype Engineer" vs
+// "Test Engineer". Tier-3 fuzzy matching treated them as one posting, the
+// second overwrote the first as a "downgrade", and nine promoted candidates
+// became eight tracker rows with no warning anywhere.
+//
+// With no employer and no matching URL there is nothing to identify a posting
+// by except its title, so a FUZZY title match is not enough: the role tokens
+// must be identical. An extra row is visible and cheap to merge; a dropped
+// posting is neither.
+{
+  const UNKNOWN_ROWS = `# Applications Tracker
+
+| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|-----|------|-------|--------|-----|--------|-------|
+| 1 | 2026-01-05 | ? | — | Hiwi Working Student Opportunity (m/f/d) Nuremberg Prototype Engineer Working Student (m/f/d) | 3.9/5 | Evaluated | ❌ | — | triage-only |
+`;
+  const DIFFERENT_ROLE = '2\t2026-01-05\t?\tHiwi Working Student Opportunity (m/f/d) Test Engineer Working Student (m/f/d) Nuremberg\tEvaluated\t3.8/5\t❌\t—\ttriage-only\n';
+  const sb = makeSandbox(UNKNOWN_ROWS, { '2-unknown.tsv': DIFFERENT_ROLE });
+  const res = runScript('merge-tracker.mjs', [], sb);
+  const rows = dataRows(sb.tracker);
+  if (rows.length === 2) {
+    pass('two unknown-employer postings with different roles stay two rows');
+  } else {
+    fail(`unknown-employer rows collapsed: expected 2 rows, got ${rows.length}\n${res.stdout}`);
+  }
+  if (rows.some(r => r.includes('Prototype Engineer')) && rows.some(r => r.includes('Test Engineer'))) {
+    pass('neither unknown-employer posting was overwritten by the other');
+  } else {
+    fail(`a posting was lost:\n${rows.join('\n')}`);
+  }
+  rmSync(sb.dir, { recursive: true, force: true });
+}
+
+// ── Test 15d: the same role under an unknown employer still dedups ──────────
+// The guard above must not stop a genuine re-listing from merging. The titles
+// differ only by the gender marker, which roleTokens() strips, so the two are
+// the same posting and belong in one row.
+{
+  const SAME_ROLE_TRACKER = `# Applications Tracker
+
+| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|-----|------|-------|--------|-----|--------|-------|
+| 1 | 2026-01-05 | ? | — | Werkstudent Data Engineering (m/w/d) | 3.9/5 | Evaluated | ❌ | — | triage-only |
+`;
+  const SAME_ROLE = '2\t2026-01-05\t?\tWerkstudent Data Engineering\tEvaluated\t4.0/5\t❌\t—\tre-listed\n';
+  const sb = makeSandbox(SAME_ROLE_TRACKER, { '2-unknown.tsv': SAME_ROLE });
+  runScript('merge-tracker.mjs', [], sb);
+  const rows = dataRows(sb.tracker);
+  if (rows.length === 1) pass('the same role under an unknown employer still dedups to one row');
+  else fail(`identical unknown-employer roles did not dedup: got ${rows.length} rows\n${rows.join('\n')}`);
+  rmSync(sb.dir, { recursive: true, force: true });
+}
+
+// ── Test 15b: a triage-only ? row is pending evaluation, not a blind agency row ──
+// The scan loop promotes board postings before anything has fetched the employer
+// (stellenwerk is harvested from a sitemap, which carries URLs and no company),
+// so `?` there means "not looked up yet" and stage 2 fills it in when it writes
+// the report. Nothing has been produced for the row — no report, no CV — so
+// nothing can have reached an employer and there is no double-submission hazard
+// to raise an error about. The row is still surfaced, by the separate
+// "status Evaluated but no report link" warning, so nothing goes quiet.
+{
+  const TRIAGE_ONLY = `# Applications Tracker
+
+| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|-----|------|-------|--------|-----|--------|-------|
+| 1 | 2026-01-05 | ? | — | Werkstudent Data | 4.2/5 | Evaluated | ❌ | — | triage-only from loop wave 1 — full evaluation pending |
+`;
+  const sb = makeSandbox(TRIAGE_ONLY);
+  const res = runScript('verify-pipeline.mjs', [], sb);
+  if (!/unknown employer \(\?\) with no Via/.test(res.stdout)) {
+    pass('verify: triage-only ? row (no report, no CV) is not a Via error');
+  } else {
+    fail(`verify: triage-only ? row wrongly errored\n${res.stdout}`);
+  }
+  if (/no report link/.test(res.stdout)) {
+    pass('verify: the triage-only row is still surfaced as owing an evaluation');
+  } else {
+    fail(`verify: triage-only row was silently dropped\n${res.stdout}`);
+  }
+  rmSync(sb.dir, { recursive: true, force: true });
+}
+
 // ── Test 16: web alias cache refreshes on change, never caches failure ──────
 // loadHeaderAliases caches per file to avoid a disk read+parse per request
 // (readApplications runs on every API route / page render), but the cache is

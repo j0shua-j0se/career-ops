@@ -19,7 +19,7 @@ import { join, basename, dirname, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
-import { roleFuzzyMatch } from './role-matcher.mjs';
+import { roleFuzzyMatch, roleTokens } from './role-matcher.mjs';
 import { parsePdfIndex } from './find.mjs';
 import { LEGACY_COLMAP, detectColumns, isHeaderRow, resolveScoreStatus, normalizeVia, SEPARATOR_ROW_RE, stripCrossReferences, REQ_NUMBER_RE, extractReqNumber , resolveUpdatedStatus } from './tracker-parse.mjs';
 import { resolveTrackerPath, resolveWorkspaceRoot, resolvePdfIndexPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, cell } from './tracker-utils.mjs';
@@ -1108,6 +1108,30 @@ for (const file of tsvFiles) {
       // collapse distinct non-Latin agency names to the same empty key.
       if ((String(addition.company).trim() === '?' || String(app.company).trim() === '?')
           && normalizeVia(addition.via || '') !== normalizeVia(app.via || '')) return false;
+      // Both employers unknown AND no URL on either side: the title is the only
+      // evidence left, and a FUZZY title match is too weak to justify
+      // overwriting a row, because merging here destroys a posting rather than
+      // duplicating one. Require the role tokens to be identical instead.
+      //
+      // Observed 2026-08-19: stellenwerk publishes no employer, so two distinct
+      // Nuremberg HiWi postings arrived as `?` with titles differing only in
+      // "Prototype Engineer" vs "Test Engineer". They fuzzy-matched, the second
+      // overwrote the first as a "downgrade", and one real posting disappeared
+      // with no warning. A spurious extra row is visible and cheap to merge; a
+      // silently dropped posting is neither.
+      // Reaching tier 3 already means the deterministic URL tier did not match,
+      // so there is no proof these are the same posting — only a fuzzy title
+      // and two employers nobody could identify. Require the role tokens to be
+      // identical before merging on that.
+      const bothUnknown = String(addition.company).trim() === '?' && String(app.company).trim() === '?';
+      if (bothUnknown) {
+        // roleTokens() already strips "(m/w/d)", but the spelled-out inclusivity
+        // variants survive as ordinary words, so "(all genders)" would otherwise
+        // read as a distinguishing term and split one posting into two rows.
+        const NON_DISTINGUISHING = new Set(['genders', 'gender', 'divers', 'diverse']);
+        const key = (role) => [...roleTokens(role)].filter((t) => !NON_DISTINGUISHING.has(t)).sort().join(' ');
+        if (key(addition.role) !== key(app.role)) return false;
+      }
       // Req/job-number guard (#1524): a similarly-worded title at the same
       // company can still be a genuinely distinct posting when a req/job
       // number in the Notes column proves it (employers like TD commonly run

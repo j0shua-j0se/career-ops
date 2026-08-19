@@ -432,6 +432,23 @@ for (const e of entries) {
   const company = String(e.company || '').trim();
   const via = String(e.via || '').trim();
   if (company === '?') {
+    // `?` carries two different meanings, and only one of them is this check's
+    // business. An AGENCY-mediated row hides the end employer permanently, and
+    // that is a real double-submission hazard worth an error. A TRIAGE-ONLY row
+    // has an unknown employer only because nothing has fetched the posting yet:
+    // boards like stellenwerk are harvested from a sitemap, which carries URLs
+    // and no employer, and stage 2 of the pass fills the name in when it writes
+    // the report. Nothing has been sent, so there is no submission to duplicate.
+    //
+    // The pending work is already tracked — Check 12 warns about exactly these
+    // rows ("status Evaluated but no report link") — so skipping here hides
+    // nothing; it stops a mid-pass state from reading as a data-integrity fault.
+    // "Nothing produced yet" is the test: no report link AND no CV. A row with
+    // either one has been worked on and could reach an employer, so the blind-
+    // employer hazard is live and stays an error.
+    const hasReport = /\]\(([^)]+)\)/.test(String(e.report || ''));
+    const hasPdf = String(e.pdf || '').includes('✅');
+    if (!hasReport && !hasPdf && String(e.status || '').trim() === 'Evaluated') continue;
     if (COLMAP.via == null) {
       warn(`#${e.num}: unknown employer (?) but the tracker has no Via column — add it with: node merge-tracker.mjs --migrate-via`);
       viaIssues++;
