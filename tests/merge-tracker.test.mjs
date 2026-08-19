@@ -621,3 +621,41 @@ console.log('\nmerge-tracker — an unparseable TSV is left in place, never arch
   // so r.tracker no longer exists. The archive assertion above is the proof the
   // valid row merged.)
 }
+
+// ── resolveUpdatedStatus: which status survives a re-evaluation ──────────────
+//
+// The update path used to hard-code `status: duplicate.status`. That is correct
+// for every status recording something that HAPPENED — an application sent, a
+// reply received — and a re-evaluation must never walk those backwards.
+//
+// It was wrong for `Evaluated`, which is not an outcome but the absence of one.
+// Observed live 2026-08-18: three rows re-scored below the pursue floor by a
+// full evaluation (Bosch 4.0→2.5, isento 4.0→3.2, Meierhofer 4.0→2.6) each
+// carried SKIP in their TSV and each stayed `Evaluated`, so all three kept
+// counting as live work after the evaluation said not to pursue them.
+{
+  const { resolveUpdatedStatus } = await import('../merge-tracker.mjs');
+  const t = (existing, incoming, want, msg) =>
+    (resolveUpdatedStatus(existing, incoming) === want
+      ? pass(msg)
+      : fail(`${msg} — ${existing} + ${incoming} gave ${resolveUpdatedStatus(existing, incoming)}, want ${want}`));
+
+  t('Evaluated', 'SKIP', 'SKIP', 'a pending-decision row takes the re-evaluation\'s SKIP');
+  t('Evaluated', 'Evaluated', 'Evaluated', 'Evaluated + Evaluated stays Evaluated');
+
+  // The guard that matters: nothing that records real progress may be reverted.
+  t('Applied', 'SKIP', 'Applied', 'an Applied row is NOT walked back to SKIP');
+  t('Applied', 'Evaluated', 'Applied', 'an Applied row is NOT walked back to Evaluated');
+  t('Interview', 'SKIP', 'Interview', 'an Interview row is never reverted');
+  t('Offer', 'SKIP', 'Offer', 'an Offer row is never reverted');
+  t('Hired', 'Evaluated', 'Hired', 'a Hired row is never reverted');
+  t('Rejected', 'Evaluated', 'Rejected', 'a Rejected row is never reverted');
+  t('Discarded', 'Evaluated', 'Discarded', 'a Discarded row is never reverted');
+
+  // A user's own SKIP decision is not overturned by a re-scoring.
+  t('SKIP', 'Evaluated', 'SKIP', 'a SKIP row is not reopened by a re-evaluation');
+
+  // A TSV with no status must never blank the cell.
+  t('Evaluated', '', 'Evaluated', 'an empty incoming status leaves the row untouched');
+  t('Applied', undefined, 'Applied', 'an undefined incoming status leaves the row untouched');
+}

@@ -297,6 +297,7 @@ function companiesMatch(a, b) {
   return key !== '' || String(a).trim() === String(b).trim();
 }
 
+
 /**
  * Combine an existing row's Notes with a re-evaluation's Notes.
  *
@@ -966,7 +967,7 @@ for (const file of tsvFiles) {
       role: reportNumMatched ? addition.role : duplicate.role,
       via: addition.via || duplicate.via || '—',
       location: addition.location || duplicate.location || '—',
-      score: addition.score, status: duplicate.status, pdf,
+      score: addition.score, status: resolveUpdatedStatus(duplicate.status, addition.status), pdf,
       report: addition.report,
       notes: mergeNotes(duplicate.notes, addition, oldScore, newScore, supersededNote),
     });
@@ -1158,4 +1159,37 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
     console.error(`❌ ${err?.message ?? err}`);
     process.exitCode = 1;
   });
+}
+
+/**
+ * Which status survives when a re-evaluation lands on an existing row.
+ *
+ * The update path used to hard-code `status: duplicate.status`, keeping the
+ * tracker's value unconditionally. That is right for every status that records
+ * something that actually HAPPENED — an application sent, a reply received, a
+ * decision taken — and a re-evaluation must never walk those backwards. It is
+ * wrong for exactly one case.
+ *
+ * `Evaluated` is not an outcome, it is the absence of one: "scored, pending
+ * decision". When a re-evaluation of such a row comes back below the pursue
+ * floor, its TSV says SKIP and the house rule in modes/_custom.md requires the
+ * status to be set at the moment the score is written. Keeping `Evaluated`
+ * silently dropped that, and the row kept counting as live work.
+ *
+ * Observed live 2026-08-18: three rows (Bosch 4.0→2.5, isento 4.0→3.2,
+ * Meierhofer 4.0→2.6) were re-scored below the floor by a full evaluation, and
+ * all three stayed `Evaluated` because their TSV status was discarded here.
+ *
+ * So: a row still awaiting a decision takes the incoming status; a row that has
+ * moved beyond that keeps its own.
+ *
+ * @param {string} existing - Status currently on the tracker row.
+ * @param {string} incoming - Status from the TSV addition.
+ * @returns {string}
+ */
+export function resolveUpdatedStatus(existing, incoming) {
+  const cur = String(existing ?? '').trim();
+  const next = String(incoming ?? '').trim();
+  if (!next) return cur;
+  return cur === 'Evaluated' ? next : cur;
 }
