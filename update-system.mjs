@@ -203,6 +203,9 @@ const SYSTEM_PATHS = [
   // agent tool, so these can never be a provider; this rotates them so the step
   // is affordable and therefore actually happens.
   'websearch-plan.mjs',
+  // The shared brief a /career-ops run evaluation worker reads instead of
+  // having the whole contract restated in its prompt.
+  'batch/run-worker-brief.md',
   // ──────────────────────────────────────────────────────────────────────
   'scan-interamt.mjs',
   'company-funded.mjs',
