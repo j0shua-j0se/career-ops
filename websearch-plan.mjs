@@ -72,6 +72,23 @@ export function isProviderCovered(query) {
   return PROVIDER_COVERED_SITES.some((s) => host === s || host.endsWith(`.${s}`) || host.startsWith(`${s}/`)) ? 1 : 0;
 }
 
+/**
+ * The query names following `--record`, stopping at the next flag.
+ *
+ * Filtering flags out instead of stopping at one swallowed the VALUES of every
+ * later flag: `--record "Name" --hits 4 --ingested 0 --note "..."` recorded four
+ * "queries" — the real one plus `4`, `0` and the note text — wrote three junk
+ * keys into the staleness state, and printed "Recorded 4 query/queries" as if
+ * that had gone well.
+ *
+ * @param {string[]} rest - argv after the `--record` token.
+ * @returns {string[]}
+ */
+export function collectRecordNames(rest) {
+  const stop = rest.findIndex((a) => a.startsWith('--'));
+  return stop === -1 ? [...rest] : rest.slice(0, stop);
+}
+
 export function loadState(path = STATE_PATH) {
   if (!existsSync(path)) return { lastRun: {} };
   try {
@@ -157,11 +174,27 @@ function main(argv) {
   // --record: mark the named queries as run now.
   const recIdx = argv.indexOf('--record');
   if (recIdx !== -1) {
-    const names = argv.slice(recIdx + 1).filter((a) => !a.startsWith('--'));
+    const names = collectRecordNames(argv.slice(recIdx + 1));
     if (names.length === 0) {
       console.error('websearch-plan: --record needs at least one query name.');
       process.exit(1);
     }
+
+    // A name that matches no configured query is always a mistake, and a silent
+    // one: the junk key is written, the query the user meant stays unrecorded,
+    // and it keeps resurfacing as the stalest thing in the plan while appearing
+    // to have been run.
+    const configured = new Set((portals.search_queries ?? [])
+      .filter((q) => q && typeof q.name === 'string')
+      .map((q) => q.name));
+    const unknown = names.filter((n) => !configured.has(n));
+    if (unknown.length > 0) {
+      console.error(`websearch-plan: --record got ${unknown.length} name(s) that match no query in portals.yml → search_queries:`);
+      for (const n of unknown) console.error(`  • ${JSON.stringify(n)}`);
+      console.error('Nothing was recorded. Names must match exactly — copy them from `--summary`.');
+      process.exit(1);
+    }
+
     const now = new Date().toISOString();
     for (const n of names) state.lastRun[n] = now;
     saveState(state);

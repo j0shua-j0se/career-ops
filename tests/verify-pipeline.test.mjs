@@ -338,6 +338,51 @@ try {
   out = verify(reportsDir2, tracker2);
   check('single clean report: exit 0 and the all-clear line for Check 14',
     out.status === 0 && out.stdout.includes('No employer-variant/req-ID/URL duplicates found'), `status=${out.status}\n${out.stdout}`);
+
+  // ── An unknown employer must not hide a duplicate of a decided row ──────────
+  // companyKeysMatch() rejects two empty company keys, correctly: two
+  // unidentified employers are not evidence of one employer. But that leaves a
+  // blind spot, and it cost a real duplicate. #3 (Mitsubishi Heavy Industries,
+  // "Werkstudent Software Development Edge AI") was applied to and REJECTED on
+  // 2026-08-18. The same posting then arrived a third time from stellenwerk —
+  // whose sitemap publishes no employer — so it read as `?`, matched nothing, and
+  // was promoted at 4.3 as a fresh lead for a job already refused.
+  //
+  // When one side's employer is unknown the role has to carry the whole match, so
+  // it must be EXACT rather than the subset test used when a company is known.
+  {
+    resetDupeFixture();
+    writeTracker(tracker2, [
+      '| 3 | 2026-08-05 | Mitsubishi Heavy Industries EMEA | Werkstudent Software Development Edge AI (m/w/d) | 4.4/5 | Rejected | ✅ | — | applied then rejected |',
+      '| 122 | 2026-08-19 | ? | Werkstudent Software Development Edge Ai (m/w/d) | 4.3/5 | Evaluated | ❌ | — | triage-only |',
+    ]);
+    let out = verify(reportsDir2, tracker2);
+    check('an unknown-employer row is matched against a decided row by exact role',
+      /Likely duplicate tracker rows: #122 \(unknown employer\) and #3/.test(out.stdout), out.stdout);
+    check('the duplicate finding stays warning-level (exit 0)', out.status === 0, `status=${out.status}`);
+
+    // The guard: a genuinely different role at an unknown employer must not be
+    // dragged in by the shared "Werkstudent" vocabulary.
+    writeTracker(tracker2, [
+      '| 3 | 2026-08-05 | Mitsubishi Heavy Industries EMEA | Werkstudent Software Development Edge AI (m/w/d) | 4.4/5 | Rejected | ✅ | — | applied then rejected |',
+      '| 122 | 2026-08-19 | ? | Werkstudent Data Analytics Reporting (m/w/d) | 4.3/5 | Evaluated | ❌ | — | triage-only |',
+    ]);
+    out = verify(reportsDir2, tracker2);
+    check('a different role at an unknown employer is not flagged',
+      !/Likely duplicate tracker rows: #122/.test(out.stdout), out.stdout);
+
+    // Once resolved by Discarding the duplicate, the warning stops — same rule as
+    // everywhere else here: a finding that outlives its own fix teaches the reader
+    // to skim.
+    writeTracker(tracker2, [
+      '| 3 | 2026-08-05 | Mitsubishi Heavy Industries EMEA | Werkstudent Software Development Edge AI (m/w/d) | 4.4/5 | Rejected | ✅ | — | applied then rejected |',
+      '| 122 | 2026-08-19 | ? | Werkstudent Software Development Edge Ai (m/w/d) | 4.3/5 | Discarded | ❌ | — | duplicate of #3 |',
+    ]);
+    out = verify(reportsDir2, tracker2);
+    check('Discarding the duplicate clears the finding',
+      !/Likely duplicate tracker rows: #122/.test(out.stdout), out.stdout);
+  }
+
 } catch (e) {
   fail(`verify-pipeline Check 14 duplicate-report tests crashed: ${e.message}`);
 } finally {

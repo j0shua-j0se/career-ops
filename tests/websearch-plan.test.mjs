@@ -8,7 +8,7 @@
 // guesswork about WHICH to run, and the all-or-nothing cost that made the step
 // get skipped.
 import { pass, fail } from './helpers.mjs';
-import { selectQueries, isProviderCovered, groupBySite, PROVIDER_COVERED_SITES } from '../websearch-plan.mjs';
+import { selectQueries, isProviderCovered, groupBySite, PROVIDER_COVERED_SITES, collectRecordNames } from '../websearch-plan.mjs';
 
 console.log('\nWebSearch plan');
 
@@ -100,3 +100,29 @@ selectQueries([], { lastRun: {} }, {}).length === 0
   && selectQueries([{ name: 'x' }], { lastRun: {} }, {}).length === 0
   ? pass('empty, null and malformed query lists yield nothing without throwing')
   : fail('degenerate input mishandled');
+
+// --- `--record` argument parsing. The bug this pins wrote junk into the
+// staleness state and reported success while doing it: collecting every
+// non-flag argument after --record swallowed the VALUES of any later flag, so
+// `--record "Name" --hits 4 --ingested 0 --note "..."` recorded the real query
+// PLUS "4", "0" and the note text as three more "queries". Those keys then sat
+// in data/websearch-state.json looking like queries that had been run.
+{
+  const one = collectRecordNames(['LinkedIn A', '--hits', '4', '--ingested', '0', '--note', 'all 4 expired']);
+  one.length === 1 && one[0] === 'LinkedIn A'
+    ? pass('--record stops at the next flag instead of eating its values')
+    : fail(`collectRecordNames swallowed flag values: ${JSON.stringify(one)}`);
+
+  const many = collectRecordNames(['LinkedIn A', 'XING A', 'BMW A']);
+  many.length === 3
+    ? pass('--record still accepts several names before any flag')
+    : fail(`collectRecordNames dropped names: ${JSON.stringify(many)}`);
+
+  collectRecordNames([]).length === 0
+    ? pass('--record with no names yields nothing (the caller errors)')
+    : fail('collectRecordNames invented a name from an empty tail');
+
+  collectRecordNames(['--hits', '4']).length === 0
+    ? pass('--record immediately followed by a flag yields no names')
+    : fail('collectRecordNames read a flag as a query name');
+}

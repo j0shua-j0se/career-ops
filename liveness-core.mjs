@@ -147,6 +147,15 @@ const EXPIRED_URL_PATTERNS = [
   /(?:job|position|vacancy|stelle|posting)[-_]?(?:not[-_]?found|expired|closed|removed|unavailable)/i,
   /no[-_]?longer[-_]?(?:available|accepting|open)/i,
   /stellenangebot[-_]?(?:nicht[-_]?gefunden|abgelaufen)/i,
+  // LinkedIn states the expiry in a TRACKING PARAMETER rather than the path: a
+  // dead posting 302s to a search page carrying `trk=expired_jd_redirect`
+  // ("expired job description redirect"). The job id is gone from the final
+  // URL, so without this the generic id-missing rule claims it and returns
+  // `uncertain` — "re-verify by hand" for a site that just said, in writing,
+  // that the job expired. Observed 2026-08-19 on a Siemens Erlangen posting
+  // surfaced by the Stage 1b WebSearch sweep, where every hit is an old
+  // search-engine snapshot and this is the common case, not the rare one.
+  /[?&]trk=expired[-_]/i,
 ];
 
 const APPLY_PATTERNS = [

@@ -448,7 +448,11 @@ for (const e of entries) {
     // employer hazard is live and stays an error.
     const hasReport = /\]\(([^)]+)\)/.test(String(e.report || ''));
     const hasPdf = String(e.pdf || '').includes('✅');
-    if (!hasReport && !hasPdf && String(e.status || '').trim() === 'Evaluated') continue;
+    // `Evaluated` is still awaiting its evaluation; `Discarded`/`SKIP` were
+    // resolved without one. None of the three represents an application, so
+    // none can duplicate a submission through an unnamed agency.
+    const preApplication = new Set(['Evaluated', 'Discarded', 'SKIP']);
+    if (!hasReport && !hasPdf && preApplication.has(String(e.status || '').trim())) continue;
     if (COLMAP.via == null) {
       warn(`#${e.num}: unknown employer (?) but the tracker has no Via column — add it with: node merge-tracker.mjs --migrate-via`);
       viaIssues++;
@@ -948,6 +952,43 @@ for (let i = 0; i < unreported.length; i++) {
     unreportedDupes++;
   }
 }
+// Second pass: an unknown employer (`?`) has an EMPTY company key, and
+// companyKeysMatch() rejects an empty key on both sides — correctly, since two
+// unidentified employers are not evidence of the same employer. That leaves a
+// blind spot the pass above cannot see, and it cost a real duplicate:
+//
+//   #3   Mitsubishi Heavy Industries EMEA — "Werkstudent Software Development
+//        Edge AI (m/w/d)" — applied, then REJECTED on 2026-08-18.
+//   #70  same employer, same role, caught as a duplicate because the company
+//        was named.
+//   #122 the same posting a third time, harvested from stellenwerk — whose
+//        sitemap publishes no employer — so it arrived as `?`, matched nothing,
+//        and was promoted at 4.3 as a fresh lead for a job already refused.
+//
+// So when one side's employer is unknown, fall back to the role alone — but
+// demand an EXACT token match rather than the subset test used above, because
+// the company is no longer carrying any of the evidence. Warning-level: an
+// identical title at two different employers is possible, and the reader
+// decides.
+for (const a of unreported) {
+  if (String(a.company || '').trim() !== '?') continue;
+  if (a.status === 'Discarded' || a.status === 'SKIP') continue;
+  const ta = roleTokenSet(a.role);
+  if (ta.size < 2) continue;
+  const key = [...ta].sort().join(' ');
+  for (const b of entries) {
+    if (a === b) continue;
+    if (String(b.company || '').trim() === '?') continue; // handled by the pass above
+    if (b.status === 'Discarded' || b.status === 'SKIP') continue;
+    const tb = roleTokenSet(b.role);
+    if (tb.size < 2 || [...tb].sort().join(' ') !== key) continue;
+    warn(`Likely duplicate tracker rows: #${a.num} (unknown employer) and #${b.num} (${b.company}, ${b.status}) `
+      + `— identical role "${a.role}"; the board that supplied #${a.num} publishes no employer, so the company `
+      + 'columns cannot be compared. Confirm before evaluating — #' + b.num + ' may already be decided');
+    unreportedDupes++;
+  }
+}
+
 if (unreportedDupes === 0) ok('No duplicate rows among the not-yet-evaluated entries');
 
 // --- Check 13: applications.md <-> active-interviews.md status sync (#1504) ---

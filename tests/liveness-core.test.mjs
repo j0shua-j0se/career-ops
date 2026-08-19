@@ -142,6 +142,38 @@ for (const status of [404, 410]) {
 }
 
 {
+  // LinkedIn puts the expiry in a TRACKING PARAMETER, not the path: a dead
+  // posting 302s to a search page with `trk=expired_jd_redirect`. The job id is
+  // gone from the final URL, so the generic id-missing rule would otherwise
+  // claim it and return `uncertain` — "re-verify by hand" for a site that just
+  // said in writing that the job expired. Observed 2026-08-19 on hits from the
+  // Stage 1b WebSearch sweep, where stale snapshots are the common case.
+  const r = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://de.linkedin.com/jobs/view/werkstudent-w-m-d-data-science-at-siemens-3864190966',
+    finalUrl: 'https://de.linkedin.com/jobs/siemens-healthineers-stellen?trk=expired_jd_redirect&position=1&pageNum=0',
+    bodyText: 'Siemens Healthineers jobs. Browse open roles.',
+    applyControls: ['Apply'],
+  });
+  r.result === 'expired'
+    ? pass('a LinkedIn trk=expired_jd_redirect is expired, not uncertain')
+    : fail(`LinkedIn expired redirect classified ${r.result}/${r.code}, expected expired`);
+
+  // The guard around it: a LIVE LinkedIn posting also carries trk parameters,
+  // and none of them may be read as an expiry.
+  const live = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://de.linkedin.com/jobs/view/data-scientist-at-acme-4111222333',
+    finalUrl: 'https://de.linkedin.com/jobs/view/data-scientist-at-acme-4111222333?trk=public_jobs_topcard',
+    bodyText: 'Acme is hiring a Data Scientist in Erlangen. '.repeat(40),
+    applyControls: ['Apply'],
+  });
+  live.result !== 'expired'
+    ? pass('an ordinary trk= parameter on a live posting is not an expiry')
+    : fail(`live LinkedIn posting misclassified ${live.result}/${live.code}`);
+}
+
+{
   // Same shape, other vocabularies — the pattern must not be BMW-specific.
   const en = classifyLiveness({
     status: 200, requestedUrl: 'https://x.com/jobs/123',
