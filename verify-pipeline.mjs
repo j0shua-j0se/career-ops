@@ -909,7 +909,19 @@ function roleTokenSet(role) {
   // string first collapses "climate data analytics" into the single token
   // "climatedataanalytics" — every role becomes one token, the two-token floor
   // below rejects it, and the check silently matches nothing at all.
-  const tokens = stripped.split(/[\s\/,&()·|-]+/).map(normalizeTextKey).filter(Boolean);
+  // Fold German umlauts to their standard transliteration BEFORE the noise
+  // list is applied. The two spellings of one word reach this function from
+  // different sources: a board that serves the real title gives "für", while a
+  // title deslugged from a URL gives "fuer" (URLs cannot carry umlauts). The
+  // NOISE list below already anticipates "fuer" and "fur" — but normalizeTextKey
+  // keeps ü as a letter, so the umlaut spelling arrives as "für", matches
+  // neither, and survives as a distinguishing token. That one word was enough
+  // to hide #125 ("Werkstudent Fuer It Devops Iot") as a duplicate of #36
+  // ("Werkstudent für IT DevOps / IoT") — the same posting, already Discarded.
+  const foldGerman = (t) => t
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue')
+    .replace(/ß/g, 'ss');
+  const tokens = stripped.split(/[\s\/,&()·|-]+/).map((t) => foldGerman(normalizeTextKey(t))).filter(Boolean);
   // Positional noise that carries no role meaning on its own.
   const NOISE = new Set(['im', 'in', 'der', 'die', 'das', 'und', 'fuer', 'fur', 'the', 'and', 'for', 'at', 'of', 'bereich']);
   return new Set(tokens.filter((t) => t.length > 1 && !NOISE.has(t)));
@@ -979,7 +991,13 @@ for (const a of unreported) {
   for (const b of entries) {
     if (a === b) continue;
     if (String(b.company || '').trim() === '?') continue; // handled by the pass above
-    if (b.status === 'Discarded' || b.status === 'SKIP') continue;
+    // The counterpart is deliberately NOT filtered by status. A Rejected,
+    // Discarded or SKIP row is the most valuable match this check can find:
+    // it means the posting has already been decided, and the new copy is about
+    // to spend an evaluation — or an application — re-deciding it. Observed
+    // twice in one pass: #122 duplicated #3 (Rejected) and #125 duplicated #36
+    // (Discarded). Only resolving the NEW row silences this, which is the
+    // termination condition the loop above already applies to `a`.
     const tb = roleTokenSet(b.role);
     if (tb.size < 2 || [...tb].sort().join(' ') !== key) continue;
     warn(`Likely duplicate tracker rows: #${a.num} (unknown employer) and #${b.num} (${b.company}, ${b.status}) `
