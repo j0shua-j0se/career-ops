@@ -691,6 +691,15 @@ function normalizeCompanyTokens(raw) {
   s = stripBranchSuffix(s);
   s = s.normalize('NFKC').toLowerCase();
   s = s.replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ');
+  // "Gruppe" and "Group" are the same word, and German job boards disagree
+  // about which to use for the same employer within a single scan: Arbeitsagentur
+  // listed the Erlangen publisher as "Thieme Group / Thieme Compliance GmbH"
+  // while StepStone listed the identical posting as "Thieme Gruppe", and the
+  // token-prefix test below rejected the pair on that one word. This is not a
+  // legal form (stripLegalForm handles GmbH, AG, SE and friends) but a
+  // translated collective noun, so it is folded rather than stripped — dropping
+  // it entirely would make "Thieme" match any other Thieme entity.
+  s = s.replace(/\bgruppe\b/g, 'group');
   return s;
 }
 
@@ -794,6 +803,101 @@ for (let i = 0; i < reportMeta.length; i++) {
   }
 }
 if (strongDupes === 0) ok('No employer-variant/req-ID/URL duplicates found');
+
+// --- Check 16: Duplicate tracker rows that have no report yet ---
+//
+// Every duplicate check above this line reads REPORTS. That leaves the exact
+// window in which duplicates arrive in bulk completely unwatched: a scan loop
+// promotes its qualifiers straight to the tracker as triage-only rows with no
+// report at all, and the same requisition routinely reaches it from three
+// boards at once. Observed live 2026-08-18: one loop wave promoted 16 rows, of
+// which five were duplicates of another row in the same batch — the Thieme
+// Erlangen posting from Arbeitsagentur and StepStone, the Siemens/FAPS Fuerth
+// posting from two Indeed listings, and the Siemens Healthineers Erlangen
+// posting in both its German and English Indeed forms. `verify-pipeline`
+// reported "No exact duplicates found" and "No employer-variant/req-ID/URL
+// duplicates found" for all five, because Check 2 demands an exact
+// company+role match and Checks 14-15 had no report to read.
+//
+// Two normalizations do the work, because they are exactly what differs
+// between boards syndicating one job:
+//   1. the employer name (`companyKeysMatch`, reused from Check 15), and
+//   2. the role's boilerplate — the gender marker `(m/w/d)` in any letter
+//      order, the `*in`/`:in` inclusive suffixes, and the Werkstudent /
+//      Working Student / Werkstudent*in family, which is the same word in two
+//      languages and is never the distinguishing part of a title.
+//
+// What survives that strip is compared as a TOKEN SET, not a string: one board
+// writes "Werkstudent (w/m/d) im SQM-Daten-Management / Siemens AG" and another
+// "Siemens AG (Fuerth): Werkstudent (w/m/d) im SQM-Daten-Management" — same
+// tokens, different order, neither a prefix of the other.
+//
+// Warning-level and deliberately conservative: a company posting two genuinely
+// different roles whose titles differ only by an added word is rare but real,
+// so this reports the pair and lets the user decide. It never writes anything.
+
+/** Strip the boilerplate two job boards disagree about, keep the meaning. */
+function roleTokenSet(role) {
+  const stripped = String(role || '')
+    .toLowerCase()
+    // Gender markers in every order and separator the market uses.
+    .replace(/\(\s*[mwfdxsg](?:\s*[\/,]\s*[mwfdxsg])+\s*\)/g, ' ')
+    .replace(/\((?:all genders|any gender|divers)\)/g, ' ')
+    // Inclusive suffixes: Werkstudent*in, Werkstudent:in, Werkstudent_in.
+    .replace(/[*:_]in\b/g, ' ')
+    // The same contract type in two languages, plus its abbreviations.
+    .replace(/\bwerkstudent(?:en)?\b/g, ' ')
+    .replace(/\bworking\s+student\b/g, ' ')
+    .replace(/\bstudent\s+assistant\b/g, ' ');
+  // Split FIRST, normalize each token after. normalizeTextKey strips every
+  // non-alphanumeric character INCLUDING whitespace, so normalizing the whole
+  // string first collapses "climate data analytics" into the single token
+  // "climatedataanalytics" — every role becomes one token, the two-token floor
+  // below rejects it, and the check silently matches nothing at all.
+  const tokens = stripped.split(/[\s\/,&()·|-]+/).map(normalizeTextKey).filter(Boolean);
+  // Positional noise that carries no role meaning on its own.
+  const NOISE = new Set(['im', 'in', 'der', 'die', 'das', 'und', 'fuer', 'fur', 'the', 'and', 'for', 'at', 'of', 'bereich']);
+  return new Set(tokens.filter((t) => t.length > 1 && !NOISE.has(t)));
+}
+
+const isSubset = (small, large) => [...small].every((t) => large.has(t));
+
+// Compare every not-yet-evaluated row against EVERY row, not just against the
+// other unevaluated ones. The pair that actually bites is one triage-only row
+// against one fully evaluated row: the loop promotes a posting from a board as
+// "Trench — Werkstudent AI Engineering", the evaluation later files it under the
+// legal name "Trench Germany GmbH", and merge-tracker adds a second row because
+// the company strings differ. Neither Check 15 (both rows need reports) nor a
+// symmetric unreported-only scan (neither row may have one) can see that shape.
+// Observed live 2026-08-18: four such pairs in a single merge.
+const hasReport = (e) => /\]\(([^)]+)\)/.test(e.report || '');
+const unreported = entries.filter((e) => !hasReport(e));
+let unreportedDupes = 0;
+for (let i = 0; i < unreported.length; i++) {
+  for (let j = 0; j < entries.length; j++) {
+    const a = unreported[i], b = entries[j];
+    if (a === b) continue;
+    // A pair stops being a problem once one side is Discarded — that IS how a
+    // duplicate gets resolved here. Without this the warning survives its own
+    // fix and re-fires on every run forever, which is how a health check trains
+    // its reader to skim past warnings. Only SKIP and the live states still
+    // represent work that could be spent twice.
+    if (a.status === 'Discarded' || b.status === 'Discarded') continue;
+    // When both sides are unevaluated, only compare each pair once.
+    if (!hasReport(b) && unreported.indexOf(b) < i) continue;
+    if (!companyKeysMatch(a.company, b.company)) continue;
+    const ta = roleTokenSet(a.role), tb = roleTokenSet(b.role);
+    // Two tokens is the floor: a single shared word ("Data", "AI") is the
+    // domain, not the job, and pairing on it would flag every row at a company.
+    if (Math.min(ta.size, tb.size) < 2) continue;
+    if (!isSubset(ta, tb) && !isSubset(tb, ta)) continue;
+    warn(`Likely duplicate tracker rows: #${a.num} (not evaluated) and #${b.num}${hasReport(b) ? ' (evaluated)' : ' (not evaluated)'} `
+      + `(${a.company} — "${a.role}" / "${b.role}") — one posting reached the tracker from two boards; `
+      + 'resolve before evaluating so two evaluations are not spent on one job');
+    unreportedDupes++;
+  }
+}
+if (unreportedDupes === 0) ok('No duplicate rows among the not-yet-evaluated entries');
 
 // --- Summary ---
 console.log('\n' + '='.repeat(50));
