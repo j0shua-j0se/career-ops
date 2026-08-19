@@ -59,3 +59,36 @@ for (const [label, notes, want] of [
   if (got === want) pass(label);
   else fail(`${label} — got ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`);
 }
+
+// ── a sentence terminator followed by a segment separator is still a break ───
+// `.;` is the single strongest boundary this Notes column produces: a sentence
+// ending exactly where set-status.mjs appends the next note segment. The scope
+// test required WHITESPACE after the terminator, so the `;` hid it and the
+// preceding row reference was judged still in scope.
+//
+// Live consequence on 2026-08-19: row 16's notes end "...the shared MHI parent
+// with row #3.; Applied 2026-08-18, confirmed by...". The row's own apply date
+// was discarded, the evaluation date (2026-08-07) was used instead, and the
+// cadence reported 12 days since application for a row applied the day before.
+// A cadence-driven follow-up would have emailed Primetals hours after their
+// acknowledgement arrived.
+for (const [label, notes, want] of [
+  ['a period followed by a semicolon ends the reference scope',
+   'Do not mention the shared MHI parent with row #3.; Applied 2026-08-18, confirmed.', '2026-08-18'],
+  ['a period followed by a pipe ends it too',
+   'Compare with row #3.| Applied 2026-08-18', '2026-08-18'],
+  ['a plain sentence break still works',
+   'Check row #3. Applied 2026-08-18 by email.', '2026-08-18'],
+  // The guards this must not weaken: without a terminator, a cited row still
+  // owns the date that follows it.
+  ['a cited row with no terminator still owns the following date',
+   '#154 applied 2026-08-04', null],
+  ['a semicolon alone does not end an undated citation',
+   '#154 is already live; applied 2026-08-04', null],
+  ['a citation that already has its own date yields the later own date',
+   '#154 Sr PM (applied 2026-08-04); applied 2026-06-15', '2026-06-15'],
+]) {
+  const got = parseAppliedDate(notes);
+  if (got === want) pass(label);
+  else fail(`${label} — got ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`);
+}

@@ -302,7 +302,18 @@ function isCrossReferencedMention(text, index) {
 
   const sinceRef = window.slice(refEnd);
   // A sentence break always ends the reference's scope.
-  if (/[.!?]\s/.test(sinceRef)) return false;
+  //
+  // The terminator may be followed by whitespace, by one of this column's
+  // segment separators, or by nothing at all. Requiring whitespace missed the
+  // single strongest boundary the Notes column produces: `.;` — a sentence
+  // ending exactly where set-status.mjs appends the next note segment. Row 16
+  // read "...the shared MHI parent with row #3.; Applied 2026-08-18...", so the
+  // reference to row 3 was judged to still be in scope and the row's OWN apply
+  // date was discarded. It then fell back to the evaluation date and reported
+  // 12 days since application for a row applied the day before — which is how a
+  // cadence-driven follow-up gets sent to an employer who acknowledged the
+  // application hours earlier.
+  if (/[.!?](?:\s|[;|]|$)/.test(sinceRef)) return false;
 
   // A semicolon or pipe ends it too — but only once the reference has already
   // been GIVEN a date. Those are the separators this Notes column actually uses,
