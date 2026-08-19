@@ -38,7 +38,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PORTALS_PATH = join(ROOT, 'portals.yml');

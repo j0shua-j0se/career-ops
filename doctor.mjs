@@ -6,16 +6,45 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import dotenv from 'dotenv';
 import { discoverPlugins, pluginRoots, pluginStatus } from './plugins/_engine.mjs';
 import { resolveExtractorMode } from './browser-extract.mjs';
 import { parseConfigByExtension } from './jsonc-parse.mjs';
+import { validateFlags } from './lib/cli-flags.mjs';
+import { geminiNodeFloor } from './lib/gemini-node-floor.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
+
+// CLIs the doctor recognises.
+const VALID_CLIS = ['claude', 'codex', 'opencode', 'antigravity', 'grok', 'qwen', 'kimi', 'copilot', 'gemini'];
+
+// --help ran the full diagnostic and printed the report at exit 0 (#2856), so
+// a mistyped flag was indistinguishable from a clean run — and --targe
+// silently diagnosed THIS checkout instead of the one asked for. Handled via
+// lib/cli-flags.mjs's validateFlags() (#2775), which rejects unrecognized
+// flags before --help so `--help --bogus` still errors.
+const KNOWN_FLAGS = ['--target', '--json', '--strict', '--cli', '--help', '-h'];
+
+// Both take their value as the next argv token.
+const VALUE_FLAGS = ['--target', '--cli'];
+
+const USAGE = `Usage:
+  node doctor.mjs                    # run the setup diagnostic
+  node doctor.mjs --json             # machine-readable onboarding state
+  node doctor.mjs --strict           # also probe portals.yml ATS slugs (network)
+  node doctor.mjs --target <path>    # diagnose another career-ops checkout
+  node doctor.mjs --cli <name>       # check a specific CLI's integration
+  node doctor.mjs --help             # show this message
+
+CLIs: ${VALID_CLIS.join(', ')}`;
+
+validateFlags(argv, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS });
+
 const targetIdx = argv.indexOf('--target');
 const projectRoot =
   targetIdx !== -1 && argv[targetIdx + 1] ? argv[targetIdx + 1] : __dirname;
@@ -23,9 +52,6 @@ const JSON_OUT = argv.includes('--json');
 // --strict adds a live ATS-slug probe of portals.yml (network). Opt-in so the
 // default `npm run doctor` stays fast and fully offline.
 const STRICT = argv.includes('--strict');
-
-// CLIs the doctor recognises.
-const VALID_CLIS = ['claude', 'codex', 'opencode', 'antigravity', 'grok', 'qwen', 'kimi', 'copilot', 'gemini'];
 
 const cliIdx = argv.indexOf('--cli');
 const cliFlag = cliIdx !== -1 ? argv[cliIdx + 1] : null;
@@ -152,9 +178,11 @@ async function checkPlaywright() {
   }
 }
 
-// Per-CLI MCP config registry.
+// Per-CLI MCP config registry. `plugins: true` marks a CLI whose MCP servers
+// can also arrive from an installed plugin, i.e. from outside the project root
+// (see isPlaywrightMcpFromPlugin).
 const MCP_CONFIGS = [
-  { cli: 'claude',   files: ['.mcp.json', '.claude/settings.json', '.claude/settings.local.json'] },
+  { cli: 'claude',   files: ['.mcp.json', '.claude/settings.json', '.claude/settings.local.json'], plugins: true },
   // opencode.jsonc is JSONC: OpenCode accepts comments and trailing commas
   // there, and JSON.parse throwing on them used to read as "no MCP server
   // configured" (#2252).
@@ -168,21 +196,73 @@ function isPlaywrightServer(server) {
   return blob.includes('@playwright/mcp');
 }
 
+// Any bucket shape that can hold a server map. A plugin's own .mcp.json is a
+// BARE map ({ "playwright": {...} }) rather than the mcpServers/mcp wrapper the
+// project-root configs use, so `cfg` itself is a candidate bucket (#2752).
+function hasPlaywrightIn(cfg, { bare = false } = {}) {
+  if (!cfg || typeof cfg !== 'object') return false;
+  const buckets = [cfg.mcpServers, cfg.mcp, ...(bare ? [cfg] : [])]
+    .filter((b) => b && typeof b === 'object');
+  return buckets.some((servers) => Object.values(servers).some(isPlaywrightServer));
+}
+
+// Missing or malformed file reads as "not configured", never as a crash -
+// matches the pre-existing swallow-and-continue behavior of the project scan.
+function readConfigIfPresent(file) {
+  if (!existsSync(file)) return null;
+  try {
+    return parseConfigByExtension(file, readFileSync(file, 'utf8')) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Claude Code's user config dir. CLAUDE_CONFIG_DIR is the documented override;
+// the tests point it at a tmpdir so this never reads the real machine.
+function claudeConfigDir() {
+  return process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+}
+
+// A Claude Code plugin declares its MCP servers in its own .mcp.json, which
+// lives under the user's config dir - never in the project root. The
+// project-root scan below therefore reports "not detected" on a machine where
+// Playwright MCP is installed and working, which reads as though the MANDATORY
+// offer-liveness verification in AGENTS.md cannot be met (#2752).
+//
+// Only ENABLED plugins count: an installed-but-disabled plugin still ships its
+// manifest on disk, but registers no server. Enumeration is driven by the two
+// manifests rather than by walking plugins/cache, so a large cache costs
+// nothing and disabled plugins are never read.
+function isPlaywrightMcpFromPlugin() {
+  const configDir = claudeConfigDir();
+
+  const enabled = readConfigIfPresent(join(configDir, 'settings.json'))?.enabledPlugins;
+  if (!enabled || typeof enabled !== 'object') return false;
+
+  const installed = readConfigIfPresent(join(configDir, 'plugins', 'installed_plugins.json'))?.plugins;
+  if (!installed || typeof installed !== 'object') return false;
+
+  return Object.entries(enabled).some(([key, on]) => {
+    if (on !== true) return false;
+    const entries = Array.isArray(installed[key]) ? installed[key] : [];
+    return entries.some(({ installPath } = {}) => {
+      if (typeof installPath !== 'string' || !installPath) return false;
+      return hasPlaywrightIn(readConfigIfPresent(join(installPath, '.mcp.json')), { bare: true });
+    });
+  });
+}
+
 function isPlaywrightMcpConfigured(root, activeCli) {
   const entry = MCP_CONFIGS.find((c) => c.cli === activeCli);
   if (!entry) return false; // known CLI but no MCP file mapping; caller warns
-  return entry.files.some((rel) => {
+  const inProject = entry.files.some((rel) => {
     const file = join(root, ...rel.split('/'));
-    if (!existsSync(file)) return false;
-    try {
-      const cfg = parseConfigByExtension(file, readFileSync(file, 'utf8')) ?? {};
-      const buckets = [cfg.mcpServers, cfg.mcp].filter((b) => b && typeof b === 'object');
-      return buckets.some((servers) => Object.values(servers).some(isPlaywrightServer));
-    } catch {
-      // Malformed config — treat as unconfigured, keep silent (matches prior behavior).
-    }
-    return false;
+    return hasPlaywrightIn(readConfigIfPresent(file));
   });
+  if (inProject) return true;
+  // Gated behind the project scan, so an already-configured project pays no
+  // extra I/O and non-plugin CLIs never touch the user config dir.
+  return entry.plugins === true && isPlaywrightMcpFromPlugin();
 }
 
 // CLI resolution: --cli flag > $CAREER_OPS_CLI > .env (CAREER_OPS_CLI=...) >
@@ -239,10 +319,12 @@ function checkPlaywrightMcp(root, activeCli) {
     warn: true,
     label: `Playwright MCP tools not detected (active CLI: ${activeCli})`,
     fix: [
-      `No project-level MCP config was detected for ${activeCli}.`,
+      entry.plugins
+        ? `No project-level MCP config, and no enabled plugin providing one, was detected for ${activeCli}.`
+        : `No project-level MCP config was detected for ${activeCli}.`,
       activeCli === 'opencode'
         ? 'Add the Playwright MCP server to opencode.json (see opencode.example.json) or pass --cli <name> if you actually run a different CLI.'
-        : `Add the Playwright MCP server to your ${activeCli} config.`,
+        : `Add the Playwright MCP server to your ${activeCli} config, or install a plugin that provides it (e.g. /plugin install playwright@claude-plugins-official).`,
     ],
   };
 }
@@ -360,27 +442,6 @@ function confirmFieldsFor(root) {
   } catch {
     return [];
   }
-}
-
-function checkConfirmFields() {
-  // A missing profile.yml is already reported by the prereq check above; saying
-  // it twice buries the one message that matters.
-  if (!prereqPresent(projectRoot, 'config/profile.yml')) return null;
-
-  const fields = confirmFieldsFor(projectRoot);
-  if (fields.length === 0) {
-    return { pass: true, label: 'config/profile.yml has no unfilled CONFIRM: placeholders' };
-  }
-  const names = fields.map((f) => f.field ?? '(unnamed)').join(', ');
-  return {
-    warn: true,
-    label: `config/profile.yml still has ${fields.length} CONFIRM: placeholder${fields.length === 1 ? '' : 's'}: ${names}`,
-    fix: [
-      ...fields.map((f) => `${f.field ?? '(unnamed)'} — ${f.note}`),
-      'Tell the agent the real values and it will update the file.',
-      'Already correct? Delete the `# CONFIRM:` comment so this stops warning.',
-    ],
-  };
 }
 
 function checkFonts() {
@@ -521,13 +582,15 @@ async function main() {
 
   const checks = [
     checkNodeVersion(),
+    // Devuelve null salvo que el CLI activo sea Gemini: el filter(Boolean) de
+    // abajo lo descarta, así que ningún otro usuario ve un check que no le toca.
+    geminiNodeFloor(activeCli, process.versions.node),
     checkBillingSource(),
     checkDependencies(),
     await checkPlaywright(),
     checkPlaywrightMcp(projectRoot, activeCli),
     checkScanExtractor(projectRoot),
     ...USER_LAYER_PREREQS.map(checkPrereq),
-    checkConfirmFields(),
     checkFonts(),
     checkAutoDir('data'),
     checkPipelineFile(),
@@ -592,6 +655,7 @@ function onboardingState(root) {
     { target: 'modes/_profile.md', template: 'modes/_profile.template.md' },
     { target: 'modes/_custom.md', template: 'modes/_custom.template.md' },
     { target: 'modes/_brief.md', template: 'modes/_brief.template.md' },
+    { target: 'voice-dna.md', template: 'voice-dna.template.md' },
   ];
   for (const { target, template } of templates) {
     const targetPath = join(root, ...target.split('/'));
@@ -635,9 +699,10 @@ function onboardingState(root) {
     missing,
     warnings,
     autoCopied,
-    // Present-but-unfilled placeholders. Deliberately NOT folded into `missing`:
-    // `missing` drives `onboardingNeeded`, and a stale phone number must not
-    // block every mode the way an absent cv.md does.
+    // `config/profile.yml` ships placeholders annotated `# CONFIRM:`. An
+    // existence check reports the file present and healthy while the phone
+    // number is still someone else's LinkedIn export, so AGENTS.md asks for
+    // these to be surfaced — and explicitly NOT as an onboarding blocker.
     confirmFields: confirmFieldsFor(root),
     plugins,
     playwright_mcp: playwrightMcp,
@@ -646,10 +711,13 @@ function onboardingState(root) {
   };
 }
 
-// Entry-point guard, matching every other dual-purpose script in the repo
-// (browser-extract.mjs, discover-ats.mjs, …). Without it, `import`ing this file
-// to unit-test findConfirmFields would run the whole doctor and call
-// process.exit — which is exactly what tests/ forbids.
+// Direct-invocation guard: only run when this file IS the process entry point.
+// tests/doctor-confirm-fields.test.mjs, doctor-billing-source, doctor-cli-resolution
+// and playwright-mcp-detection all import helpers from here, and test-all.mjs runs
+// discovered suites IN-PROCESS. Without the guard an import ran main() — printing
+// doctor's human banner into the middle of the test output — and the JSON branch's
+// process.exit(0) terminated test-all before finish() could print its summary, so
+// the suite reported nothing at all and still exited 0.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (JSON_OUT) {
     console.log(JSON.stringify(onboardingState(projectRoot)));

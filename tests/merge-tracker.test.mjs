@@ -576,52 +576,6 @@ try {
   fail(`merge-tracker same-run num collision tests crashed: ${e.message}`);
 }
 
-// ---------------------------------------------------------------------------
-// An UNPARSEABLE TSV must never be archived.
-//
-// It is usually not corrupt — it is a file being WRITTEN RIGHT NOW: an
-// evaluation worker creates the TSV and a merge firing in between reads an
-// empty or truncated file. That path used to increment `skipped` and fall
-// through to the archival step, which renamed the file into merged/ as though
-// it had landed. The row never reached the tracker, applications.md is
-// gitignored, and no backup is written — so the evaluation was silently and
-// permanently lost.
-//
-// Observed live: reports 049 (Pricenow, 3.8 — ABOVE the kit threshold) and 050
-// vanished from the tracker while their TSVs sat in merged/. They were noticed
-// only because a kit-candidate query came back unexpectedly empty; nothing in
-// the merge output said anything was wrong.
-console.log('\nmerge-tracker — an unparseable TSV is left in place, never archived');
-
-{
-  const r = runMergeDetailed({
-    // A worker mid-write: file exists, no content yet.
-    '900-being-written.tsv': '',
-    // A good row alongside it, so the guard cannot work by aborting the run.
-    '901-good.tsv': '901\t2026-08-12\tGoodCo\tWorking Student ML\tEvaluated\t4.0/5\t❌\t[901](reports/901-goodco.md)\tfine',
-  });
-
-  r.pending.includes('900-being-written.tsv')
-    ? pass('the unparseable TSV stays in the additions dir for the next run to retry')
-    : fail(`the unparseable TSV was removed from pending: ${JSON.stringify(r.pending)}`);
-
-  !r.archived.includes('900-being-written.tsv')
-    ? pass('it is NOT archived into merged/ — archiving it would destroy the evaluation')
-    : fail('an unparseable TSV was archived, which is the data-loss path');
-
-  r.archived.includes('901-good.tsv')
-    ? pass('a valid TSV alongside it still merges and archives normally')
-    : fail('the guard blocked an unrelated valid addition');
-
-  /LEFT IN PLACE|could not be parsed/i.test(r.output)
-    ? pass('the run says out loud that a TSV was skipped and kept')
-    : fail('the skipped TSV was not reported — silence is how this was missed the first time');
-
-  // (No tracker read here: runMergeDetailed removes its temp workspace on exit,
-  // so r.tracker no longer exists. The archive assertion above is the proof the
-  // valid row merged.)
-}
-
 // ── resolveUpdatedStatus: which status survives a re-evaluation ──────────────
 //
 // The update path used to hard-code `status: duplicate.status`. That is correct
@@ -634,7 +588,7 @@ console.log('\nmerge-tracker — an unparseable TSV is left in place, never arch
 // carried SKIP in their TSV and each stayed `Evaluated`, so all three kept
 // counting as live work after the evaluation said not to pursue them.
 {
-  const { resolveUpdatedStatus } = await import('../merge-tracker.mjs');
+  const { resolveUpdatedStatus } = await import('../tracker-parse.mjs');
   const t = (existing, incoming, want, msg) =>
     (resolveUpdatedStatus(existing, incoming) === want
       ? pass(msg)

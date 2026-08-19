@@ -33,7 +33,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, ren
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { spawnSync } from 'child_process';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 
 import {
   DEFAULT_LOOP_CONFIG, WAVE_STRATEGIES,

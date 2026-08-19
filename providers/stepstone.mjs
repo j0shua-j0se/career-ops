@@ -42,6 +42,10 @@ import { readFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
+// The shared decoder, not a private copy: five providers grew their own and the
+// weakest emitted C0 control characters. test-all.mjs fails the build if a
+// provider declares decodeEntities itself (#2902).
+import { decodeEntities } from './_html-entities.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -60,18 +64,6 @@ const FETCH_TIMEOUT_MS = 120_000;
 // in production, where one narrow query aborted four working ones.
 export const EMPTY_RESULT_RE = /keine\s+(?:passenden\s+)?(?:stellenangebote|jobs|treffer)|0\s+passende\s+jobs|nichts\s+gefunden|no\s+(?:matching\s+)?jobs\s+found/i;
 
-/** Decode the HTML entities that actually appear in StepStone card text. */
-function decodeEntities(s) {
-  return String(s)
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#0?39;|&apos;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)));
-}
 
 const stripTags = (html) => decodeEntities(String(html).replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
 

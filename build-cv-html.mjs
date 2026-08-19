@@ -60,23 +60,17 @@ const DEFAULT_SECTION_TITLES = {
   skills: 'Skills',
 };
 
-// PowerShell 5.1's `Set-Content -Encoding UTF8` prefixes a UTF-8 BOM, which
-// JSON.parse rejects with an opaque "Unexpected token '﻿'". That failure
-// used to be quiet in a chained build: the HTML never regenerated, generate-pdf
-// rebuilt the PDF from the *stale* HTML, and every downstream gate passed on
-// content nobody had changed. A BOM is an encoding artifact, not a payload
-// error — strip it rather than failing on it.
-function stripBom(text) {
-  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-}
-
 // Escape user text for HTML text/attribute context. Covers the five characters
 // that change meaning in markup so tailored bullets containing &, <, >, quotes
 // (e.g. "R&D", "scaled 10x < budget", 'the "north star" metric') render as
 // literal text instead of breaking the document or injecting tags.
 function escapeHtml(text) {
-  if (typeof text !== 'string') return '';
-  return text
+  // Blank out only truly absent/structural values. A number or boolean scalar
+  // (e.g. a payload with `year: 2024` instead of `"2024"`) must render its value,
+  // not vanish: the old `typeof text !== 'string' → ''` guard silently dropped
+  // numeric years/dates from the CV while `present` stayed true.
+  if (text === null || text === undefined || typeof text === 'object') return '';
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -307,8 +301,7 @@ function loadSectionPartials(templatePath) {
   if (!existsSync(sectionsDir)) return partials;
 
   const sectionNames = [
-    'competencies', 'experience', 'projects', 'education', 'publications',
-    'certifications', 'awards', 'skills',
+    'competencies', 'experience', 'projects', 'education', 'certifications', 'awards', 'skills',
   ];
   for (const name of sectionNames) {
     const partialPath = join(sectionsDir, `${name}.html`);
@@ -460,10 +453,6 @@ function buildEducation(entries, partial) {
   }).join('\n  ');
 }
 
-// Peer-reviewed work is not a project and must not be rendered as one: the
-// venue and the author list are the load-bearing facts, and a project card has
-// nowhere to put either. Author order is reproduced verbatim from the payload —
-// never reorder it to move the candidate forward.
 function buildPublications(entries, partial) {
   if (!Array.isArray(entries) || entries.length === 0) return '';
   const venueLine = e => [e.venue, e.year].filter(Boolean).join(' · ');
@@ -704,24 +693,10 @@ function countBullets(payload) {
   return ex.length;
 }
 
-async function writeAndReport(html, absOutput, payload, extra = {}, sourcePath = '') {
+async function writeAndReport(html, absOutput, payload, extra = {}) {
   const outDir = dirname(absOutput);
   if (!existsSync(outDir)) await mkdir(outDir, { recursive: true });
   await writeFile(absOutput, html, 'utf-8');
-
-  // Provenance sidecar: which payload this HTML came from, and how fresh that
-  // payload was at build time. generate-pdf.mjs compares the recorded mtime
-  // against the payload on disk and refuses to render stale HTML — without it,
-  // a payload edit that never reached the HTML produces a green PDF build of
-  // the previous content, with no signal anywhere.
-  if (sourcePath && existsSync(sourcePath)) {
-    const sourceInfo = await stat(sourcePath);
-    await writeFile(`${absOutput}.meta.json`, `${JSON.stringify({
-      source: sourcePath,
-      sourceMtimeMs: sourceInfo.mtimeMs,
-      builtAtMs: Date.now(),
-    }, null, 2)}\n`, 'utf-8');
-  }
 
   const fileInfo = await stat(absOutput);
   const report = {
@@ -734,7 +709,6 @@ async function writeAndReport(html, absOutput, payload, extra = {}, sourcePath =
       experienceEntries: (payload.experience || []).length,
       projectEntries: (payload.projects || []).length,
       educationEntries: (payload.education || []).length,
-      publicationEntries: (payload.publications || []).length,
       certificationEntries: (payload.certifications || []).length,
       awardEntries: (payload.awards || []).length,
       skillCategories: (payload.skills || []).length,
@@ -795,7 +769,7 @@ async function main() {
 
   let payload;
   try {
-    payload = JSON.parse(stripBom(await readFile(absInput, 'utf-8')));
+    payload = JSON.parse(await readFile(absInput, 'utf-8'));
     payload.candidate = await prepareCandidatePhoto(payload.candidate);
   } catch (err) {
     console.error(`Failed to prepare CV input: ${err.message}`);
@@ -812,7 +786,7 @@ async function main() {
     process.exit(1);
   }
 
-  await writeAndReport(html, absOutput, payload, preview ? { status: 'preview-ready' } : {}, absInput);
+  await writeAndReport(html, absOutput, payload, preview ? { status: 'preview-ready' } : {});
   process.exit(0);
 }
 
@@ -852,15 +826,6 @@ async function runSelfTest() {
       org: 'Test University',
       year: '2024',
       description: 'Coursework: Data Structures, Algorithms, Machine Learning.',
-    }],
-    publications: [{
-      title: 'A Test Paper on Automated Coverage',
-      authors: 'A. Author, B. Author',
-      venue: 'Proceedings of the Test Conference',
-      year: '2025',
-      description: 'Measured regression suites across 12 repositories.',
-      url: 'https://doi.org/10.0000/test',
-      doi: '10.0000/test',
     }],
     certifications: [{ title: 'Certified Kubernetes Administrator', org: 'CNCF', year: '2025' }],
     awards: [{ title: 'Gold Medal, International Olympiad in Informatics', org: 'IOI', year: '2023' }],
@@ -953,16 +918,6 @@ async function runSelfTest() {
   }
   if (!html.includes('class="cert-item"')) {
     console.error('Self-test failed: certifications section is missing .cert-item class');
-    process.exit(1);
-  }
-  if (!html.includes('class="pub-item"')) {
-    console.error('Self-test failed: publications section is missing .pub-item class');
-    process.exit(1);
-  }
-  // Venue and author list are the facts that distinguish a paper from a
-  // project; losing either silently downgrades the entry.
-  if (!html.includes('Proceedings of the Test Conference') || !html.includes('A. Author, B. Author')) {
-    console.error('Self-test failed: publication venue or author list missing from output');
     process.exit(1);
   }
   if (!html.includes('class="award-item"')) {

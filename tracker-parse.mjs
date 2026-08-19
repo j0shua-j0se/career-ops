@@ -377,11 +377,64 @@ export function normalizeVia(name) {
  * This is the one key every grouping consumer should share, so company/role
  * identity cannot drift between scripts the way Via identity did.
  *
+ * `separator` exists because not every consumer wants a solid key: scan.mjs
+ * keys role titles as space-separated words so "engineer (senior)" and
+ * "engineer, senior" collapse without "data engineer" and "dataengineer"
+ * merging. Passing ' ' keeps that shape while sharing this exact rule, so a
+ * second private [a-z0-9] strip never has to exist to get it.
+ *
  * @param {string} value - Raw cell value (company, role, agency, slug, …).
+ * @param {string} [separator=''] - Replacement for each run of stripped chars.
+ *   Passed straight to String.replace, so `$` is special ('$&' would re-insert
+ *   the stripped run). Callers should pass a literal such as '' or ' '.
  * @returns {string} Case-folded, punctuation-free, script-preserving key.
  */
-export function normalizeTextKey(value) {
-  return String(value).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]/gu, '');
+export function normalizeTextKey(value, separator = '') {
+  // `value ?? ''` rather than String(value): a null/undefined cell must key to
+  // '' like any other empty field, not to the literal strings "null"/"undefined"
+  // — which would compare equal to each other and form a bogus group.
+  return String(value ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    // Drop the combining dot that lowercasing a Turkish dotted capital leaves
+    // behind. `'İ'.toLowerCase()` yields `i` + U+0307, not a plain `i`, so
+    // `İstanbul Tekstil` and `Istanbul Tekstil` keyed differently while reading
+    // identically on screen: the tracker treated one employer as two, and the
+    // user had no way to see why (#2705, #2736, and verify-pipeline's duplicate
+    // check, which returned a false green because of it).
+    //
+    // NO `NFD` here, and that is the whole safety property. NFKC leaves ż, ė
+    // and ġ as SINGLE precomposed code points, so this strip cannot reach
+    // their dots — while `i` + U+0307 has no precomposed form and stays
+    // exposed. Decomposing first (NFD → strip → NFC) looks equivalent and is
+    // not: it collapsed Żubr/Zubr, Ėmė/Eme and Ġenerali/Generali, which is
+    // Polish, Lithuanian and Maltese losing the distinction (caught in main
+    // by career-ops-ui, 12-ago). The protection is structural, not a list.
+    .replace(/̇/gu, '')
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, separator)
+    .trim();
+}
+
+// Recognized req/job/posting-ID forms in a Notes cell. AGENTS.md asks for the
+// requisition ID whenever a JD exposes one: it is the only signal that survives
+// two near-identical titles at one employer (#1524, #2009).
+//
+// Lives here rather than in merge-tracker.mjs because merge-tracker executes its
+// merge at module load — importing it just to read a regex ran a tracker merge as
+// a side effect. tracker-parse is the side-effect-free parsing module, and it
+// already owns stripCrossReferences, which this needs.
+export const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:#_-]*([a-z][a-z0-9-]*\d[a-z0-9-]*|\d[a-z0-9-]*)\b/i;
+
+export function extractReqNumber(notes) {
+  if (!notes) return null;
+  // Blank out clauses that describe a DIFFERENT row before scanning. Notes
+  // legitimately cross-reference siblings — AGENTS.md asks for exactly that
+  // disambiguation — but REQ_NUMBER_RE returns its FIRST match, so row 5's
+  // notes ("...distinct requisition from row #16 (Job ID 7716)...") resolved to
+  // 7716, which is row 16's requisition. That silently disarmed the same-req
+  // duplicate guard this function exists to feed.
+  const m = stripCrossReferences(notes).match(REQ_NUMBER_RE);
+  return m ? m[1].toUpperCase() : null;
 }
 
 // Clauses in a Notes cell that point at a DIFFERENT tracker row.
@@ -409,4 +462,37 @@ export const CROSS_REFERENCE_RE = /\brow\s*#?\d+\s*\([^)]*\)|\([^)]*\brow\s*#?\d
 /** Blank out clauses that describe another row, so a scanner reads only this row's own text. */
 export function stripCrossReferences(notes) {
   return String(notes || '').replace(CROSS_REFERENCE_RE, ' ');
+}
+
+/**
+ * Which status survives when a re-evaluation lands on an existing row.
+ *
+ * The update path used to hard-code `status: duplicate.status`, keeping the
+ * tracker's value unconditionally. That is right for every status that records
+ * something that actually HAPPENED — an application sent, a reply received, a
+ * decision taken — and a re-evaluation must never walk those backwards. It is
+ * wrong for exactly one case.
+ *
+ * `Evaluated` is not an outcome, it is the absence of one: "scored, pending
+ * decision". When a re-evaluation of such a row comes back below the pursue
+ * floor, its TSV says SKIP and the house rule in modes/_custom.md requires the
+ * status to be set at the moment the score is written. Keeping `Evaluated`
+ * silently dropped that, and the row kept counting as live work.
+ *
+ * Observed live 2026-08-18: three rows (Bosch 4.0->2.5, isento 4.0->3.2,
+ * Meierhofer 4.0->2.6) were re-scored below the floor by a full evaluation, and
+ * all three stayed `Evaluated` because their TSV status was discarded here.
+ *
+ * So: a row still awaiting a decision takes the incoming status; a row that has
+ * moved beyond that keeps its own.
+ *
+ * @param {string} existing - Status currently on the tracker row.
+ * @param {string} incoming - Status from the TSV addition.
+ * @returns {string}
+ */
+export function resolveUpdatedStatus(existing, incoming) {
+  const cur = String(existing ?? '').trim();
+  const next = String(incoming ?? '').trim();
+  if (!next) return cur;
+  return cur === 'Evaluated' ? next : cur;
 }

@@ -10,10 +10,24 @@ import { getBash, bashSource, run, lastRunFailure } from './helpers.mjs';
 const SOURCES = ['posix', 'git-bash', 'wsl', 'path', 'unresolved'];
 
 test('bashSource() is null until getBash() has resolved', () => {
-  // Import order matters here: nothing above may call getBash() first.
-  assert.equal(bashSource(), null);
-  getBash();
-  assert.ok(SOURCES.includes(bashSource()), `unexpected source: ${bashSource()}`);
+  // Resolution is process-wide and memoized, so this precondition only holds
+  // when nothing has called getBash() yet. Standalone (`node --test`) that is
+  // true; inside test-all.mjs, which runs discovered suites IN-PROCESS and
+  // imports getBash from tests/helpers.mjs itself, it is not — and asserting
+  // null unconditionally made the suite fail purely on discovery order.
+  //
+  // The property actually worth pinning is the pairing: unresolved means null,
+  // resolved means a known source. Both directions are checked; neither
+  // depends on who imported first.
+  const before = bashSource();
+  if (before === null) {
+    getBash();
+    assert.ok(SOURCES.includes(bashSource()), `unexpected source: ${bashSource()}`);
+  } else {
+    assert.ok(SOURCES.includes(before), `unexpected source: ${before}`);
+    getBash();
+    assert.equal(bashSource(), before);
+  }
 });
 
 test('resolution is memoized and the source stays consistent with it', () => {

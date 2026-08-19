@@ -1,5 +1,6 @@
 # Personal data (user fills these)
 cv.md
+article-digest.md
 local/
 # Everything under data/ is generated or personal at runtime — only .gitkeep
 # placeholders are tracked (verify with `git ls-files data/`). A blanket rule
@@ -16,15 +17,14 @@ data/parser-output/**
 !data/parser-output/**/
 !data/parser-output/.gitkeep
 !data/parser-output/**/.gitkeep
-# `reports/*.md` alone stops at the top level: a subdirectory such as
-# reports/scan-digests/ was left tracked, which is user-layer job-search data.
-reports/**/*.md
+reports/*.md
 !reports/.gitkeep
 output/*
 !output/.gitkeep
 batch/logs/*
 !batch/logs/.gitkeep
 batch/batch-state.tsv
+batch/batch-state-recovery.d/
 batch/batch-input.tsv
 batch/tracker-additions/**/*.tsv
 !batch/tracker-additions/.gitkeep
@@ -58,10 +58,15 @@ writing-samples/*
 config/profile.yml
 config/cv-facts.json
 config/benchmarks.yml
+# Fork-local path declarations — this checkout's own files, read by
+# update-system.mjs. Gitignored on purpose: it describes THIS clone, not the
+# project, and must survive the sync that overwrites update-system.mjs (#2421).
+config/local-paths.txt
 portals.yml
 modes/_profile.md
 modes/_custom.md
 modes/_brief.md
+voice-dna.md
 .update-dismissed
 .update-lock
 .manifesto-noted
@@ -83,11 +88,21 @@ plugins.lock
 .resolved-prompt-*
 node_modules/
 bun.lock
+# Working copy the test suite makes under the repo root (test-all.mjs
+# `mkdtempSync(join(ROOT, '.tmp-script-test-'))`). A clean run deletes it; a
+# run interrupted mid-way leaves ~650MB of duplicated repo behind, which a
+# reflexive `git add .` would then stage as ~1000 new files.
+.tmp-script-test-*/
+
 # Report-number reservation sentinels (ephemeral, created by reserve-report-num.mjs)
 reports/*-RESERVED.md
 
-# Backup files written by normalize-statuses.mjs / dedup-tracker.mjs
-*.bak
+# Backup files. Two shapes exist: `{file}.bak` (normalize-statuses.mjs,
+# dedup-tracker.mjs, tracker.mjs) and `{file}.bak-{ISO timestamp}`
+# (web/src/lib/core/safe-write.ts). A plain `*.bak` glob misses the timestamped
+# form, which for cv.md or portals.yml leaves a file holding the same PII as the
+# original sitting untracked in the repo root. Trailing `*` covers both.
+*.bak*
 
 # OpenRouter runner — generated data (personal, never commit)
 data/model-blacklist.json
@@ -97,6 +112,10 @@ data/model-blacklist.json
 *.mov
 *.mp4
 
+# IDE-specific local config
+.idea/
+.vscode/
+
 # CLI-specific local config
 .claude/settings.local.json
 .claude/memory/
@@ -104,6 +123,10 @@ data/model-blacklist.json
 .opencode/memory/
 # OpenCode project config (often holds personal MCP/model/per-machine prefs).
 opencode.json
+# Claude Code project-level MCP server config — commonly ends up holding
+# personal server credentials (e.g. a plugin's API token) once a user adds
+# an MCP server, same risk class as .env.
+.mcp.json
 career-dashboard
 career-dashboard.exe
 package-lock.json
@@ -111,24 +134,11 @@ package-lock.json
 
 # Playwright MCP server run artifacts (ephemeral, machine-local)
 .playwright-mcp/
+test-results/
+playwright-report/
 
 # Planning (local scratchpad)
 plan/
-
-# Third-party tooling cloned locally. `vendor/` carries its own git history, so
-# it cannot be committed here anyway; the skill copy is ignored for a sharper
-# reason — `.claude/skills/` is in SYSTEM_PATHS, and anything committed there is
-# shipped to every career-ops user on update. A vendored third-party skill is a
-# local install, not part of this project's system layer.
-vendor/
-.claude/skills/remove-ai-marks/
-
-# graphify knowledge-graph artifacts (machine-local, regenerable, can be tens of
-# MB). Unanchored so it is caught wherever graphify is run — it defaults to the
-# cwd, which is how a graphify-out/ ended up nested under providers/. That
-# location matters: SYSTEM_PATHS covers `providers/`, so anything committed
-# there is treated as system layer and shipped to every user on update.
-graphify-out/
 
 # Web — runtime cache/history the dashboard writes locally; nothing here is tracked.
 .career-ops-web/
@@ -138,15 +148,11 @@ graphify-out/
 # patterns above (cv.md, portals.yml).
 !test-fixtures/**
 
-# ── PII safety: user-layer backups and interrupted test dirs ──────────────
-# v1.25.0 added guards for these; .gitignore is user-layer so it is never
-# auto-updated and the patterns have to be added by hand.
-*.bak
-*.bak[0-9]*
-*.bak-*
-.tmp-script-test-*/
-article-digest.md
-
-# Per-application CV/cover payloads: user-layer artifacts carrying personal
-# data (name, email, phone, tailored claims). Same class as output/.
-payloads/
+# Profile intake sources (master CV / LinkedIn export / diplomas / references
+# — user PII, never commit). Ship only the system-owned scaffold. #1723
+documents/*
+!documents/.gitkeep
+!documents/README.md
+# Intake fingerprints — the recorded source filenames may themselves carry
+# PII (e.g. cv/jane-doe-master-cv.pdf). #1723
+data/intake-state.json

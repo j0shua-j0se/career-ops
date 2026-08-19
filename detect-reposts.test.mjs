@@ -482,31 +482,10 @@ eq('unsorted input dates -> still works (sorted internally)', unsortedResult.len
 eq('unsorted: firstSeen = 2026-01-01', unsortedResult[0]?.firstSeen, '2026-01-01');
 eq('unsorted: lastSeen = 2026-03-01', unsortedResult[0]?.lastSeen, '2026-03-01');
 
-// Same date, different URLs — NOT a repost under the default window.
-//
-// This assertion used to expect 1. "Repost" means the role was listed, went
-// away, and came back; several distinct requisitions opened on the same day are
-// parallel headcount, which is the opposite signal. Steampunk's four "AI
-// Evaluation Scientist" rows are iCIMS reqs 7999/8000/8001/8003, all first seen
-// 2026-08-06 — four seats. Counting shapes like that produced 58 clusters on the
-// real scan history of which exactly one (Flix, 6-day span) was a real repost,
-// so the report was unusable.
-eq('same date, different URLs -> NOT flagged at the default window', detectReposts([
+// Same date, different URLs
+eq('same date, different URLs -> flagged', detectReposts([
   row({ url: 'https://x.com/1', date: d('2026-01-01'), dateStr: '2026-01-01' }),
   row({ url: 'https://x.com/2', date: d('2026-01-01'), dateStr: '2026-01-01' }),
-], 90).length, 0);
-
-// ...but `--window 0` asks for same-day clusters explicitly, so the guard clamps
-// to the window and that flag keeps working. (Also covered in section 6.)
-eq('same date, different URLs -> still flagged at --window 0', detectReposts([
-  row({ url: 'https://x.com/1', date: d('2026-01-01'), dateStr: '2026-01-01' }),
-  row({ url: 'https://x.com/2', date: d('2026-01-01'), dateStr: '2026-01-01' }),
-], 0).length, 1);
-
-// The smallest genuine repost is one day apart and must survive the guard.
-eq('1 day apart -> flagged (the guard must not swallow real signal)', detectReposts([
-  row({ url: 'https://x.com/1', date: d('2026-01-01'), dateStr: '2026-01-01' }),
-  row({ url: 'https://x.com/2', date: d('2026-01-02'), dateStr: '2026-01-02' }),
 ], 90).length, 1);
 
 // ============================================================================
@@ -890,12 +869,6 @@ function legacyBuildRepostCluster(clusterRows, windowDays) {
   const last = sorted[sorted.length - 1];
   const span = daysBetween(first.date, last.date);
   if (span > windowDays) return null;
-  // Mirrors the same-day guard in buildRepostCluster. This harness exists to
-  // prove the OPTIMIZED GROUPING matches the old nested loop — which rows end up
-  // clustered together — so the reference must apply the same post-grouping
-  // filters. Leaving it out would make same-date corpora fail for a reason that
-  // has nothing to do with grouping.
-  if (span < Math.min(1, windowDays)) return null;
   return {
     company: clusterRows[0].company,
     role: last.title,

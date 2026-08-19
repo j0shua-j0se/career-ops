@@ -15,7 +15,7 @@
 //
 // Auto-discovered by test-all.mjs — never exit the process here.
 import { pass, fail } from './helpers.mjs';
-import { extractReqNumber } from '../merge-tracker.mjs';
+import { extractReqNumber } from '../tracker-parse.mjs';
 
 console.log('\nmerge-tracker.mjs — req number vs. row cross-references');
 

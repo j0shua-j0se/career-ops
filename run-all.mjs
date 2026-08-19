@@ -40,7 +40,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, ren
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 
 import {
   STAGES, STAGE_INFO, DEFAULT_RUN_CONFIG,

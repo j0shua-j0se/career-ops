@@ -304,12 +304,23 @@ export function classifyLiveness({ status = 0, requestedUrl = '', finalUrl = '',
   if (botChallenge) {
     return { result: 'uncertain', code: 'bot_challenge', reason: `anti-bot challenge: ${botChallenge.source}` };
   }
-  if (status === 403 || status === 503) {
+  // 429 belongs with 403/503: rate limiting is the board throttling US, never
+  // evidence the posting is gone. Its body is a short "Too Many Requests", well
+  // under MIN_CONTENT_CHARS, so without this it fell through to
+  // insufficient_content and read as `expired` — and an expired result is
+  // written to scan-history as skipped_expired, whose URL every later scan
+  // dedup-skips (indefinitely, unless scan_history.recheck_after_days is set).
+  // Scanning harder is exactly what earns a 429, so this compounds.
+  if (status === 403 || status === 429 || status === 503) {
     // The body outranks the status code in both directions (already true for
     // 200 + not-found via insufficient_content/HARD_EXPIRED_PATTERNS below).
     // This is the other direction: a blocking status whose body plainly says
     // the posting is gone. Real Siemens case: HTTP 403, body "An error has
     // occurred — Page not found".
+    //
+    // Folding 429 in here keeps upstream's rate-limit guarantee intact: a 429
+    // body is a short "Too Many Requests" and cannot match a not-found pattern,
+    // so it still falls through to access_blocked below.
     const denied = firstMatch(ACCESS_DENIED_PATTERNS, bodyText);
     if (denied) {
       return { result: 'uncertain', code: 'access_blocked', reason: `HTTP ${status} (access denied: ${denied.source})` };

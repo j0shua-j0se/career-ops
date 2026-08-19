@@ -57,6 +57,7 @@ Run `npm run jd:similarity -- {bundle-root}/jd/current.md {bundle-root}/jd/previ
     - Pass `--strict-pages` only when the user or market requires a hard limit. Strict overflow leaves the draft available for inspection but does not report or index it as successful; trim lower-priority content and rerun.
 22. Execute: `node clean-artifacts.mjs {pdf-path}`. Chromium stamps `/Creator (Chromium)` and `/Producer (Skia/PDF …)` into every PDF it prints; this blanks that toolchain fingerprint and normalizes the build timestamp to the date, byte-for-byte in place so the PDF's structure is untouched. `build-application.mjs` does this for you — the step is listed here for the standalone path only.
 23. Report: PDF path, number of pages, keyword coverage %, and any skill gaps from Step 4 still unaddressed
+22. Report: PDF path, number of pages, keyword coverage %, and any skill gaps from Step 4 still unaddressed
 
 ## ATS Rules (clean parsing)
 
