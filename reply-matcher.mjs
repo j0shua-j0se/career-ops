@@ -392,7 +392,17 @@ export function classifyReply(cand) {
     'decided to move forward with other',
     'will not be progressing', 'not progressing your application',
     'no longer under consideration', 'not under consideration',
-    'we have decided not to'
+    'we have decided not to',
+    // The "consider" family. Observed live: Primetals/MHI Erlangen closed an
+    // application with "we won't consider your application in the further
+    // process any more" — an unambiguous rejection that matched nothing above
+    // and classified as Unknown, which would have left the row Applied
+    // indefinitely. Both apostrophe forms are listed because the text is
+    // matched with a plain lowercase `includes` and mail clients emit either
+    // U+0027 or U+2019.
+    'not consider your application', "won't consider your application",
+    '’t consider your application',
+    'no longer consider', 'unable to consider', 'not consider you further'
   ];
 
   // 4. Auto-confirmation keywords
