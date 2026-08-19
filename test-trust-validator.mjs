@@ -442,6 +442,52 @@ section('buildTrustValidator — config without enabled key');
   assert(r.flags.includes('invalid_url'), 'empty config (no enabled key) → defaults to enabled');
 }
 
+section('buildTrustValidator — Rule 4: job boards take a small deduction, not the mismatch penalty');
+
+{
+  // The bug this pins made the fraud signal useless by firing it everywhere.
+  // company_domain_mismatch hit EVERY posting from an aggregator-backed
+  // provider — arbeitsagentur, StepStone, Indeed, stellenwerk — because a BMW
+  // job on the German federal employment agency's site is, structurally, a
+  // company that does not match its host. A uniform -15 across whole sources is
+  // noise, and the rule exists to spot a posting on a throwaway domain, which
+  // it cannot do while it also fires on a government portal.
+  const v = buildTrustValidator({ enabled: true });
+
+  const board = v({ url: 'https://www.arbeitsagentur.de/jobsuche/jobdetail/1234', company: 'BMW' });
+  assert(!board.flags.includes('company_domain_mismatch'), 'arbeitsagentur.de → not a company/domain mismatch');
+  assert(board.flags.includes('posting_on_job_board'), 'arbeitsagentur.de → flagged as a job board');
+  assert(board.score === 95, 'job board → score 95 (100 - 5)');
+  assert(board.level === 'high', 'a job-board posting still rates high');
+
+  // Subdomain match: de.indeed.com must resolve through indeed.com.
+  const sub = v({ url: 'https://de.indeed.com/viewjob?jk=abc', company: 'Siemens Energy' });
+  assert(sub.flags.includes('posting_on_job_board'), 'de.indeed.com → matched via the indeed.com entry');
+  assert(!sub.flags.includes('company_domain_mismatch'), 'de.indeed.com → no mismatch flag');
+
+  // The signal must still fire where it means something.
+  const scam = v({ url: 'https://random-careers.xyz/job/1', company: 'Acme Corp' });
+  assert(scam.flags.includes('company_domain_mismatch'), 'an unknown host still trips the mismatch rule');
+  assert(scam.score === 85, 'unknown host → 85, now distinguishable from a job board at 95');
+
+  // An ATS is the employer's own system and keeps its clean 100 — the board
+  // list must not quietly demote it.
+  const ats = v({ url: 'https://boards.greenhouse.io/stripe/jobs/1', company: 'Stripe' });
+  assert(ats.score === 100, 'ATS-hosted posting is untouched by the job-board rule');
+  assert(!ats.flags.includes('posting_on_job_board'), 'ATS is not flagged as a job board');
+
+  // Company matching its own host is still the cleanest case.
+  const own = v({ url: 'https://openai.com/careers/x', company: 'OpenAI' });
+  assert(own.score === 100, 'employer own-domain posting scores 100');
+
+  // A board is overridable from config, same as the ATS allowlist.
+  const custom = buildTrustValidator({ enabled: true, job_boards: ['myboard.test'] });
+  const c1 = custom({ url: 'https://myboard.test/j/1', company: 'Acme' });
+  assert(c1.flags.includes('posting_on_job_board'), 'config job_boards list is honoured');
+  const c2 = custom({ url: 'https://www.arbeitsagentur.de/j/1', company: 'Acme' });
+  assert(c2.flags.includes('company_domain_mismatch'), 'an explicit job_boards list REPLACES the defaults');
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Summary
 // ══════════════════════════════════════════════════════════════════════

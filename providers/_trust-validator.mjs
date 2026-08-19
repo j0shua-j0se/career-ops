@@ -47,12 +47,65 @@ const DEFAULT_ATS_ALLOWLIST = [
   'teamtailor.com',
 ];
 
+/**
+ * Job boards and aggregators: sites that legitimately host postings for
+ * employers who did not choose them, unlike an ATS the employer runs itself.
+ *
+ * These need their own list because `company_domain_mismatch` was firing on
+ * every single posting from an aggregator-backed provider — a BMW job on
+ * arbeitsagentur.de is not a company/domain mismatch, it is how a public
+ * employment service works. A uniform -15 across whole sources is noise, and
+ * noise in a fraud signal is worse than no signal: the rule exists to catch a
+ * posting on a throwaway domain, and it cannot do that while it also fires on
+ * the German federal employment agency.
+ *
+ * They are NOT folded into the ATS allowlist, because the distinction is real.
+ * An ATS URL is the employer's own hosted careers system — they chose it and
+ * control what appears there. An aggregator republishes, sometimes without the
+ * employer's involvement, so a scam listing reaches a job board more easily
+ * than it reaches a company's own Greenhouse board. That is worth a small
+ * deduction, just not the same one as an unexplained domain.
+ *
+ * @type {string[]}
+ */
+const DEFAULT_JOB_BOARDS = [
+  // German market
+  'arbeitsagentur.de',
+  'interamt.de',
+  'stepstone.de',
+  'stellenanzeigen.de',
+  'stellenwerk.de',
+  'datacareer.de',
+  'kimeta.de',
+  'meinestadt.de',
+  'monster.de',
+  'jobboerse.arbeitsagentur.de',
+  // EU / public
+  'europa.eu',
+  // International aggregators
+  'indeed.com',
+  'linkedin.com',
+  'xing.com',
+  'glassdoor.com',
+  'ziprecruiter.com',
+  'arbeitnow.com',
+  'welcometothejungle.com',
+  'remoteok.com',
+  'weworkremotely.com',
+  'himalayas.app',
+  'echojobs.io',
+  '4dayweek.io',
+];
+
 /** @type {Record<string, number>} */
 const PENALTIES = {
   invalid_url: 50,
   missing_apply_url: 40,
   suspicious_domain: 25,
   company_domain_mismatch: 15,
+  // Deliberately small. It records "this is not the employer's own domain",
+  // which is worth knowing and is not evidence of anything wrong.
+  posting_on_job_board: 5,
 };
 
 /**
@@ -205,6 +258,12 @@ export function buildTrustValidator(config) {
     .map(d => String(d).toLowerCase().trim())
     .filter(Boolean);
 
+  const jobBoards = (Array.isArray(config.job_boards)
+    ? config.job_boards
+    : DEFAULT_JOB_BOARDS)
+    .map(d => String(d).toLowerCase().trim())
+    .filter(Boolean);
+
   return (job) => {
     /** @type {string[]} */
     const flags = [];
@@ -248,9 +307,19 @@ export function buildTrustValidator(config) {
     }
 
     // Rule 4 — Company ↔ domain mismatch (skip for ATS-hosted URLs)
+    //
+    // A known job board takes the small `posting_on_job_board` deduction
+    // instead of the full mismatch penalty. The condition is identical — the
+    // company does not match the host — but on an aggregator that is the
+    // expected state rather than an unexplained one.
     const company = typeof job.company === 'string' ? job.company.trim() : '';
-    if (company && !matchesDomainList(hostname, atsAllowlist)) {
-      if (!companyMatchesHostname(company, hostname)) {
+    if (company
+      && !matchesDomainList(hostname, atsAllowlist)
+      && !companyMatchesHostname(company, hostname)) {
+      if (matchesDomainList(hostname, jobBoards)) {
+        flags.push('posting_on_job_board');
+        score -= PENALTIES.posting_on_job_board;
+      } else {
         flags.push('company_domain_mismatch');
         score -= PENALTIES.company_domain_mismatch;
       }

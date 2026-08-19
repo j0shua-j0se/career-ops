@@ -20,7 +20,14 @@
 import { chromium } from 'playwright';
 import { readFileSync, existsSync, mkdirSync } from 'fs';
 import * as yaml from 'js-yaml';
-import { appendToPipeline, appendToScanHistory, loadSeenUrls } from './scan.mjs';
+import { pathToFileURL } from 'url';
+import {
+  appendToPipeline,
+  appendToScanHistory,
+  loadSeenUrls,
+  buildTitleFilter,
+  buildLocationFilter,
+} from './scan.mjs';
 
 // ── Config ───────────────────────────────────────────────────────────
 
@@ -71,28 +78,25 @@ const keywords = SINGLE_KEYWORD
 
 // ── Filters ──────────────────────────────────────────────────────────
 
-const titleFilter = config.title_filter || {};
-const positiveKw = (titleFilter.positive || []).map(k => k.toLowerCase());
-const negativeKw = (titleFilter.negative || []).map(k => k.toLowerCase());
-
-function matchesTitle(title) {
-  const lower = title.toLowerCase();
-  if (negativeKw.some(k => lower.includes(k))) return false;
-  if (positiveKw.length === 0) return true;
-  return positiveKw.some(k => lower.includes(k));
-}
-
-const locFilter = config.location_filter || {};
-const locAllow = (locFilter.allow || []).map(k => k.toLowerCase());
-const locBlock = (locFilter.block || []).map(k => k.toLowerCase());
-
-function matchesLocation(loc) {
-  if (!loc) return true;
-  const lower = loc.toLowerCase();
-  if (locBlock.some(k => lower.includes(k))) return false;
-  if (locAllow.length === 0) return true;
-  return locAllow.some(k => lower.includes(k));
-}
+// Both filters come from scan.mjs rather than being reimplemented here. The
+// local versions this replaces were wrong in two ways, neither of which raised
+// an error or a warning:
+//
+//   * `location_filter` has THREE tiers — `always_allow`, `block`, `allow` —
+//     and always_allow deliberately outranks block. The copy here read only
+//     `allow`/`block`, so every always_allow entry was ignored. This profile
+//     keeps its entire home region (Erlangen, Nürnberg, Fürth, Bayern...) under
+//     always_allow, so the scanner's summary printed "Filtered location: 0"
+//     while the filter did nothing at all.
+//   * `title_filter.positive` supports AND-groups ("werkstudent + data" means
+//     both words in any order) and word-boundary matching. A plain `includes`
+//     both over-matches (hitting "vp" inside another word) and under-matches
+//     (never satisfying an AND-group).
+//
+// Sharing the builders is what stops this scanner drifting from what scan.mjs,
+// scan-eures.mjs and every provider already enforce.
+const matchesTitle = buildTitleFilter(config.title_filter);
+const locationFilter = buildLocationFilter(config.location_filter);
 
 // ── Date helpers ─────────────────────────────────────────────────────
 
@@ -301,7 +305,7 @@ async function main() {
           };
 
           if (!matchesTitle(offer.title)) { seen.add(canonical.url); titleSkipped.push(canonical); continue; }
-          if (!matchesLocation(location)) { seen.add(canonical.url); locationSkipped.push(canonical); continue; }
+          if (!locationFilter(location, canonical.url, offer.title)) { seen.add(canonical.url); locationSkipped.push(canonical); continue; }
           // Same-day offers pass: lastScanDate is the day of the last run, and an
           // offer published later that same day should not be treated as stale.
           if (lastScanDate && pubDate && pubDate < lastScanDate) { seen.add(canonical.url); dateSkipped.push(canonical); continue; }
@@ -360,7 +364,12 @@ async function main() {
   console.log('\n→ Run /career-ops pipeline to evaluate new offers.');
 }
 
-main().catch(err => {
-  console.error('Fatal:', err.message);
-  process.exit(1);
-});
+// Import-safety guard: a test that imports this module must not run the scan.
+// An unguarded main() calling process.exit() on import is what silently hid 21
+// failing tests behind doctor.mjs.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(err => {
+    console.error('Fatal:', err.message);
+    process.exit(1);
+  });
+}
