@@ -17,7 +17,21 @@ import { isAbsolute, join, dirname, basename } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_SOURCES = ['cv.md', 'article-digest.md'];
+// The full in-scope set from AGENTS.md -> Source-of-Truth Boundary, which names
+// cv.md, article-digest.md, config/profile.yml and modes/_profile.md as the
+// files user-facing content may be generated from.
+//
+// The list used to stop at the first two, which made the gate NARROWER than the
+// boundary it exists to enforce — and a gate that rejects true, properly-sourced
+// claims is worse than no gate, because it teaches the operator to route around
+// it. Observed live 2026-08-18: a cover letter stating the candidate is "capped
+// at 20 hours during the semester" was blocked as an unsourced metric, while
+// config/profile.yml carries `max_hours_per_week: 20` and modes/_profile.md
+// states the 20 h/week Werkstudent cap in three separate places.
+//
+// This widens what may be SUPPORTED; it does not widen what may be INVENTED.
+// A claim still has to appear in one of these files.
+const DEFAULT_SOURCES = ['cv.md', 'article-digest.md', 'config/profile.yml', 'modes/_profile.md'];
 const DEFAULT_CONFIG = join(ROOT, 'config', 'cv-facts.json');
 const TOOL_PROSE_WORDS = new Set([
   'a', 'an', 'and', 'at', 'built', 'by', 'containerized', 'deployment',
