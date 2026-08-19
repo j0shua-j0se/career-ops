@@ -135,6 +135,10 @@ function loopFacts() {
     const endedAbnormally = Boolean(status.halted_reason);
     return {
       done: status.phase === 'done' && !endedAbnormally,
+      // The loop's own start timestamp. decideNextStage compares it against the
+      // pass's `started_at` so a completed loop from a PREVIOUS pass cannot
+      // satisfy this one's scan stage.
+      runId: status.run_id ?? null,
       endedAbnormally,
       haltedReason: status.halted_reason ?? null,
       phase: status.phase ?? null,

@@ -387,7 +387,7 @@ try {
 console.log('\nrun-core — the scan stage accounts for agent-driven sources');
 
 {
-  const { AGENT_DRIVEN_SOURCES, decideNextStage, newRun } = await import('../run-core.mjs');
+  const { AGENT_DRIVEN_SOURCES, decideNextStage, newRun, DEFAULT_RUN_CONFIG, isStaleLoop } = await import('../run-core.mjs');
 
   const withLoopDone = (swept) =>
     decideNextStage(newRun(), { loop: { done: true, qualified: 2 }, agentSourcesSwept: swept });
@@ -465,4 +465,47 @@ console.log('\nrun-core — the scan stage accounts for agent-driven sources');
   /ended without completing/.test(aborted.reason || '')
     ? pass('the reason states the previous loop did not complete')
     : fail('the aborted reason does not explain itself');
+
+  // A loop that finished BEFORE this pass started is not this pass's scan.
+  //
+  // Same shape as the abort case above, one step subtler: the loop completed
+  // perfectly well, just for a different run. `phase === 'done'` lives in
+  // scan-loop's own state file, which outlives any single pass, so a fresh
+  // `start` inherited the previous pass's completion and went straight to
+  // Stage 1b having discovered nothing. Observed live: a pass started
+  // 2026-08-18 was satisfied by a loop that had finished on 2026-08-11.
+  const staleState = newRun(DEFAULT_RUN_CONFIG, { now: '2026-08-18T21:00:00.000Z' });
+  const stale = decideNextStage(staleState, {
+    loop: { done: true, runId: '2026-08-11T22:38:54.046Z', qualified: 7, phase: 'done' },
+    agentSourcesSwept: false,
+  });
+  stale.action === 'scan'
+    ? pass("a loop finished before the pass began does not satisfy the pass's scan stage")
+    : fail(`a stale completed loop decided ${stale.action} — the scan stage would be skipped`);
+
+  /start --reset/.test(stale.instructions || '')
+    ? pass('the stale path says to start a FRESH loop')
+    : fail('stale instructions do not say to start a fresh loop');
+
+  // A loop that started DURING this pass is the pass's own scan, and must roll
+  // forward normally — the staleness check must not force an endless re-scan.
+  const currentLoop = decideNextStage(staleState, {
+    loop: { done: true, runId: '2026-08-18T21:30:00.000Z', qualified: 7, phase: 'done' },
+    agentSourcesSwept: true,
+  });
+  currentLoop.action === 'stage-complete'
+    ? pass('a loop started during the pass completes the scan stage as before')
+    : fail(`a current loop decided ${currentLoop.action}, expected stage-complete`);
+
+  // Fail OPEN on an unreadable clock: a missing or malformed timestamp must not
+  // force a re-scan the user never asked for.
+  isStaleLoop(null, '2026-08-18T21:00:00.000Z') === false
+    ? pass('a missing loop run_id is not treated as stale')
+    : fail('a missing loop run_id was treated as stale');
+  isStaleLoop('not-a-date', '2026-08-18T21:00:00.000Z') === false
+    ? pass('an unparseable loop run_id is not treated as stale')
+    : fail('an unparseable loop run_id was treated as stale');
+  isStaleLoop('2026-08-11T00:00:00.000Z', '2026-08-18T00:00:00.000Z') === true
+    ? pass('isStaleLoop is true when the loop predates the pass')
+    : fail('isStaleLoop missed a loop that predates the pass');
 }

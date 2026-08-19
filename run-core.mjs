@@ -262,6 +262,26 @@ export function kitCandidates(rows = [], kitThreshold = DEFAULT_RUN_CONFIG.kitTh
 }
 
 /**
+ * Did this completed loop run belong to an earlier pass?
+ *
+ * `scan-loop.mjs` stamps its run_id with the ISO timestamp it started at, so a
+ * plain comparison against the pass's own `started_at` answers it. Unparseable
+ * or missing timestamps fail OPEN (not stale): an unreadable clock must not
+ * force a re-scan the user did not ask for, and the abort check below still
+ * catches the loop failures that matter most.
+ *
+ * @param {string|null|undefined} loopRunId - scan-loop's run_id (an ISO timestamp).
+ * @param {string|null|undefined} runStartedAt - This pass's `started_at`.
+ * @returns {boolean}
+ */
+export function isStaleLoop(loopRunId, runStartedAt) {
+  const loopMs = Date.parse(loopRunId ?? '');
+  const runMs = Date.parse(runStartedAt ?? '');
+  if (!Number.isFinite(loopMs) || !Number.isFinite(runMs)) return false;
+  return loopMs < runMs;
+}
+
+/**
  * Decide what happens next.
  *
  * Pure: every observation the decision depends on arrives in `facts`, so the
@@ -305,6 +325,29 @@ export function decideNextStage(state, facts = {}) {
 
   if (stage === 'scan') {
     const loop = facts.loop ?? {};
+    // A loop that finished BEFORE this pass started scanned for a different
+    // pass. `phase === 'done'` is a property of the loop's own state file,
+    // which outlives any single run, so a fresh `start` inherited the last
+    // pass's completion and jumped straight to Stage 1b — silently performing
+    // no discovery at all. Observed live: a pass started 2026-08-18 was
+    // satisfied by a loop that had finished on 2026-08-11.
+    //
+    // Same failure shape as the abort case below (a `done` phase that did not
+    // mean this pass had scanned), so it is answered the same way: demand a
+    // fresh loop rather than treating stale completion as completion.
+    if (loop.done && isStaleLoop(loop.runId, state.started_at)) {
+      return {
+        ...base,
+        reason: `the completed scan loop belongs to an earlier pass (loop started ${loop.runId}, `
+          + `this pass started ${state.started_at}) — it discovered nothing for THIS run`,
+        instructions: 'Start a FRESH loop: `node scan-loop.mjs start --reset`. The finished loop on '
+          + 'disk predates this pass, so its results were already consumed — do not treat it as this '
+          + "pass's scan. Then ask `node scan-loop.mjs next` what is due and run `node scan-loop.mjs "
+          + 'wave` to execute it (NOT strategy.command directly, which scans for real without '
+          + 'recording the rung). Repeat until `next` reports `finish`, then `node scan-loop.mjs '
+          + 'finish`.',
+      };
+    }
     if (loop.done) {
       // The scan loop is not the whole of stage 1. Sources with no HTTP
       // provider — currently Indeed, reachable only through an MCP that the
