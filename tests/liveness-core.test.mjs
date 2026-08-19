@@ -225,3 +225,53 @@ for (const status of [404, 410]) {
     ? pass('a StepStone page with only footer chrome is NOT active')
     : fail('footer-only StepStone page wrongly classified active');
 }
+
+// ── The SITE is broken, not the posting ─────────────────────────────────────
+//
+// Cornerstone answers a session or backend fault with error.aspx and "An error
+// occurred while processing your request" — no not-found wording, and it serves
+// that page for every URL on the tenant including the careers index. Read as a
+// content-bearing page with no apply control, it produced `no_apply_control`
+// and the reason "content present but no visible apply control found": true,
+// and misleading enough to send someone checking a posting that was fine.
+//
+// Observed live 2026-08-19: trench.csod.com returned it for req1690 AND for the
+// careers home page, while the requisition itself was still open.
+//
+// The ordering against the not-found checks is the whole safety property, so
+// both directions are pinned here.
+
+{
+  const r = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://trench.csod.com/ux/ats/careersite/1/home/requisition/1690?c=trench',
+    finalUrl: 'https://trench.csod.com/error.aspx',
+    bodyText: 'An error occurred while processing your request. You may continue working in '
+      + 'another area of the system by clicking on another tab or link above. If this problem '
+      + 'persists, please contact your system administrator and provide the following error details.',
+    applyControls: [],
+  });
+  r.result === 'uncertain'
+    ? pass('an ATS-wide error page is uncertain, never expired')
+    : fail(`Cornerstone error page classified ${r.result}/${r.code}`);
+  r.code === 'site_error'
+    ? pass('and it carries its own code so the SITE is re-checked, not the requisition')
+    : fail(`expected site_error, got ${r.code}`);
+}
+
+{
+  // The guard: an error page that DOES name the posting as missing must stay
+  // expired. Siemens serves "An error has occurred / Page not found" with a 403
+  // for a withdrawn requisition — verified 2026-08-19 by fetching a sibling req
+  // from the same host in the same minute, which returned 200 with its full JD.
+  const r = classifyLiveness({
+    status: 403,
+    requestedUrl: 'https://jobs.siemens.com/en_US/externaljobs/JobDetail/515782',
+    finalUrl: 'https://jobs.siemens.com/en_US/externaljobs/Error',
+    bodyText: 'An error has occurred Page not found Go to open jobs',
+    applyControls: [],
+  });
+  r.result === 'expired'
+    ? pass('an error page that says "page not found" is still expired')
+    : fail(`Siemens withdrawn posting classified ${r.result}/${r.code}`);
+}

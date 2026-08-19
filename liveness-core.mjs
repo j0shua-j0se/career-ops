@@ -225,6 +225,31 @@ function hasEmailApplyChannel(bodyText = '', applyControls = []) {
   return matched ? matched.source : null;
 }
 
+// An ATS whose WHOLE SITE is erroring, as distinct from a posting that is gone.
+// Cornerstone answers a session or backend fault with error.aspx and "An error
+// occurred while processing your request" — no not-found wording anywhere, and
+// it serves that page for every URL on the tenant, including the careers index.
+//
+// Without this the page reads as content-bearing with no apply control, so the
+// verdict was `no_apply_control` and the reason said "content present but no
+// visible apply control found" — true, and misleading enough to send someone
+// checking a posting that was never the problem. Observed live 2026-08-19:
+// trench.csod.com returned it for req1690 AND for the careers home page.
+//
+// Ordered AFTER the not-found checks on purpose. Siemens' "An error has
+// occurred / Page not found" names the posting as missing and must stay
+// `expired`; this set only catches errors that say nothing about the posting.
+const SITE_ERROR_BODY_PATTERNS = [
+  /an error occurred while processing your request/i,
+  /if this problem persists,? please contact your system administrator/i,
+  /service temporarily unavailable/i,
+  /we are experiencing technical difficulties/i,
+];
+
+const SITE_ERROR_URL_PATTERNS = [
+  /\/error\.aspx(?:$|[?#])/i,
+];
+
 const MIN_CONTENT_CHARS = 300;
 
 // A job-detail URL almost always carries the posting's identity: a numeric req id
@@ -352,6 +377,22 @@ export function classifyLiveness({ status = 0, requestedUrl = '', finalUrl = '',
   const expiredBody = firstMatch(HARD_EXPIRED_PATTERNS, bodyText);
   if (expiredBody) {
     return { result: 'expired', code: 'expired_body', reason: `pattern matched: ${expiredBody.source}` };
+  }
+
+  // The site is broken, not the posting. Reported as uncertain with its own code
+  // so the operator re-checks the SITE rather than the requisition — and so a
+  // transient outage can never write skipped_expired into scan-history, which
+  // would dedup-filter a live job out of every later scan.
+  const siteErrorUrl = firstMatch(SITE_ERROR_URL_PATTERNS, finalUrl);
+  const siteErrorBody = firstMatch(SITE_ERROR_BODY_PATTERNS, bodyText);
+  if (siteErrorUrl || siteErrorBody) {
+    return {
+      result: 'uncertain',
+      code: 'site_error',
+      reason: siteErrorUrl
+        ? `the ATS itself errored: redirected to ${finalUrl}`
+        : `the ATS itself errored: ${siteErrorBody.source}`,
+    };
   }
 
   // A dead permalink that 301s to a generic search/listing page still shows
