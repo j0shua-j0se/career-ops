@@ -788,5 +788,62 @@ if (!HAS_WEB) {
   }
 }
 
+// ── Test 15e: the triage placeholder is dropped once the evaluation arrives ──
+// scan-loop.mjs writes "triage-only from loop wave N — full evaluation pending"
+// when it promotes a posting on a title-only score. That is true at promotion
+// time and false the moment a report exists — but nothing removed it, so 32
+// rows accumulated claiming an evaluation was still owed while carrying a
+// completed one, several of them SKIP or Discarded rows where none would ever
+// be owed again.
+{
+  const PLACEHOLDER = `# Applications Tracker
+
+| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|-----|------|-------|--------|-----|--------|-------|
+| 1 | 2026-01-05 | Acme GmbH | — | Werkstudent Data | 4.0/5 | Evaluated | ❌ | — | Job ID 7716. triage-only from loop wave 1 — full evaluation pending |
+`;
+  const WITH_REPORT = '1\t2026-01-06\tAcme GmbH\tWerkstudent Data\tEvaluated\t4.2/5\t❌\t[1](reports/001-acme-2026-01-06.md)\tErlangen hybrid, 15h/w confirmed\n';
+  const sb = makeSandbox(PLACEHOLDER, { '1-acme.tsv': WITH_REPORT });
+  runScript('merge-tracker.mjs', [], sb);
+  const row = dataRows(sb.tracker).find(l => l.includes('Acme'));
+  if (row && !/full evaluation pending/i.test(row)) {
+    pass('the triage placeholder is removed once a report link arrives');
+  } else {
+    fail(`placeholder survived its own fulfilment:\n${row}`);
+  }
+  // Everything else in the cell must survive untouched — the req number in
+  // particular, which merge-tracker reads back out of Notes to tell distinct
+  // requisitions apart.
+  if (row && row.includes('Job ID 7716')) pass('the rest of the Notes cell is preserved verbatim');
+  else fail(`unrelated note text was lost:\n${row}`);
+  if (row && row.includes('Erlangen hybrid')) pass('the incoming note is still appended');
+  else fail(`incoming note missing:\n${row}`);
+  rmSync(sb.dir, { recursive: true, force: true });
+}
+
+// ── Test 15f: without a report, the placeholder stays ────────────────────────
+// A re-triage that produces no evaluation has not fulfilled the promise, so the
+// note must survive — otherwise the row silently loses the record that it was
+// promoted on a title-only score.
+{
+  const PLACEHOLDER = `# Applications Tracker
+
+| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|-----|------|-------|--------|-----|--------|-------|
+| 1 | 2026-01-05 | Acme GmbH | — | Werkstudent Data | 4.0/5 | Evaluated | ❌ | — | triage-only from loop wave 1 — full evaluation pending |
+`;
+  const NO_REPORT = '1\t2026-01-06\tAcme GmbH\tWerkstudent Data\tEvaluated\t4.1/5\t❌\t—\tre-triaged, still no JD read\n';
+  const sb = makeSandbox(PLACEHOLDER, { '1-acme.tsv': NO_REPORT });
+  runScript('merge-tracker.mjs', [], sb);
+  const row = dataRows(sb.tracker).find(l => l.includes('Acme'));
+  if (row && /full evaluation pending/i.test(row)) {
+    pass('without a report the placeholder is kept — the promise is still outstanding');
+  } else {
+    fail(`placeholder dropped without an evaluation:\n${row}`);
+  }
+  rmSync(sb.dir, { recursive: true, force: true });
+}
+
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

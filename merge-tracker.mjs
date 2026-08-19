@@ -344,9 +344,27 @@ function mergeNotes(existingNotes, addition, oldScore, newScore, extraMarker = '
   // empty here: a placeholder cell collapses to the marker instead of gaining
   // a `—. ` separator the row never had (#2483).
   const prevRaw = String(existingNotes ?? '').trim();
-  const prev = ['—', '-', 'N/A'].includes(prevRaw)
+  let prev = ['—', '-', 'N/A'].includes(prevRaw)
     ? ''
     : prevRaw.replace(/\s*\.\s*$/, '');
+
+  // Drop the loop's triage placeholder once the evaluation it promises has
+  // actually arrived. scan-loop.mjs writes "triage-only from loop wave N —
+  // full evaluation pending" when it promotes a posting on a title-only score;
+  // that is true at promotion time and false the moment a report exists. Left
+  // in place it accumulates: 32 rows were found still claiming an evaluation
+  // was owed while carrying a completed one, several of them SKIP or Discarded
+  // rows where no evaluation was ever going to be owed again. A note that
+  // states outstanding work which is already done is worse than no note.
+  //
+  // Only removed when the addition brings a report link, i.e. the promise has
+  // been kept. Everything else in the cell is preserved verbatim, and the
+  // clause split is the same '. ' this function joins with.
+  if (prev && /\]\([^)]*reports\/[^)]+\)/.test(String(addition?.report ?? ''))) {
+    const kept = prev.split(/\.\s+/)
+      .filter((c) => !/triage[- ]only from loop wave\s*\d*\s*[—-]?\s*full evaluation pending/i.test(c));
+    prev = kept.join('. ').replace(/\s*\.\s*$/, '');
+  }
   const incoming = String(addition.notes ?? '').trim();
   const marker = extraMarker
     ? `Re-eval ${addition.date} (${oldScore}→${newScore}) — ${extraMarker}`
