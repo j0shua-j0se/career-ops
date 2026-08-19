@@ -410,3 +410,116 @@ console.log('\nliveness-browser — iCIMS job URLs are fetched via their content
     fail(`403 captcha gave ${challenge.result} (${challenge.code})`);
   }
 }
+
+// ── Expiry stated in the redirect target's path ─────────────────────────────
+//
+// A dead permalink that 301s to a page whose PATH says the job is gone carries
+// exactly the evidence an expired BODY phrase does. Before this, only the body
+// and `?error=true` were read, so the redirect fell through to the generic
+// "job id missing from final URL" rule and returned `uncertain` — which under
+// modes/run.md means "go and re-verify by hand".
+//
+// Observed live 2026-08-18: four of six BMW Group postings redirected to
+// bmwgroup.jobs/.../de/de/job-no-longer-available.html. Four unambiguous
+// closures, four manual re-checks demanded.
+
+{
+  const r = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://www.bmwgroup.jobs/de/de/jobfinder/job-description.189100.html',
+    finalUrl: 'https://www.bmwgroup.jobs/content/grpw/websites/bmwgroup_jobs/de/de/job-no-longer-available.html',
+    bodyText: 'BMW Group careers. Search our open positions.',
+    applyControls: ['Apply now'],
+  });
+  r.result === 'expired'
+    ? pass('a redirect to job-no-longer-available is expired, not uncertain')
+    : fail(`BMW redirect classified ${r.result}/${r.code}, expected expired`);
+  r.code === 'expired_url'
+    ? pass('and the code names the URL as the evidence')
+    : fail(`expected expired_url, got ${r.code}`);
+}
+
+{
+  // Same shape, other vocabularies — the pattern must not be BMW-specific.
+  const en = classifyLiveness({
+    status: 200, requestedUrl: 'https://x.com/jobs/123',
+    finalUrl: 'https://x.com/careers/position-no-longer-available',
+    bodyText: 'Careers', applyControls: ['Apply'],
+  });
+  const de = classifyLiveness({
+    status: 200, requestedUrl: 'https://x.de/job/9',
+    finalUrl: 'https://x.de/stellenangebot-nicht-gefunden',
+    bodyText: 'Karriere', applyControls: ['Bewerben'],
+  });
+  en.result === 'expired' && de.result === 'expired'
+    ? pass('the English and German "no longer available" landing pages both read as expired')
+    : fail(`en=${en.result} de=${de.result}, expected both expired`);
+}
+
+{
+  // The guard that matters: a LIVE posting whose body happens to talk about
+  // availability must not be dragged into `expired`. Only the final URL is read.
+  const r = classifyLiveness({
+    status: 200, requestedUrl: 'https://x.com/jobs/55', finalUrl: 'https://x.com/jobs/55',
+    bodyText: 'This role is available immediately and the position is not closed. Apply now.',
+    applyControls: ['Apply'],
+  });
+  r.result === 'active'
+    ? pass('a live posting that merely discusses availability stays active')
+    : fail(`healthy posting classified ${r.result}/${r.code}`);
+}
+
+// ── StepStone's apply control ───────────────────────────────────────────────
+//
+// StepStone renders its apply button client-side, so /bewerben/ never matched
+// and every StepStone posting returned `no_apply_control` however healthy.
+// modes/run.md documents this as a known false negative whose remedy is
+// --skip-liveness — but a gate the operator is trained to bypass protects
+// nothing, so the checker now matches what StepStone actually renders.
+//
+// The docs also warn against grepping for "bewerben" as proof, because it hits
+// the footer's "Bewerbende" (Applicants) nav label. These strings do not.
+
+{
+  const live = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://www.stepstone.de/stellenangebote--x--14405387-inline.html',
+    finalUrl: 'https://www.stepstone.de/stellenangebote--x--14405387-inline.html',
+    bodyText: 'Werkstudent Data Engineer (m/w/d) Sana HR Solutions GmbH Muenchen. '
+      + 'Studentenjobs, Werkstudent. Homeoffice moeglich, Teilzeit. Erschienen: vor 16 Stunden. '
+      + 'Ich bin interessiert. Deine Aufgaben: Du entwickelst und transformierst Datenmodelle mit dbt.',
+    applyControls: ['Ich bin interessiert', 'Speichern'],
+  });
+  live.result === 'active'
+    ? pass('a live StepStone posting is active via "Ich bin interessiert"')
+    : fail(`live StepStone classified ${live.result}/${live.code}`);
+}
+
+{
+  const quick = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://www.stepstone.de/stellenangebote--y--999-inline.html',
+    finalUrl: 'https://www.stepstone.de/stellenangebote--y--999-inline.html',
+    bodyText: 'Junior AI Automation Developer (m/w/d) Workspacer Muenchen. Feste Anstellung. '
+      + 'Schnelle Bewerbung. Aufgaben: Du entwickelst KI-Automatisierungen in Plattformen wie n8n.',
+    applyControls: ['Schnelle Bewerbung'],
+  });
+  quick.result === 'active'
+    ? pass('"Schnelle Bewerbung" is also recognised as an apply control')
+    : fail(`quick-apply StepStone classified ${quick.result}/${quick.code}`);
+}
+
+{
+  // The guard: a StepStone chrome-only page (footer nav, no posting) must still
+  // fail. "Bewerbende" in the footer must NOT read as an apply control.
+  const footer = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://www.stepstone.de/stellenangebote--z--111-inline.html',
+    finalUrl: 'https://www.stepstone.de/stellenangebote--z--111-inline.html',
+    bodyText: 'Stepstone. Ueber uns. Karriere bei Stepstone. Presse. Bewerbende. Arbeitgebende. Impressum.',
+    applyControls: [],
+  });
+  footer.result !== 'active'
+    ? pass('a StepStone page with only footer chrome is NOT active')
+    : fail('footer-only StepStone page wrongly classified active');
+}

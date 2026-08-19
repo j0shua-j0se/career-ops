@@ -133,6 +133,20 @@ function notFoundBodySignal(bodyText = '') {
 
 const EXPIRED_URL_PATTERNS = [
   /[?&]error=true/i,
+  // An ATS that redirects a dead permalink to a page whose PATH says the job is
+  // gone. This is the same evidence as an expired body phrase, just delivered in
+  // the URL, and it must outrank the generic "job id missing from final URL"
+  // rule below — that rule returns `uncertain` because a portal migration can
+  // 301 live postings too, but nothing migrates a posting TO a page called
+  // job-no-longer-available. Observed live 2026-08-18: four of six BMW Group
+  // postings redirected to
+  // bmwgroup.jobs/.../de/de/job-no-longer-available.html and every one was
+  // reported `uncertain`, which under modes/run.md means "re-verify by hand"
+  // — six manual checks for four unambiguous closures.
+  /job[-_]?no[-_]?longer[-_]?available/i,
+  /(?:job|position|vacancy|stelle|posting)[-_]?(?:not[-_]?found|expired|closed|removed|unavailable)/i,
+  /no[-_]?longer[-_]?(?:available|accepting|open)/i,
+  /stellenangebot[-_]?(?:nicht[-_]?gefunden|abgelaufen)/i,
 ];
 
 const APPLY_PATTERNS = [
@@ -144,6 +158,17 @@ const APPLY_PATTERNS = [
   /easy apply/i,
   /start application/i,
   /ich bewerbe mich/i,
+  // StepStone renders its apply button client-side, so `/bewerben/` never
+  // matches and every StepStone posting came back `no_apply_control` however
+  // healthy — modes/run.md documents this as a known false negative whose
+  // remedy is --skip-liveness. Training the operator to bypass the gate is
+  // worse than the wrong verdict, so match what StepStone ACTUALLY renders.
+  //
+  // These two strings are the apply affordances on a live StepStone listing.
+  // Neither collides with the footer's "Bewerbende" (Applicants) nav label,
+  // which is the false positive the docs warn against grepping for.
+  /ich bin interessiert/i,
+  /schnelle bewerbung/i,
   // Polish (pracuj.pl, justjoin.it, bulldogjob.pl): "Aplikuj" / "Aplikuj teraz" /
   // "Wyślij CV" / "Przejdź do panelu aplikowania". Without these, a fully-loaded
   // Polish posting has no recognized apply control and falls to no_apply_control.
