@@ -119,7 +119,58 @@ export function isUnreplyable(email) {
   // called e.g. "replyco.com" is unaffected.
   if (/(^|\.)(no-?reply|do-?not-?reply|donotreply|bounce|mailer-daemon)\d*(\.|$)/i.test(host)) return true;
 
+  // ATS platform domains. Mail from these is sent BY the applicant-tracking
+  // system on the employer's behalf, and a reply reaches the platform rather
+  // than a person — even when the local part looks like a company name and
+  // trips none of the rules above. ZEISS's acknowledgement comes from
+  // `zeissgroup@myworkday.com`, which reads like a perfectly good address and
+  // is not one.
+  if (ATS_PLATFORM_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`))) return true;
+
   return false;
+}
+
+/** @type {string[]} */
+const ATS_PLATFORM_DOMAINS = [
+  'myworkday.com',
+  'workday.com',
+  'myworkdayjobs.com',
+  'successfactors.eu',
+  'successfactors.com',
+  'csod.com',
+  'ashbyhq.com',
+  'join.com',
+  'msg.join.com',
+  'hrworks.de',
+  'jobs2web.com',
+  'avature.net',
+  'greenhouse.io',
+  'lever.co',
+  'personio.de',
+  'softgarden.io',
+  'concludis.de',
+  'mssa.com',
+];
+
+/**
+ * The candidate's own addresses, which must never be offered as a recipient.
+ *
+ * A row's contact list is assembled from whatever addresses appear around the
+ * application, and that includes the candidate's own: DLR's row resolved to
+ * `joshuajoseprofessional@gmail.com`, so the generated draft was addressed to
+ * the sender. A follow-up mailed to yourself is not a failure that announces
+ * itself — the draft looks complete and the recipient line looks plausible.
+ *
+ * @type {string[]}
+ */
+export const OWN_ADDRESSES = [
+  'joshuajoseprofessional@gmail.com',
+];
+
+/** @param {string} email */
+export function isOwnAddress(email) {
+  const a = String(email ?? '').trim().toLowerCase();
+  return OWN_ADDRESSES.includes(a);
 }
 
 /**
@@ -147,8 +198,8 @@ export function buildDraft(entry, strengths) {
   const role = entry.role ?? 'the role';
   const applied = entry.appliedDate ?? 'my application date';
   const emails = (entry.contacts ?? []).map((c) => c.email).filter(Boolean);
-  const contact = emails.find((e) => !isUnreplyable(e)) ?? null;
-  const rejected = emails.filter(isUnreplyable);
+  const contact = emails.find((e) => !isUnreplyable(e) && !isOwnAddress(e)) ?? null;
+  const rejected = emails.filter((e) => isUnreplyable(e) || isOwnAddress(e));
   const candidates = strengths.slice(0, 5).map(toSentence).filter(Boolean);
 
   const body = [

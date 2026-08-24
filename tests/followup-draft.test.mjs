@@ -112,3 +112,58 @@ toSentence('Erlangen is home. It scores 5.0 because the commute is 20 minutes.')
 BANNED_OPENERS.length === 4
   ? pass('all four banned openers from modes/followup.md are enforced')
   : fail(`expected 4 banned openers, got ${BANNED_OPENERS.length}`);
+
+// ── ATS platform domains and the candidate's own address ────────────────────
+// Both surfaced on real rows while drafting the 2026-08-24 batch, and neither
+// announced itself: the draft looked finished and the recipient line looked
+// plausible.
+import { isOwnAddress } from '../followup-draft.mjs';
+
+for (const [addr, want] of [
+  // ZEISS's acknowledgement comes from a Workday address whose local part is
+  // the company name — it trips none of the noreply rules and is still a
+  // platform mailbox.
+  ['zeissgroup@myworkday.com', true],
+  ['system@successfactors.eu', true],
+  ['NoreplyTrenchRecruiting@csod.com', true],
+  ['recruiting@avature.net', true],
+  ['someone@boards.greenhouse.io', true],
+  // A human at a real employer must survive all of it.
+  ['patrick.ziegler@faps.fau.de', false],
+  ['wolfgang.maussner@siemens.com', false],
+  ['students.func@siemens-healthineers.com', false],
+  ['personal@arf-gmbh.de', false],
+]) {
+  isUnreplyable(addr) === want
+    ? pass(`ATS-domain check: ${JSON.stringify(addr)} → ${want}`)
+    : fail(`ATS-domain check failed for ${JSON.stringify(addr)}`);
+}
+
+// The candidate's own address is assembled into contact lists from the mail
+// around an application. DLR's row resolved to it, so the draft was addressed
+// to the sender — a follow-up mailed to yourself.
+isOwnAddress('joshuajoseprofessional@gmail.com')
+  ? pass("the candidate's own address is recognised")
+  : fail("own address not recognised");
+isOwnAddress('JoshuaJoseProfessional@Gmail.com')
+  ? pass('own-address matching is case-insensitive')
+  : fail('own-address matching is case-sensitive');
+!isOwnAddress('patrick.ziegler@faps.fau.de')
+  ? pass('a third-party address is not treated as the candidate’s own')
+  : fail('a third-party address was treated as own');
+
+{
+  const entry = {
+    num: 23, company: 'DLR', role: 'Working student ML',
+    appliedDate: '2026-08-10', daysSinceApplication: 14, followupCount: 0,
+    urgency: 'overdue', appDateSource: 'notes',
+    contacts: [{ email: 'joshuajoseprofessional@gmail.com' }, { email: 'zeissgroup@myworkday.com' }],
+  };
+  const d = buildDraft(entry, []);
+  d.contact === null
+    ? pass('a row whose only contacts are own/ATS yields NO recipient rather than a bad one')
+    : fail(`buildDraft offered ${d.contact}`);
+  d.rejected.length === 2
+    ? pass('both rejected addresses are reported so the reason is visible')
+    : fail(`rejected list was ${JSON.stringify(d.rejected)}`);
+}
