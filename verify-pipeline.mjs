@@ -162,9 +162,22 @@ for (const e of entries) {
   if (!companyRoleMap.has(key)) companyRoleMap.set(key, []);
   companyRoleMap.get(key).push(e);
 }
+// A row that has been Discarded or SKIPped is a duplicate that has ALREADY been
+// resolved — discarding one of the pair is exactly how it gets fixed here, and
+// there is no other way to fix it, because the rows themselves are the audit
+// trail. Counting resolved rows made the warning outlive its own fix and fire
+// forever, which is how a health check teaches its reader to skim. The same
+// rule already governs the report-level duplicate check and the unreported-row
+// check further down; this was the third and last place missing it.
+//
+// Filtering happens per GROUP rather than per pair: three rows for one posting
+// with one Discarded still leave two live ones, and that is still a real
+// duplicate worth reporting.
+const RESOLVED = new Set(['Discarded', 'SKIP']);
 for (const [key, group] of companyRoleMap) {
-  if (group.length > 1) {
-    warn(`Possible duplicates: ${group.map(e => `#${e.num}`).join(', ')} (${group[0].company} — ${group[0].role})`);
+  const live = group.filter((e) => !RESOLVED.has(String(e.status || '').trim()));
+  if (live.length > 1) {
+    warn(`Possible duplicates: ${live.map(e => `#${e.num}`).join(', ')} (${live[0].company} — ${live[0].role})`);
     dupes++;
   }
 }

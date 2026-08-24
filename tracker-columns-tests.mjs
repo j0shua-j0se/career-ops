@@ -845,5 +845,51 @@ if (!HAS_WEB) {
 }
 
 
+// ── Test 15g: a resolved duplicate stops being reported ─────────────────────
+// Check 2 grouped rows by company+role and warned on any group of 2+, with no
+// status filter. Discarding one of a pair is the ONLY way to resolve a
+// duplicate here — the rows are the audit trail — so the warning outlived its
+// own fix and fired forever. Third and last place in this file missing the rule
+// the report-level and unreported-row checks already had.
+{
+  const RESOLVED_DUP = `# Applications Tracker
+
+| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|-----|------|-------|--------|-----|--------|-------|
+| 1 | 2026-01-05 | Acme | — | Data Engineer | 4.0/5 | Applied | ❌ | — | the surviving row |
+| 2 | 2026-01-05 | Acme | — | Data Engineer | 4.0/5 | Discarded | ❌ | — | duplicate of #1 |
+`;
+  let sb = makeSandbox(RESOLVED_DUP);
+  let res = runScript('verify-pipeline.mjs', [], sb);
+  if (!/Possible duplicates/.test(res.stdout)) {
+    pass('a duplicate resolved by Discarding one row is no longer reported');
+  } else {
+    fail(`resolved duplicate still reported:
+${res.stdout}`);
+  }
+  rmSync(sb.dir, { recursive: true, force: true });
+
+  // The guard: filtering is per GROUP, so three rows with one Discarded still
+  // leave two live ones and that is still a real duplicate.
+  const TWO_LIVE = `# Applications Tracker
+
+| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|-----|------|-------|--------|-----|--------|-------|
+| 1 | 2026-01-05 | Acme | — | Data Engineer | 4.0/5 | Applied | ❌ | — | live |
+| 2 | 2026-01-05 | Acme | — | Data Engineer | 4.0/5 | Evaluated | ❌ | — | live duplicate |
+| 3 | 2026-01-05 | Acme | — | Data Engineer | 4.0/5 | Discarded | ❌ | — | already resolved |
+`;
+  sb = makeSandbox(TWO_LIVE);
+  res = runScript('verify-pipeline.mjs', [], sb);
+  if (/Possible duplicates: #1, #2/.test(res.stdout)) {
+    pass('two live rows are still flagged, and the Discarded third is left out of the list');
+  } else {
+    fail(`live duplicates not reported correctly:
+${res.stdout}`);
+  }
+  rmSync(sb.dir, { recursive: true, force: true });
+}
+
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
