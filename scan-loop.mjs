@@ -41,7 +41,7 @@ import {
   parseTriageOutput, decideNextAction, summarize, qualifiedCandidates,
   renderShortlist, renderRunLogEntry, toHumanUrl,
 } from './loop-core.mjs';
-import { parsePipeline } from './triage-prefilter.mjs';
+import { parsePipeline, rankEntry } from './triage-prefilter.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
 
 // Every artifact the driver writes is redirectable, following the one-env-var-
@@ -176,6 +176,43 @@ function cmdNext() {
   return decision;
 }
 
+/**
+ * Zero-token pre-triage: reject what the title and location already settle.
+ *
+ * `triage-prefilter.mjs` has ranked postings on title + location since it was
+ * written, and NOTHING in the loop ever called it — scan-loop and run-all both
+ * import only its `parsePipeline` parser. Every posting therefore reached the
+ * agent, which is the single most expensive step in the pass.
+ *
+ * Measured on the 113 postings triaged on 2026-08-31: the prefilter buckets
+ * them look=4, maybe=33, skip=76. Scoring only look+maybe is a 67% cut in agent
+ * triage, and BOTH rows that went on to qualify land in `maybe` — neither would
+ * have been lost.
+ *
+ * Only the `skip` bucket is auto-rejected, never `maybe`. The prefilter's own
+ * doctrine is that an ambiguous posting is cheap to surface and expensive to
+ * drop, so anything it is unsure about still costs a model call. Each
+ * auto-rejection records the prefilter's reason verbatim, so the audit trail
+ * says what decided it and no posting disappears unexplained.
+ */
+function prefilterReject(state) {
+  let rejected = 0;
+  for (const c of Object.values(state.candidates ?? {})) {
+    if (c.verdict !== 'pending') continue;
+    let r;
+    try {
+      r = rankEntry({ title: c.title || '', location: c.location || '', url: c.url || '', company: c.company || '' });
+    } catch { continue; }          // never let a ranking error drop a posting
+    if (r.bucket !== 'skip') continue;
+    c.score = Number.isFinite(r.score) ? r.score : 1.0;
+    c.verdict = 'rejected';
+    c.reason = `zero-token prefilter (title + location only): ${r.reason}`;
+    c.prefiltered = true;
+    rejected++;
+  }
+  return rejected;
+}
+
 function cmdWave(flags) {
   const state = requireState();
   const decision = decideNextAction(state);
@@ -214,6 +251,8 @@ function cmdWave(flags) {
   // and let the ladder widen rather than stranding the run.
   const found = diffPipeline(before);
   const { added, duplicate } = ingestOffers(state, found, wave);
+  const prefiltered = prefilterReject(state);
+  if (prefiltered) console.error(`  pre-triage: ${prefiltered} posting(s) rejected on title + location alone (zero tokens).`);
 
   // Was that a real look at the market, or a starved one?
   //
@@ -249,7 +288,7 @@ ${degradedWarning(health)}
   log(state, 'wave', `${strategy.id} exit=${result.status} found=${found.length} new=${added}`
     + (degraded ? ` DEGRADED(${health.found} vs baseline ${health.baseline}, ${health.errors} errors)` : ''));
 
-  return { wave, strategy: strategy.id, exitCode: result.status, found: found.length, added, duplicate,
+  return { wave, strategy: strategy.id, exitCode: result.status, found: found.length, added, duplicate, prefiltered,
     degraded, ...(degraded ? { degradedReasons: health.reasons } : {}), next: decideNextAction(state) };
 }
 
@@ -262,6 +301,8 @@ function cmdIngest(flags) {
   const wave = state.waves.length + 1;
   const strategy = WAVE_STRATEGIES[state.waves.length];
   const counts = ingestOffers(state, offers, wave);
+  const prefiltered = prefilterReject(state);
+  if (prefiltered) console.error(`  pre-triage: ${prefiltered} posting(s) rejected on title + location alone (zero tokens).`);
   state.waves.push({
     n: wave,
     strategy: strategy ? strategy.id : 'manual',
