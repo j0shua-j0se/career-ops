@@ -129,6 +129,11 @@ opencode.json
 .mcp.json
 career-dashboard
 career-dashboard.exe
+# build-dashboard.mjs writes the new binary beside the old one and leaves a
+# `~` backup. The two ignore rules above are exact names, so the backup was
+# not covered and a 6.8MB binary was staged by a `git add -A`.
+career-dashboard.exe~
+career-dashboard~
 package-lock.json
 !web/package-lock.json
 
