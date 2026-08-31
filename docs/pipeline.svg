@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 830" width="1180" height="830" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <title>career-ops pipeline — four stages and their gates</title>
+  <desc>The /career-ops run pass: scan, pipeline, kits, sync. Stages 1 and 4 are zero-token; 2 and 3 need a model. Gates added on 2026-08-31 are marked.</desc>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .stage   { fill:#f8fafc; stroke:#cbd5e1; stroke-width:1.5; rx:10; }
+      .zero    { fill:#f0fdf4; stroke:#86efac; }
+      .agent   { fill:#fefce8; stroke:#fde047; }
+      .box     { fill:#ffffff; stroke:#94a3b8; stroke-width:1.2; rx:6; }
+      .gate    { fill:#eff6ff; stroke:#60a5fa; stroke-width:1.4; rx:6; }
+      .newgate { fill:#fef2f2; stroke:#f87171; stroke-width:1.8; rx:6; }
+      .store   { fill:#f1f5f9; stroke:#64748b; stroke-width:1.4; rx:14; }
+      .t       { font-size:12.5px; fill:#0f172a; }
+      .ts      { font-size:11px; fill:#475569; }
+      .th      { font-size:14px; font-weight:700; fill:#0f172a; }
+      .tag     { font-size:10.5px; font-weight:600; }
+      .flow    { stroke:#64748b; stroke-width:1.6; fill:none; marker-end:url(#a); }
+    </style>
+  </defs>
+
+  <rect width="1180" height="830" fill="#ffffff"/>
+  <text x="28" y="34" class="th" font-size="18">career-ops — the <tspan font-family="ui-monospace, monospace">/career-ops run</tspan> pipeline</text>
+  <text x="28" y="54" class="ts">Four stages in dependency order. Each consumes what the previous produced. Nothing here submits an application.</text>
+
+  <!-- legend -->
+  <rect x="800" y="22" width="14" height="12" class="gate"/><text x="820" y="32" class="ts">gate</text>
+  <rect x="862" y="22" width="14" height="12" class="newgate"/><text x="882" y="32" class="ts">added 2026-08-31</text>
+  <rect x="1000" y="22" width="14" height="12" class="zero"/><text x="1020" y="32" class="ts">zero-token</text>
+  <rect x="1090" y="22" width="14" height="12" class="agent"/><text x="1110" y="32" class="ts">agent</text>
+
+  <!-- ================= STAGE 1 ================= -->
+  <rect x="28" y="74" width="1124" height="176" class="stage zero"/>
+  <text x="44" y="96" class="th">STAGE 1 · scan</text>
+  <text x="150" y="96" class="tag" fill="#15803d">ZERO TOKEN</text>
+
+  <rect x="44" y="108" width="150" height="34" class="box"/><text x="54" y="123" class="t">scan.mjs</text><text x="54" y="136" class="ts">portals + providers</text>
+  <rect x="44" y="148" width="150" height="34" class="box"/><text x="54" y="163" class="t">scan-interamt.mjs</text><text x="54" y="176" class="ts">public sector</text>
+  <rect x="44" y="188" width="150" height="34" class="box"/><text x="54" y="203" class="t">scan-ats-full.mjs</text><text x="54" y="216" class="ts">reverse-ATS sweep</text>
+  <rect x="44" y="228" width="150" height="14" class="box"/><text x="54" y="239" class="ts">1b · Indeed MCP → ingest-jobs</text>
+
+  <rect x="224" y="140" width="158" height="52" class="gate"/>
+  <text x="234" y="158" class="t">title / location filter</text>
+  <text x="234" y="172" class="ts">always_allow &gt; block &gt; allow</text>
+  <text x="234" y="185" class="ts">blacklist · trust-validator</text>
+
+  <rect x="412" y="140" width="168" height="52" class="newgate"/>
+  <text x="422" y="158" class="t">scan-run-health</text>
+  <text x="422" y="172" class="ts">a starved scan is not</text>
+  <text x="422" y="185" class="ts">an empty market</text>
+
+  <rect x="610" y="140" width="172" height="52" class="newgate"/>
+  <text x="620" y="158" class="t">triage-prefilter</text>
+  <text x="620" y="172" class="ts">title+location settles it</text>
+  <text x="620" y="185" class="ts">−67% agent triage</text>
+
+  <rect x="812" y="140" width="180" height="52" class="store"/>
+  <text x="822" y="160" class="t">data/pipeline.md</text>
+  <text x="822" y="176" class="ts">scan-history.tsv</text>
+
+  <path class="flow" d="M194,125 H214 Q224,125 224,140 V158"/>
+  <path class="flow" d="M194,165 H224"/>
+  <path class="flow" d="M194,205 H214 Q224,205 224,192 V178"/>
+  <path class="flow" d="M194,235 H208 Q224,235 224,200 V192"/>
+  <path class="flow" d="M382,166 H412"/>
+  <path class="flow" d="M580,166 H610"/>
+  <path class="flow" d="M782,166 H812"/>
+
+  <!-- ================= STAGE 2 ================= -->
+  <rect x="28" y="266" width="1124" height="150" class="stage agent"/>
+  <text x="44" y="288" class="th">STAGE 2 · pipeline</text>
+  <text x="176" y="288" class="tag" fill="#a16207">AGENT</text>
+
+  <rect x="44" y="302" width="140" height="46" class="box"/><text x="54" y="320" class="t">gmail-sweep</text><text x="54" y="335" class="ts">reconcile mailbox</text>
+  <rect x="214" y="302" width="164" height="46" class="gate"/>
+  <text x="224" y="320" class="t">check-liveness</text><text x="224" y="335" class="ts">+ robots-gate · fetchableUrl</text>
+  <rect x="408" y="302" width="150" height="46" class="gate"/>
+  <text x="418" y="320" class="t">pre-screen gate</text><text x="418" y="335" class="ts">→ discard.log</text>
+  <rect x="588" y="302" width="150" height="46" class="box"/>
+  <text x="598" y="320" class="t">evaluation A–G</text><text x="598" y="335" class="ts">score · archetype</text>
+  <rect x="768" y="294" width="224" height="62" class="store"/>
+  <text x="778" y="313" class="t">reports/NNN-*.md</text>
+  <text x="778" y="329" class="ts">Machine Summary: score, archetype,</text>
+  <text x="778" y="344" class="ts">language_gate, deadline, remote, ats_vendor</text>
+
+  <path class="flow" d="M902,192 V266 M902,266 V294" />
+  <path class="flow" d="M184,325 H214"/>
+  <path class="flow" d="M378,325 H408"/>
+  <path class="flow" d="M558,325 H588"/>
+  <path class="flow" d="M738,325 H768"/>
+  <path class="flow" d="M1002,192 V240 Q1002,266 976,266 H120 Q100,266 100,286 V302"/>
+
+  <!-- ================= STAGE 3 ================= -->
+  <rect x="28" y="432" width="1124" height="196" class="stage agent"/>
+  <text x="44" y="454" class="th">STAGE 3 · kits</text>
+  <text x="150" y="454" class="tag" fill="#a16207">AGENT</text>
+
+  <rect x="44" y="468" width="160" height="52" class="gate"/>
+  <text x="54" y="486" class="t">kitCandidates</text>
+  <text x="54" y="500" class="ts">≥ floor · no PDF ·</text>
+  <text x="54" y="513" class="ts">HAS A REPORT</text>
+
+  <rect x="234" y="468" width="164" height="52" class="newgate"/>
+  <text x="244" y="486" class="t">language gate</text>
+  <text x="244" y="500" class="ts">language_gate: FAIL → stop</text>
+  <text x="244" y="513" class="ts">--allow-language-gap</text>
+
+  <rect x="44" y="540" width="948" height="68" class="box"/>
+  <text x="56" y="558" class="t" font-weight="600">build-application.mjs — aborts on the first failure</text>
+  <g class="ts">
+    <text x="56" y="578">liveness</text><text x="132" y="578">→ build-cv-html</text><text x="240" y="578">→ clean-artifacts</text>
+    <text x="356" y="578">→ verify-cv-facts</text><text x="472" y="578">→ generate-pdf</text><text x="580" y="578">→ clean-artifacts</text>
+    <text x="696" y="578">→ verify-pdf-ats</text><text x="808" y="578">→ cover letter</text><text x="908" y="578">→ clean</text>
+  </g>
+  <rect x="690" y="566" width="106" height="17" fill="none" stroke="#f87171" stroke-width="1.6" rx="4"/>
+  <text x="56" y="596" class="ts">The fact gate reads the HTML and asks "is every claim true". The ATS gate reads the rendered PDF's text layer and asks "can a parser read it at all".</text>
+
+  <rect x="1012" y="540" width="128" height="68" class="store"/>
+  <text x="1022" y="566" class="t">output/</text>
+  <text x="1022" y="583" class="ts">CV + cover letter</text>
+  <text x="1022" y="598" class="ts">drafts only</text>
+
+  <path class="flow" d="M880,356 V444 Q880,458 866,458 H138 Q124,458 124,468"/>
+  <path class="flow" d="M204,494 H234"/>
+  <path class="flow" d="M316,520 V540"/>
+  <path class="flow" d="M992,574 H1012"/>
+
+  <!-- ================= STAGE 4 ================= -->
+  <rect x="28" y="644" width="1124" height="122" class="stage zero"/>
+  <text x="44" y="666" class="th">STAGE 4 · sync</text>
+  <text x="152" y="666" class="tag" fill="#15803d">ZERO TOKEN</text>
+  <text x="250" y="666" class="ts">writes first, then reports — every report reads what the writes just reconciled</text>
+
+  <rect x="44" y="680" width="104" height="34" class="box"/><text x="54" y="701" class="ts">merge-tracker</text>
+  <rect x="160" y="680" width="104" height="34" class="box"/><text x="170" y="701" class="ts">sync-pdf-flags</text>
+  <rect x="276" y="680" width="104" height="34" class="box"/><text x="286" y="701" class="ts">followup-seed</text>
+  <rect x="404" y="680" width="112" height="34" class="newgate"/><text x="414" y="701" class="ts">deadline-sweep</text>
+  <rect x="528" y="680" width="118" height="34" class="newgate"/><text x="538" y="701" class="ts">provider-health</text>
+  <rect x="658" y="680" width="110" height="34" class="gate"/><text x="668" y="701" class="ts">verify-pipeline</text>
+  <rect x="780" y="680" width="112" height="34" class="box"/><text x="790" y="701" class="ts">build-dashboard</text>
+  <rect x="904" y="676" width="124" height="42" class="store"/><text x="914" y="702" class="t">career-dashboard</text>
+
+  <path class="flow" d="M148,697 H160"/><path class="flow" d="M264,697 H276"/><path class="flow" d="M380,697 H404"/>
+  <path class="flow" d="M516,697 H528"/><path class="flow" d="M646,697 H658"/><path class="flow" d="M768,697 H780"/><path class="flow" d="M892,697 H904"/>
+  <path class="flow" d="M1076,608 V656 Q1076,668 1062,668 H110 Q96,668 96,680"/>
+
+  <text x="28" y="792" class="ts" font-weight="600">Nothing in this pipeline submits an application.</text>
+  <text x="28" y="809" class="ts">Every stage produces drafts for review — AGENTS.md → Ethical Use. Red gates were added on 2026-08-31, each in response to a measured failure.</text>
+</svg>
