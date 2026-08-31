@@ -382,11 +382,26 @@ export function barrenWaveStreak(state) {
     if (!byWave.has(c.wave)) byWave.set(c.wave, []);
     byWave.get(c.wave).push(c);
   }
+  // A wave the scanner could not actually complete is not evidence that the
+  // market is empty, so it cannot end the run.
+  //
+  // Observed 2026-08-31: a scan rate-limited by this machine's own recent
+  // traffic recorded found=2307/errors=19 against a ~7,800/0 baseline. The loop
+  // counted the thin result as an ordinary wave, found the next two barren, and
+  // halted on its circuit breaker — reporting an empty market from a third of
+  // it. `scan-run-health.mjs` now marks such a wave `degraded`; here it is
+  // skipped rather than counted, so the ladder keeps widening instead of
+  // concluding from data that was never gathered.
+  const degradedWaves = new Set(
+    (state?.waves ?? []).filter((w) => w?.degraded).map((w) => w.n),
+  );
+
   let streak = 0;
   for (let n = (state?.waves?.length ?? 0); n >= 1; n--) {
     const group = byWave.get(n) || [];
     if (group.some((c) => c.verdict === 'pending')) break;
     if (group.some((c) => c.verdict === 'qualified')) break;
+    if (degradedWaves.has(n)) continue; // neither barren nor productive — unknown
     streak++;
   }
   return streak;

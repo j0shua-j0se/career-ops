@@ -42,6 +42,7 @@ import {
   renderShortlist, renderRunLogEntry, toHumanUrl,
 } from './loop-core.mjs';
 import { parsePipeline } from './triage-prefilter.mjs';
+import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
 
 // Every artifact the driver writes is redirectable, following the one-env-var-
 // per-artifact convention the rest of the repo uses (CAREER_OPS_TRACKER,
@@ -214,6 +215,24 @@ function cmdWave(flags) {
   const found = diffPipeline(before);
   const { added, duplicate } = ingestOffers(state, found, wave);
 
+  // Was that a real look at the market, or a starved one?
+  //
+  // On 2026-08-31 a pass concluded "0 applications worth making" from a scan
+  // that recorded found=2307/errors=19 against a ~7,800/0 baseline; the same
+  // command 100 minutes later returned 7785/0. The machine had rate-limited
+  // itself with ~115 liveness requests minutes earlier. Nothing noticed: the
+  // loop counted the thin result as an ordinary wave, called the next two
+  // barren, and tripped its circuit breaker on a third of the market.
+  //
+  // A degraded wave is recorded as such and does NOT count toward the barren
+  // streak — an empty market and an unseen market are different facts, and only
+  // one of them should end a run.
+  const health = strategy.id === 'portals' ? assessLatestRun() : { verdict: 'unknown', reasons: [], found: 0, baseline: 0, errors: 0 };
+  const degraded = health.verdict === 'degraded';
+  if (degraded) console.error(`
+${degradedWarning(health)}
+`);
+
   state.waves.push({
     n: wave,
     strategy: strategy.id,
@@ -223,11 +242,15 @@ function cmdWave(flags) {
     found: found.length,
     added,
     duplicate,
+    degraded,
+    ...(degraded ? { degraded_reasons: health.reasons } : {}),
   });
   saveState(state);
-  log(state, 'wave', `${strategy.id} exit=${result.status} found=${found.length} new=${added}`);
+  log(state, 'wave', `${strategy.id} exit=${result.status} found=${found.length} new=${added}`
+    + (degraded ? ` DEGRADED(${health.found} vs baseline ${health.baseline}, ${health.errors} errors)` : ''));
 
-  return { wave, strategy: strategy.id, exitCode: result.status, found: found.length, added, duplicate, next: decideNextAction(state) };
+  return { wave, strategy: strategy.id, exitCode: result.status, found: found.length, added, duplicate,
+    degraded, ...(degraded ? { degradedReasons: health.reasons } : {}), next: decideNextAction(state) };
 }
 
 function cmdIngest(flags) {
