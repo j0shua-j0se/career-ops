@@ -44,13 +44,32 @@ try {
     fail(`computeTrackerStats mishandles Hired: ${JSON.stringify(th.byStatus)} avgScoreApplied=${th.avgScoreApplied}`);
   }
 
-  // Funnel — Rejected counts into everApplied (mirrors dashboard ComputeProgressMetrics).
+  // Funnel — Rejected counts into everApplied AND everResponded: states.yml
+  // defines it as "Rejected by company", so the employer replied.
   const f = stats.computeFunnel({ Applied: 4, Responded: 2, Interview: 1, Offer: 1, Rejected: 2, Evaluated: 9 });
-  if (f.everApplied === 10 && f.everResponded === 4 && f.everInterview === 2 && f.everOffer === 1
-      && f.responseRate === 40 && f.offerRate === 10 && f.smallSample === false) {
-    pass('computeFunnel cumulative ever* stages match the dashboard math');
+  if (f.everApplied === 10 && f.everResponded === 6 && f.everInterview === 2 && f.everOffer === 1
+      && f.responseRate === 60 && f.offerRate === 10 && f.smallSample === false) {
+    pass('computeFunnel cumulative ever* stages count a rejection as a response');
   } else {
     fail(`computeFunnel wrong output: ${JSON.stringify(f)}`);
+  }
+
+  // The regression this guards: excluding Rejected reported 4.2% on a tracker
+  // where 15 of 24 companies had actually replied. A candidate reading 4.2%
+  // concludes their CV is never opened; the real problem was different.
+  const real = stats.computeFunnel({ Applied: 9, Responded: 1, Rejected: 14 });
+  if (real.everApplied === 24 && real.everResponded === 15 && real.responseRate === 62.5) {
+    pass('a tracker of 24 applications and 14 rejections reports 62.5%, not 4.2%');
+  } else {
+    fail(`real-world funnel wrong: ${JSON.stringify(real)}`);
+  }
+
+  // A row nobody ever answered stays Applied and must NOT count as responded.
+  const silent = stats.computeFunnel({ Applied: 10 });
+  if (silent.everResponded === 0 && silent.responseRate === 0) {
+    pass('applications nobody answered still count as no response');
+  } else {
+    fail(`silent applications counted as responses: ${JSON.stringify(silent)}`);
   }
 
   // Hired is a canonical status (states.yml) and the fullest success — it must

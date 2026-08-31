@@ -150,9 +150,24 @@ export function computeColdAppNums(trackerContent, followupsContent) {
  * "currently in Applied" while `everApplied` is "ever applied"; the same word
  * for two different numbers would read as a bug.
  *
- * Known limitation: statuses are snapshots, so a Rejected row that never got a
- * response is indistinguishable from one rejected after interviews — middle
- * stages are lower bounds until status-transition logging exists (#1428).
+ * A REJECTION IS A RESPONSE. `templates/states.yml` defines Rejected as
+ * "Rejected by company" — the employer acted, which is exactly what
+ * everResponded measures. Excluding it made the headline metric wrong by more
+ * than an order of magnitude: on 2026-08-31 this tracker held 24 ever-applied
+ * and 14 rejections and reported a 4.2% response rate, when 15 of those 24
+ * companies had in fact replied (62.5%). A candidate reading 4.2% concludes
+ * their CV is being binned unread; the truth was that most employers replied
+ * and said no, which is a completely different problem with a completely
+ * different fix.
+ *
+ * There is no "no response" state to confuse it with: a row nobody ever
+ * answered stays Applied, and a candidate-side withdrawal is Discarded.
+ *
+ * Known limitation: statuses are snapshots, so a row rejected at screening is
+ * indistinguishable from one rejected after interviews — the INTERVIEW and
+ * OFFER stages remain lower bounds. `data/status-log.tsv` now records real
+ * transitions and `funnel-velocity.mjs` folds it; teaching this function to
+ * read it would tighten those two stages (#1428).
  *
  * This is the canonical funnel definition for career-ops going forward;
  * dashboard/web consuming this JSON instead of keeping independent copies is
@@ -161,7 +176,7 @@ export function computeColdAppNums(trackerContent, followupsContent) {
 export function computeFunnel(byStatus) {
   const n = (k) => byStatus[k] || 0;
   const everApplied = n('Applied') + n('Responded') + n('Interview') + n('Offer') + n('Hired') + n('Rejected');
-  const everResponded = n('Responded') + n('Interview') + n('Offer') + n('Hired');
+  const everResponded = n('Responded') + n('Interview') + n('Offer') + n('Hired') + n('Rejected');
   const everInterview = n('Interview') + n('Offer') + n('Hired');
   const everOffer = n('Offer') + n('Hired');
   return {

@@ -954,9 +954,13 @@ func ComputeProgressMetrics(apps []model.CareerApplication) model.ProgressMetric
 	// counts into all four tiers — matching computeFunnel() in stats.mjs, the
 	// canonical funnel definition, whose docstring already describes this exact
 	// math as mirroring this function.
+	// A rejection is a response: states.yml defines "rejected" as "Rejected by
+	// company", so the employer replied. Excluding it understated the headline
+	// metric by more than an order of magnitude — a tracker with 24 ever-applied
+	// and 14 rejections reported 4.2% when 15 of those 24 companies had replied.
 	total := len(apps)
 	applied := statusCounts["applied"] + statusCounts["responded"] + statusCounts["interview"] + statusCounts["offer"] + statusCounts["hired"] + statusCounts["rejected"]
-	responded := statusCounts["responded"] + statusCounts["interview"] + statusCounts["offer"] + statusCounts["hired"]
+	responded := statusCounts["responded"] + statusCounts["interview"] + statusCounts["offer"] + statusCounts["hired"] + statusCounts["rejected"]
 	interview := statusCounts["interview"] + statusCounts["offer"] + statusCounts["hired"]
 	offer := statusCounts["offer"] + statusCounts["hired"]
 
