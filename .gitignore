@@ -156,3 +156,23 @@ documents/*
 # Intake fingerprints — the recorded source filenames may themselves carry
 # PII (e.g. cv/jane-doe-master-cv.pdf). #1723
 data/intake-state.json
+
+# ── Fork-local working files (not upstream's) ─────────────────────────────
+# Scratch produced by scan/triage/build runs in this checkout. They are working
+# state, not deliverables, and they made `git status` unreadable — which is how
+# a genuinely untracked new file (check-followups-due.mjs) once got committed
+# without being declared in config/local-paths.txt.
+#
+# payloads/ holds the per-role CV payloads build-application.mjs consumes
+# (`--cv payloads/cv-moresophy.json`). Ignored rather than committed because
+# each one carries CV content verbatim — user-layer PII, like data/ and output/
+# above — and every file is regenerable from cv.md plus the row's report.
+payloads/
+offers*.json
+scores*.json
+messages.json
+graphify-out/
+# Vendored MIT watermarks-remover, kept out of the tree on purpose: its service
+# cannot start on this machine, so clean-artifacts.mjs is verified against the
+# inspect scripts instead.
+vendor/
