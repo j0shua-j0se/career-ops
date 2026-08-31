@@ -137,7 +137,7 @@ try {
     { num: 4, company: 'Delta', role: 'MLE', score: '4.5/5', status: 'Applied', pdf: '❌', report: '' },
     { num: 5, company: 'Eps', role: 'DS', score: '4.7/5', status: 'Rejected', pdf: '❌', report: '' },
     { num: 6, company: 'Zeta', role: 'RS', score: 'N/A', status: 'Evaluated', pdf: '❌', report: '' },
-    { num: 7, company: 'Eta', role: 'AI', score: '3.8/5', status: 'Evaluated', pdf: '—', report: '' },
+    { num: 7, company: 'Eta', role: 'AI', score: '3.8/5', status: 'Evaluated', pdf: '—', report: '[7](r.md)' },
   ];
   const picked = kitCandidates(rows, 3.8);
   if (eq(picked.map((c) => c.num), [1, 7])) {
@@ -182,9 +182,9 @@ try {
   // against — but dropping the rows silently is worse, so they surface as
   // needsDecision.
   const verdictRows = [
-    { num: 1, company: 'Good', role: 'r', score: '4.4/5', status: 'Evaluated', pdf: '❌', notes: 'Recommendation: APPLY.' },
-    { num: 12, company: 'ZEISS', role: 'r', score: '3.9/5', status: 'Evaluated', pdf: '❌', notes: 'RECOMMENDED ACTION: do NOT apply as posted; send an enquiry.' },
-    { num: 13, company: 'Manex', role: 'r', score: '3.9/5', status: 'Evaluated', pdf: '❌', notes: 'DO NOT APPLY — Munich, not commutable.' },
+    { num: 1, company: 'Good', role: 'r', score: '4.4/5', status: 'Evaluated', pdf: '❌', notes: 'Recommendation: APPLY.' , report: '[1](r.md)' },
+    { num: 12, company: 'ZEISS', role: 'r', score: '3.9/5', status: 'Evaluated', pdf: '❌', notes: 'RECOMMENDED ACTION: do NOT apply as posted; send an enquiry.' , report: '[12](r.md)' },
+    { num: 13, company: 'Manex', role: 'r', score: '3.9/5', status: 'Evaluated', pdf: '❌', notes: 'DO NOT APPLY — Munich, not commutable.' , report: '[13](r.md)' },
   ];
   const verdicts = kitCandidates(verdictRows, 3.8);
   if (verdicts.length === 3) pass('a "do not apply" row is still a kit candidate, not dropped from the list');
@@ -213,12 +213,12 @@ try {
 
   // The wording varies across reports; all of these must trip.
   const phrasings = ['DO NOT APPLY', 'do NOT apply as posted', "don't apply", 'Nicht bewerben'];
-  const missed = phrasings.filter((n) => !kitCandidates([{ num: 9, company: 'C', role: 'r', score: '4.0/5', status: 'Evaluated', pdf: '❌', notes: n }], 3.8)[0]?.doNotApply);
+  const missed = phrasings.filter((n) => !kitCandidates([{ num: 9, company: 'C', role: 'r', score: '4.0/5', status: 'Evaluated', pdf: '❌', report: '[9](r.md)', notes: n }], 3.8)[0]?.doNotApply);
   if (missed.length === 0) pass('every common do-not-apply phrasing is recognised');
   else fail(`these phrasings were missed: ${JSON.stringify(missed)}`);
 
   // And it must not fire on a row that merely discusses applying.
-  const benign = kitCandidates([{ num: 8, company: 'D', role: 'r', score: '4.2/5', status: 'Evaluated', pdf: '❌', notes: 'Recommendation: APPLY — assemble documents before you apply.' }], 3.8);
+  const benign = kitCandidates([{ num: 8, company: 'D', role: 'r', score: '4.2/5', status: 'Evaluated', pdf: '❌', report: '[8](r.md)', notes: 'Recommendation: APPLY — assemble documents before you apply.' }], 3.8);
   if (benign[0] && benign[0].doNotApply === false) pass('an ordinary "APPLY" note is not mistaken for a refusal');
   else fail('a positive recommendation was flagged as do-not-apply');
 
@@ -508,4 +508,37 @@ console.log('\nrun-core — the scan stage accounts for agent-driven sources');
   isStaleLoop('2026-08-11T00:00:00.000Z', '2026-08-18T00:00:00.000Z') === true
     ? pass('isStaleLoop is true when the loop predates the pass')
     : fail('isStaleLoop missed a loop that predates the pass');
+}
+
+{
+  const { kitCandidates } = await import(pathToFileURL(join(ROOT, 'run-core.mjs')).href);
+  // ── A row with no report is not a kit candidate ─────────────────────────────
+  //
+  // A CV and cover letter are tailored FROM the evaluation. A row that only ever
+  // got a triage score off its title has nothing to tailor from, and building one
+  // anyway is fabrication.
+  //
+  // Observed 2026-08-31: row #147 (Fraunhofer IIS, Erlangen) was promoted at 3.6
+  // on title/company/location, its JD could not be retrieved because indeed's
+  // robots.txt disallows /viewjob, and the kit stage offered it as a candidate.
+  // The score was real; the knowledge behind it was not.
+  console.log('\nrun-core — a kit needs a report to tailor from');
+  {
+    const rows = [
+      { num: 1, company: 'A', role: 'r', score: '4.2/5', status: 'Evaluated', pdf: '❌', report: '[1](../reports/001-a.md)', notes: '' },
+      { num: 2, company: 'B', role: 'r', score: '4.0/5', status: 'Evaluated', pdf: '❌', report: '—', notes: '' },
+      { num: 3, company: 'C', role: 'r', score: '3.9/5', status: 'Evaluated', pdf: '❌', report: '', notes: '' },
+    ];
+    const got = kitCandidates(rows, 3.5).map((c) => c.num);
+    JSON.stringify(got) === JSON.stringify([1])
+      ? pass('only the row carrying a report link is offered as a kit candidate')
+      : fail(`kitCandidates returned ${JSON.stringify(got)}, expected [1]`);
+  }
+  {
+    // The guard must not swallow a genuine candidate.
+    const rows = [{ num: 9, company: 'D', role: 'r', score: '4.6/5', status: 'Evaluated', pdf: '❌', report: '[9](reports/009-d.md)', notes: '' }];
+    kitCandidates(rows, 3.5).length === 1
+      ? pass('a scored row with a report is still offered, as before')
+      : fail('the report guard swallowed a real candidate');
+  }
 }

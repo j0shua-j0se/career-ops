@@ -247,6 +247,17 @@ export function kitCandidates(rows = [], kitThreshold = DEFAULT_RUN_CONFIG.kitTh
     if (String(row.pdf ?? '').includes('✅')) continue;
     const score = parseFloat(String(row.score ?? '').replace('/5', ''));
     if (!Number.isFinite(score) || score < kitThreshold) continue;
+    // No report, no kit. A CV and a cover letter are tailored FROM the
+    // evaluation; a row that only ever got a triage score off its title has
+    // nothing to tailor from, and building one anyway is fabrication — the one
+    // thing AGENTS.md forbids outright.
+    //
+    // Observed 2026-08-31: row #147 (Fraunhofer IIS, Erlangen) was promoted at
+    // 3.6 on title/company/location, its JD could not be retrieved (indeed's
+    // robots.txt disallows /viewjob), and the kit stage offered it as a
+    // candidate anyway. The score was real; the knowledge behind it was not.
+    const hasReport = /\[.*\]\(.*\)/.test(String(row.report ?? ''));
+    if (!hasReport) continue;
     out.push({
       num: row.num,
       company: row.company,
