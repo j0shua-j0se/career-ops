@@ -259,6 +259,23 @@ const SITE_ERROR_URL_PATTERNS = [
   /\/error\.aspx(?:$|[?#])/i,
 ];
 
+// An aggregator announcing that IT removed a posting is evidence about the
+// mirror, not about the job. Arbeitnow serves this banner under HTTP 200 with
+// the whole JD still rendered below it, and hedges in its own wording ("might
+// not be hiring still") — so the page reads as active on an apply control while
+// actually saying the mirror is gone. Verified 2026-08-31: the ITONICS working
+// student req was still open on itonics-gmbh.jobs.personio.de days after
+// arbeitnow had delisted it.
+//
+// Deliberately `uncertain`, never `expired`. A false expired writes
+// skipped_expired into scan-history and filters a live job out of every later
+// scan; uncertain means "go look at the employer's own board", which is the
+// action that actually resolves it.
+const AGGREGATOR_DELISTED_PATTERNS = [
+  /this job (?:position )?has been removed from \w+/i,
+  /(?:job|position|listing) has been removed from (?:this|our) (?:site|board|platform)/i,
+];
+
 const MIN_CONTENT_CHARS = 300;
 
 // A job-detail URL almost always carries the posting's identity: a numeric req id
@@ -417,6 +434,18 @@ export function classifyLiveness({ status = 0, requestedUrl = '', finalUrl = '',
       result: 'uncertain',
       code: 'redirected_off_posting',
       reason: `redirected to ${finalUrl} — job id "${jobId}" missing from final URL`,
+    };
+  }
+
+  // Before the apply-control check: the aggregator's own delisting banner sits
+  // above a fully rendered JD, apply control and all, so the control below it
+  // proves nothing about the requisition.
+  const delisted = firstMatch(AGGREGATOR_DELISTED_PATTERNS, bodyText);
+  if (delisted) {
+    return {
+      result: 'uncertain',
+      code: 'aggregator_delisted',
+      reason: `aggregator removed its own listing (${delisted.source}) — re-check the employer's own board`,
     };
   }
 

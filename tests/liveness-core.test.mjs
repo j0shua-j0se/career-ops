@@ -307,3 +307,63 @@ for (const status of [404, 410]) {
     ? pass('an error page that says "page not found" is still expired')
     : fail(`Siemens withdrawn posting classified ${r.result}/${r.code}`);
 }
+
+console.log('\nliveness-core — an aggregator delisting its own mirror is uncertain, not active');
+
+{
+  // Arbeitnow serves this under HTTP 200 with the entire JD, apply control and
+  // all, still rendered below the banner — so the control is not evidence about
+  // the requisition. Verified 2026-08-31: the ITONICS working-student req was
+  // still open on itonics-gmbh.jobs.personio.de after arbeitnow had removed it,
+  // and the old behaviour reported the row active against a dead mirror URL.
+  const r = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://www.arbeitnow.com/jobs/companies/itonics/working-student-it-nurnberg-412516',
+    finalUrl: 'https://www.arbeitnow.com/jobs/companies/itonics/working-student-it-nurnberg-412516',
+    bodyText: 'This job position has been removed from Arbeitnow and might not be hiring still. '
+      + 'Working Student (m/f/x) - IT ITONICS Nuremberg As a working student you help keep '
+      + "ITONICS' internal IT environment reliable, secure, and easy to work with.",
+    applyControls: ['Apply'],
+  });
+  r.result === 'uncertain'
+    ? pass('an aggregator removal banner is not an active posting despite the apply control')
+    : fail(`arbeitnow delisting classified ${r.result}/${r.code}`);
+  r.code === 'aggregator_delisted'
+    ? pass('and it carries its own code, pointing the re-check at the employer\'s own board')
+    : fail(`expected aggregator_delisted, got ${r.code}`);
+}
+
+{
+  // The guard in the other direction: uncertain, never expired. A false expired
+  // writes skipped_expired into scan-history and filters the live job out of
+  // every later scan — the exact error this posting would have suffered.
+  const r = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://www.arbeitnow.com/jobs/companies/itonics/working-student-it-nurnberg-412516',
+    finalUrl: 'https://www.arbeitnow.com/jobs/companies/itonics/working-student-it-nurnberg-412516',
+    bodyText: 'This job position has been removed from Arbeitnow and might not be hiring still. '
+      + 'Working Student (m/f/x) - IT ITONICS Nuremberg Your Contribution As a working student '
+      + 'you help keep the internal IT environment reliable, secure, and easy to work with.',
+    applyControls: [],
+  });
+  r.result !== 'expired'
+    ? pass('a hedged aggregator banner never hard-expires a job that may still be open')
+    : fail('arbeitnow delisting hard-expired the posting');
+}
+
+{
+  // And a real employer-side closure still wins: the aggregator rule sits AFTER
+  // the hard-expiry checks, so a genuinely closed posting is expired even when
+  // the mirror also announces its own removal.
+  const r = classifyLiveness({
+    status: 200,
+    requestedUrl: 'https://www.arbeitnow.com/jobs/companies/x/y-123',
+    finalUrl: 'https://www.arbeitnow.com/jobs/companies/x/y-123',
+    bodyText: 'This job position has been removed from Arbeitnow. '
+      + 'This job has expired and the employer is no longer accepting applications.',
+    applyControls: [],
+  });
+  r.result === 'expired'
+    ? pass('a stated employer-side expiry still outranks the aggregator banner')
+    : fail(`real expiry under a delisting banner classified ${r.result}/${r.code}`);
+}
