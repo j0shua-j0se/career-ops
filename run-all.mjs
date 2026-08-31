@@ -291,10 +291,15 @@ function cmdAdvance(flags) {
  * because Go is not installed would punish the user for a missing dependency of
  * a component they may never open, so those are reported and not fatal.
  */
-const SYNC_STEPS = [
+export const SYNC_STEPS = [
   { id: 'merge-tracker', args: ['merge-tracker.mjs'], required: true, describe: 'merge pending tracker TSVs' },
   { id: 'pdf-flags', args: ['sync-pdf-flags.mjs'], required: true, describe: 'reconcile PDF flags with output/' },
   { id: 'followup-seed', args: ['followup-seed.mjs', '--backfill'], required: true, describe: 'seed follow-up dates for Applied rows' },
+  // Both of these are reports, not writes, and both make ZERO requests — they
+  // re-derive from values already on disk. `deadline-sweep` never writes here:
+  // retiring a row is `--apply`, which stays a decision the user makes.
+  { id: 'deadlines', args: ['deadline-sweep.mjs'], required: false, describe: 'expired / closing-soon by recorded deadline (no fetch)' },
+  { id: 'provider-health', args: ['provider-health.mjs'], required: false, describe: 'scrapers returning junk without erroring (no fetch)' },
   { id: 'verify', args: ['verify-pipeline.mjs'], required: false, describe: 'pipeline health check' },
   { id: 'dashboard', args: ['build-dashboard.mjs'], required: false, describe: 'rebuild the dashboard binary' },
 ];

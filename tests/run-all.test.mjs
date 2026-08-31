@@ -18,6 +18,7 @@ import { execFileSync } from 'child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { SYNC_STEPS } from '../run-all.mjs';
 
 console.log('\nUtility - run-all (end-to-end run driver)');
 
@@ -213,10 +214,30 @@ try {
   else fail(`sync --dry-run exited ${dry.code}`);
 
   const planned = (dry.json?.steps ?? []).map((s) => s.id);
-  if (JSON.stringify(planned) === JSON.stringify(['merge-tracker', 'pdf-flags', 'followup-seed', 'verify', 'dashboard'])) {
-    pass('sync plans merge -> pdf-flags -> followup-seed -> verify -> dashboard, in that order');
+  const WRITES = ['merge-tracker', 'pdf-flags', 'followup-seed'];
+  const REPORTS = ['deadlines', 'provider-health', 'verify', 'dashboard'];
+  if (JSON.stringify(planned) === JSON.stringify([...WRITES, ...REPORTS])) {
+    pass('sync plans the three writes first, then the four reports, in that order');
   } else {
     fail(`sync planned ${JSON.stringify(planned)}`);
+  }
+  // The ordering is a data dependency, not taste: every report reads what the
+  // writes just reconciled. A report that ran first would describe the tracker
+  // as it was before the merge.
+  if (WRITES.every((id) => planned.indexOf(id) < Math.min(...REPORTS.map((r) => planned.indexOf(r))))) {
+    pass('every write is planned before every report that reads it');
+  } else {
+    fail(`writes and reports are interleaved: ${JSON.stringify(planned)}`);
+  }
+  // Both sweeps re-derive from disk and must never fail a pass: they are
+  // reports, and a report the user has not read yet is not a broken pipeline.
+  // Asserted against SYNC_STEPS itself — the dry-run JSON does not carry
+  // `required`, so reading it there would have asserted nothing at all.
+  const sweepDefs = SYNC_STEPS.filter((s) => ['deadlines', 'provider-health'].includes(s.id));
+  if (sweepDefs.length === 2 && sweepDefs.every((s) => s.required === false)) {
+    pass('the zero-fetch sweeps are advisory — neither can fail the pass');
+  } else {
+    fail(`sweep steps wrong: ${JSON.stringify(sweepDefs)}`);
   }
   if ((dry.json?.steps ?? []).every((s) => s.status === 'planned')) {
     pass('every sync step is reported as planned, none as run');
