@@ -359,7 +359,27 @@ silently. Queues only; never evaluates or submits.`);
     renameSync(tmp, PIPELINE_PATH);
     // Record in scan-history so the next scan of ANY source dedups against these.
     mkdirSync(dirname(HISTORY_PATH), { recursive: true });
-    appendFileSync(HISTORY_PATH, queued.map((o) => `${o.url}\t${today}\t${source}\t${String(o.title ?? '').replace(/[\t\r\n]+/g, ' ')}\n`).join(''), 'utf-8');
+    // Write the columns scan-history actually has, not just the first four.
+    //
+    // This used to stop after `title`, dropping company, location and posted_at
+    // even though every one of them is sitting on the offer object. The cost is
+    // not cosmetic and it is invisible: `data/blacklist.md` matching and
+    // `providers/_trust-validator.mjs`'s company-vs-hostname check both key on
+    // company, so every agent-ingested row silently bypassed both, and losing
+    // posted_at removes the staleness signal that stops a two-year-old listing
+    // being read as fresh. Caught by provider-health.mjs on its first real run:
+    // indeed-mcp showed empty_company on 5/5 rows.
+    //
+    // Column order is scan.mjs's header: url, first_seen, portal, title,
+    // company, status, location, fingerprint, posted_at, trust_score,
+    // trust_flags, normalized_company. The trailing scoring columns are left
+    // empty — they are the scanner's to compute, and a fabricated trust score
+    // would be worse than an absent one.
+    const cell = (v) => String(v ?? '').replace(/[\t\r\n]+/g, ' ').trim();
+    appendFileSync(HISTORY_PATH, queued.map((o) => [
+      o.url, today, source, cell(o.title), cell(o.company), 'added',
+      cell(o.location), '', cell(o.postedAt), '', '', cell(o.company).toLowerCase(),
+    ].join('\t') + '\n').join(''), 'utf-8');
   }
 
   console.log(JSON.stringify({
