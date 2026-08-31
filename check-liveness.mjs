@@ -31,6 +31,7 @@ import {
   sleep,
 } from './liveness-browser.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
+import { checkRobots } from './robots-gate.mjs';
 import { extractPipelineUrls } from './liveness-core.mjs';
 
 async function main() {
@@ -105,6 +106,16 @@ async function main() {
   // Lazy browser: the API rung resolves ATS postings with no browser at all, so we
   // only launch Playwright if a URL actually needs the fallback.
   let browser = null, page = null, headed = null;
+  // One robots.txt read per host, not per URL: a sweep of 40 Siemens
+  // requisitions must not fetch the same policy 40 times.
+  const robotsCache = new Map();
+  const robotsRefusals = new Map();
+  async function robotsAllowsRetry(url) {
+    let host;
+    try { host = new URL(url).host; } catch { return { retry: false, reason: 'unparseable URL' }; }
+    if (!robotsCache.has(host)) robotsCache.set(host, await checkRobots(url));
+    return robotsCache.get(host);
+  }
   async function ensureBrowser() {
     if (browser) return;
     browser = await chromium.launch({ headless: true });
@@ -127,8 +138,22 @@ async function main() {
     } else {
       // Rung 2: Playwright — handles non-ATS pages and inconclusive API results.
       await ensureBrowser();
-      const getHeadedPage = headed ? () => headed.get() : undefined;
+      // The headed retry exists to clear a bot challenge. That is legitimate
+      // against a WAF default on a site whose published policy allows access,
+      // and NOT legitimate against a site that has declined in robots.txt —
+      // there it circumvents the exact mechanism the site was told to rely on.
+      // Gate it: one cheap policy read, cached per host, and on refusal the
+      // challenge stands as `uncertain` rather than being pushed through.
+      let getHeadedPage;
+      if (headed) {
+        const verdict = await robotsAllowsRetry(url);
+        if (verdict.retry) getHeadedPage = () => headed.get();
+        else robotsRefusals.set(url, verdict.reason);
+      }
       ({ result, reason } = await checkUrlLivenessWithFallback(page, url, { getHeadedPage }));
+      if (result !== 'active' && robotsRefusals.has(url)) {
+        reason = `${reason} — headed retry withheld: ${robotsRefusals.get(url)}`;
+      }
       usedBrowser = true;
     }
 

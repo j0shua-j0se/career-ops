@@ -11,8 +11,15 @@
  * Runs, in order:
  *   1. liveness  — check-liveness.mjs against the report's **URL:** header
  *   2. CV        — build-cv-html.mjs -> clean-artifacts.mjs -> verify-cv-facts.mjs
- *                  -> generate-pdf.mjs -> clean-artifacts.mjs
+ *                  -> generate-pdf.mjs -> clean-artifacts.mjs -> verify-pdf-ats.mjs
  *   3. cover     — generate-cover-letter.mjs -> clean-artifacts.mjs (only with --cover)
+ *
+ * The ATS gate at the end of step 2 asks a question none of the earlier steps
+ * can: the fact gate reads the HTML and checks whether every claim is true;
+ * verify-pdf-ats reads the *rendered PDF's text layer* and checks whether a
+ * parser can read any of it at all. A CSS regression that pushes the CV to a
+ * third page, or a font that renders visibly but extracts as (cid:N), passes
+ * every other step in this chain untouched and reaches the recruiter broken.
  *
  * Why this exists: the chain above was reassembled by hand for every
  * application, which is both tedious and easy to get subtly wrong — most
@@ -142,6 +149,8 @@ function usage() {
   --format FMT      letter | a4 (default: a4)
   --skip-liveness   Do not check whether the posting is still open
   --skip-clean      Do not strip invisible Unicode / scrub PDF toolchain metadata
+  --skip-ats        Do not verify the rendered PDF's ATS text layer / page count
+  --max-pages N     Fail the ATS gate above N pages (default 2; 0 disables)
   --allow-reorder   Pass through to generate-pdf.mjs
   --allow-stale     Pass through to generate-pdf.mjs
   --dry-run         Print the commands without running them`;
@@ -161,6 +170,8 @@ async function main() {
         format: { type: 'string', default: 'a4' },
         'skip-liveness': { type: 'boolean', default: false },
         'skip-clean': { type: 'boolean', default: false },
+        'skip-ats': { type: 'boolean', default: false },
+        'max-pages': { type: 'string' },
         'allow-reorder': { type: 'boolean', default: false },
         'allow-stale': { type: 'boolean', default: false },
         'dry-run': { type: 'boolean', default: false },
@@ -259,6 +270,14 @@ async function main() {
   const cleanStep = (label, target) =>
     skipClean ? null : [label, ['clean-artifacts.mjs', target]];
 
+  // The ATS gate runs LAST, on the finished artifact. The fact gate reads the
+  // HTML and answers "is every claim true"; this reads the rendered PDF's text
+  // layer and answers "can a parser read any of it". A CSS regression that
+  // pushes the CV to three pages, or a font that renders visibly but extracts
+  // as (cid:N), passes every earlier step in this chain untouched.
+  const atsArgs = ['verify-pdf-ats.mjs', cvPdfPath, '--payload', cvPayload];
+  if (values['max-pages']) atsArgs.push('--max-pages', values['max-pages']);
+
   const cvSteps = [
     ['Build CV HTML', ['build-cv-html.mjs', cvPayload, htmlPath]],
     // Before the gate, not after: an invisible character inside a metric hides
@@ -267,6 +286,9 @@ async function main() {
     ['Fact gate', ['verify-cv-facts.mjs', htmlPath]],
     ['Render CV PDF', pdfArgs],
     cleanStep('Scrub CV PDF metadata', cvPdfPath),
+    // After the scrub: clean-artifacts rewrites PDF bytes, so anything checked
+    // before it would be checking a file that no longer exists on disk.
+    values['skip-ats'] ? null : ['ATS gate', atsArgs],
   ].filter(Boolean);
   for (const [label, args] of cvSteps) {
     if (!run(label, args)) {
@@ -315,6 +337,7 @@ async function main() {
   console.log(`  report      : ${reportNum}`);
   console.log(`  liveness    : ${values['skip-liveness'] ? 'SKIPPED' : 'live'}`);
   console.log(`  cleaned     : ${skipClean ? 'SKIPPED' : 'invisible Unicode + PDF toolchain metadata'}`);
+  console.log(`  ats gate    : ${values['skip-ats'] ? 'SKIPPED' : 'text layer + page count verified'}`);
   console.log(`  stage       : ${values.stage || 'output/ (root)'}`);
   console.log(`  cv pdf      : ${cvPdfPath}`);
   console.log(`  cover pdf   : ${coverBuilt ? (resolveStagedCoverPdfPath(coverPayload, values['out-cover'], values.stage) || 'generate-cover-letter default') : 'none'}`);

@@ -238,6 +238,32 @@ export function isTooGenericTerm(term) {
  * while a bare "Amazon" matched every voucher mail — and the query named none
  * of the three companies that had actually replied that day.
  */
+/**
+ * ATS platforms that send on an employer's behalf.
+ *
+ * A company-name query only finds mail whose text carries a matchable form of
+ * the tracker's company string, and decisions routinely do not. Two rejections
+ * were missed on 2026-08-31 for exactly this: Thieme's arrived from
+ * `service@jobs.thieme.com` against a tracker row reading "Georg Thieme Verlag
+ * KG / Thieme Compliance GmbH", and MTU's subject was the contentless "Wir
+ * bedanken uns!". Both had to be recorded by hand.
+ *
+ * Searching the platforms directly catches that class: whatever the employer
+ * calls itself, the mail leaves through one of these. Kept to sender domains
+ * only — a `from:` clause cannot widen the result set into unrelated mail the
+ * way a bare keyword can.
+ *
+ * Adopted from the ai-job-search framework's /gmail-sync, which builds the same
+ * OR-group for the same reason.
+ */
+export const ATS_SENDER_DOMAINS = [
+  'greenhouse.io', 'lever.co', 'myworkday.com', 'myworkdayjobs.com', 'ashbyhq.com',
+  'smartrecruiters.com', 'icims.com', 'bamboohr.com', 'successfactors.eu',
+  'successfactors.com', 'csod.com', 'personio.de', 'join.com', 'avature.net',
+  'softgarden.io', 'concludis.de', 'hrworks.de', 'jobs2web.com', 'workable.com',
+  'teamtailor.com', 'recruitee.com', 'jobvite.com', 'taleo.net',
+];
+
 export function buildGmailQuery(apps, { days = 30, maxLength = 1800 } = {}) {
   const active = new Set(['Applied', 'Responded', 'Interview', 'Offer']);
   const companies = [...new Set(
@@ -263,13 +289,22 @@ export function buildGmailQuery(apps, { days = 30, maxLength = 1800 } = {}) {
 
   // Cap the length so Gmail does not reject the query outright; dropping the
   // tail is visible in `companies`, unlike an unusable query.
+  //
+  // The ATS and context groups are a FIXED suffix on every query, so they are
+  // charged against the same budget rather than added on top of it — otherwise
+  // `maxLength` stops describing the query that actually gets sent. At least
+  // one company clause is always kept: a query with none is not a cheaper
+  // query, it is a query that can no longer find the row it was built for.
+  const ats = ATS_SENDER_DOMAINS.map((d) => `from:${d}`).join(' OR ');
+  const suffix = ` OR (${ats}) OR (${context})`;
+  const budget = Math.max(0, maxLength - suffix.length);
   const kept = [];
   let used = 0;
   for (const c of clauses) {
-    if (used + c.length + 4 > maxLength) break;
+    if (kept.length > 0 && used + c.length + 4 > budget) break;
     kept.push(c); used += c.length + 4;
   }
-  return `newer_than:${days}d ((${kept.join(') OR (')}) OR (${context}))`;
+  return `newer_than:${days}d ((${kept.join(') OR (')})${suffix})`;
 }
 
 // ── Plan ────────────────────────────────────────────────────────────────────
