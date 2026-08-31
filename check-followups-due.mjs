@@ -22,12 +22,33 @@
 import { spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
+import { isUnreplyable, isOwnAddress } from './followup-draft.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DUE = new Set(['overdue', 'urgent', 'cold']);
 
 export function selectDue(entries) {
   return (entries ?? []).filter((e) => DUE.has(String(e?.urgency ?? '')));
+}
+
+/**
+ * The same recipient guards followup-draft.mjs applies, so this listing can
+ * never advertise an address the drafter would refuse to write to.
+ *
+ * Printing a no-reply mailbox, an ATS platform address, or — worst — the
+ * candidate's OWN address next to "follow-up due" reads as an actionable
+ * contact and is not one. The first cost is a wasted evening writing to a
+ * mailbox nobody reads; the second is believing a chase was sent.
+ */
+export function pickContact(contacts) {
+  const emails = (contacts ?? []).map((c) => c?.email).filter(Boolean);
+  const usable = emails.find((e) => !isUnreplyable(e) && !isOwnAddress(e));
+  if (usable) return { email: usable, replyable: true };
+  if (emails.length > 0) {
+    const why = emails.some(isOwnAddress) ? 'own address' : 'no-reply/ATS mailbox';
+    return { email: emails[0], replyable: false, why };
+  }
+  return { email: null, replyable: false, why: 'none on file' };
 }
 
 function main() {
@@ -62,13 +83,19 @@ function main() {
   }
 
   console.log(`${today}: ${due.length} follow-up(s) due\n`);
+  let sendable = 0;
   for (const e of due) {
-    const contact = (e.contacts ?? []).map((c) => c.email).filter(Boolean)[0] ?? 'no contact on file';
+    const c = pickContact(e.contacts);
+    if (c.replyable) sendable += 1;
     console.log(`  #${e.num} ${e.company} — ${e.role}`);
     console.log(`      applied ${e.appliedDate} (${e.appDateSource}), ${e.daysSinceApplication}d ago, `
       + `${e.followupCount} follow-up(s) sent, ${e.urgency}`);
-    console.log(`      contact: ${contact}`);
+    console.log(c.replyable
+      ? `      contact: ${c.email}`
+      : `      contact: ⚠️ none reachable${c.email ? ` (${c.email} — ${c.why})` : ''}`);
   }
+  console.log(`\n${sendable} of ${due.length} have a replyable address; `
+    + `${due.length - sendable} would need a contact found first.`);
   console.log('\nDrafts are NOT written and nothing is sent. Run `/career-ops followup` to draft them.');
   process.exit(10);
 }

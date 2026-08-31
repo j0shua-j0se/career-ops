@@ -587,3 +587,32 @@ export function renderRunLogEntry(state, event, detail = '') {
   if (detail) parts.push(clean(detail));
   return `- ${parts.join(' · ')}`;
 }
+
+/**
+ * The link a HUMAN should be handed for a posting.
+ *
+ * Providers store whatever href the source listing exposed, and for StepStone
+ * that is the `-inline.html` embed fragment: it answers a probe with HTTP 200
+ * but renders only title/company/apply, with NO job description. It is the
+ * right URL to fetch and the wrong URL to click, so eight tracker rows carried
+ * a link that looked broken to the person who owned them.
+ *
+ * Canonicalising HERE, on the way into the tracker, keeps the stored link
+ * readable. Nothing is lost on the machine side: liveness-browser's
+ * `fetchableUrl` puts `-inline` back before probing, and that transform is
+ * idempotent, so rows written before this change behave identically.
+ *
+ * Pure and total: anything unparseable comes back untouched.
+ */
+export function toHumanUrl(url) {
+  const s = String(url ?? '');
+  try {
+    const u = new URL(s);
+    if (!/(^|\.)stepstone\.de$/i.test(u.hostname)) return s;
+    if (!/-inline\.html$/i.test(u.pathname)) return s;
+    u.pathname = u.pathname.replace(/-inline\.html$/i, '.html');
+    return u.toString();
+  } catch {
+    return s;
+  }
+}

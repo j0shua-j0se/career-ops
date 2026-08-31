@@ -259,6 +259,7 @@ export async function validateUrlSecurity(urlString) {
 export function fetchableUrl(url) {
   try {
     const u = new URL(url);
+    if (/(^|\.)stepstone\.de$/i.test(u.hostname)) return stepstoneProbeUrl(u);
     if (!/(^|\.)icims\.com$/i.test(u.hostname)) return url;
     if (u.searchParams.has('in_iframe')) return url;
     u.searchParams.set('in_iframe', '1');
@@ -266,6 +267,28 @@ export function fetchableUrl(url) {
   } catch {
     return url; // not a parseable URL — leave it exactly as given
   }
+}
+
+/**
+ * StepStone serves a posting at two URLs and neither works for both audiences:
+ *
+ *   ...--14132233.html          the real page. 403s automated clients.
+ *   ...--14132233-inline.html   an embed fragment. Answers 200, but carries only
+ *                               title/company/apply — NO job description, and it
+ *                               looks broken to a human who opens it.
+ *
+ * The scanner used to store the `-inline` form because it is the one that can be
+ * probed, which put an unreadable link in the tracker for every StepStone row.
+ * Storing the canonical URL and translating HERE keeps the human link human and
+ * the probe answerable — the same trick already applied to iCIMS above.
+ *
+ * Idempotent, so a row still holding the old `-inline` form probes identically.
+ */
+function stepstoneProbeUrl(u) {
+  if (!/\.html$/i.test(u.pathname)) return u.toString();
+  if (/-inline\.html$/i.test(u.pathname)) return u.toString();
+  u.pathname = u.pathname.replace(/\.html$/i, '-inline.html');
+  return u.toString();
 }
 
 export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {

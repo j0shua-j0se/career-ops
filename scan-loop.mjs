@@ -39,7 +39,7 @@ import {
   DEFAULT_LOOP_CONFIG, WAVE_STRATEGIES,
   resolveLoopConfig, newState, normalizeState, ingestOffers, recordScores,
   parseTriageOutput, decideNextAction, summarize, qualifiedCandidates,
-  renderShortlist, renderRunLogEntry,
+  renderShortlist, renderRunLogEntry, toHumanUrl,
 } from './loop-core.mjs';
 import { parsePipeline } from './triage-prefilter.mjs';
 
@@ -382,7 +382,9 @@ function writeTrackerAdditions(candidates, date) {
     if (!c.reportNum) continue;
     const slug = (cell(c.company) || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const note = `triage-only from loop wave ${c.wave} — full evaluation pending`;
-    const url = cell(c.url);
+    // Canonicalised on the way in: the tracker's URL column is what the user
+    // clicks, and a provider's stored href is not always clickable.
+    const url = toHumanUrl(cell(c.url));
     const row = [
       c.reportNum, date, cell(c.company) || '?', cell(c.title) || 'Unknown role',
       'Evaluated', `${c.score.toFixed(1)}/5`, '❌', '—', note,
