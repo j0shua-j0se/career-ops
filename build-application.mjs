@@ -63,6 +63,7 @@ import { dirname, join, resolve, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
 import { resolveCoverOutputPath } from './generate-cover-letter.mjs';
+import { classifyLanguage } from './language-loss.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR = join(ROOT, 'reports');
@@ -150,6 +151,7 @@ function usage() {
   --skip-liveness   Do not check whether the posting is still open
   --skip-clean      Do not strip invisible Unicode / scrub PDF toolchain metadata
   --skip-ats        Do not verify the rendered PDF's ATS text layer / page count
+  --allow-language-gap  Build even when the report states a German requirement A2 cannot meet
   --max-pages N     Fail the ATS gate above N pages (default 2; 0 disables)
   --allow-reorder   Pass through to generate-pdf.mjs
   --allow-stale     Pass through to generate-pdf.mjs
@@ -171,6 +173,7 @@ async function main() {
         'skip-liveness': { type: 'boolean', default: false },
         'skip-clean': { type: 'boolean', default: false },
         'skip-ats': { type: 'boolean', default: false },
+        'allow-language-gap': { type: 'boolean', default: false },
         'max-pages': { type: 'string' },
         'allow-reorder': { type: 'boolean', default: false },
         'allow-stale': { type: 'boolean', default: false },
@@ -232,6 +235,41 @@ async function main() {
     if (dryRun) return true;
     return spawnSync(process.execPath, args, { cwd: ROOT, stdio: 'inherit' }).status === 0;
   };
+
+  // ── 0. Language gate ──────────────────────────────────────────────────────
+  //
+  // A stated hard German requirement is not a scoring penalty, it is a refusal
+  // the employer has already written down — and applying into one has a
+  // measured 0% success rate here.
+  //
+  // Four roles carried "sehr gute Deutschkenntnisse" or "verhandlungssicheres
+  // Deutsch", scored 3.8-4.3, cleared the pursue floor on their own merits, had
+  // kits built, were applied to, and were ALL FOUR rejected: #8 DATEV, #90
+  // Thieme, #43 ZEISS, #64 MTU. That is 4 of 14 rejections spent on a filter
+  // that was visible in the JD before a single PDF was rendered.
+  //
+  // The rule already existed in modes/_custom.md and nothing enforced it, which
+  // is why it kept being scored, noted, and then ignored at build time. It is
+  // enforced here because this is the one command that produces a kit.
+  //
+  // Overridable on purpose: the candidate may know the bar is soft, may have a
+  // contact inside, or may simply choose to spend the application. It stops the
+  // DEFAULT, not the decision.
+  {
+    const reportPath = findReport(reportNum);
+    if (reportPath && !values['allow-language-gap']) {
+      const { tier, quote } = classifyLanguage(readFileSync(reportPath, 'utf-8'));
+      if (tier === 'hard_stop') {
+        console.error(`\n⛔ LANGUAGE HARD STOP in ${basename(reportPath)}: "${quote}"`);
+        console.error('   config/profile.yml puts German at A2; this posting states a requirement A2 cannot carry.');
+        console.error('   Every application sent into this tier so far has been rejected (4 of 4: #8, #90, #43, #64).');
+        console.error('\n   Nothing was built. Re-run with --allow-language-gap to build it anyway,');
+        console.error('   and if you do, have the letter address the gap rather than leave it to be discovered.');
+        process.exitCode = 1;
+        return;
+      }
+    }
+  }
 
   // ── 1. Liveness ───────────────────────────────────────────────────────────
   if (values['skip-liveness']) {

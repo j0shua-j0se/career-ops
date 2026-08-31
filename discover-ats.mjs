@@ -49,6 +49,7 @@ import bamboohr from './providers/bamboohr.mjs';
 import pinpoint from './providers/pinpoint.mjs';
 import rippling from './providers/rippling.mjs';
 import joinProvider from './providers/join.mjs';
+import personio from './providers/personio.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const PORTALS_PATH = process.env.CAREER_OPS_PORTALS || join(CAREER_OPS, 'portals.yml');
@@ -98,6 +99,13 @@ const VENDORS = {
   breezy:          { id: 'breezy',          provider: breezy,          hostFor: (s) => `${lower(s)}.breezy.hr`,      buildUrl: (s) => `https://${lower(s)}.breezy.hr` },
   bamboohr:        { id: 'bamboohr',        provider: bamboohr,        hostFor: (s) => `${lower(s)}.bamboohr.com`,   buildUrl: (s) => `https://${lower(s)}.bamboohr.com` },
   pinpoint:        { id: 'pinpoint',        provider: pinpoint,        hostFor: (s) => `${lower(s)}.pinpointhq.com`, buildUrl: (s) => `https://${lower(s)}.pinpointhq.com` },
+  // Personio is a top-tier ATS in the German market and was missing entirely.
+  // providers/personio.mjs could already SCAN a Personio board; nothing could
+  // RESOLVE a company to one, so a German employer on Personio was invisible to
+  // discovery. Verified 2026-08-31: ITONICS runs four live jobs on
+  // itonics-gmbh.jobs.personio.de, and discover-ats reported it unresolvable.
+  // The `-gmbh` suffix in that slug is why slugVariants matters here.
+  personio:        { id: 'personio',        provider: personio,        hostFor: (s) => `${lower(s)}.jobs.personio.de`, buildUrl: (s) => `https://${lower(s)}.jobs.personio.de` },
 };
 // Slug-resolvable vendors, probed in order for each company (first match wins).
 // Probe order is also a cost decision. resolveCompany probes candidates in this
@@ -109,7 +117,7 @@ const VENDORS = {
 // A company on no supported board is the case that got more expensive: it now
 // probes every vendor before giving up, which is the honest price of the extra
 // coverage.
-const VENDOR_ORDER = ['gh', 'ashby', 'lever', 'workable', 'smartrecruiters', 'recruitee', 'bamboohr', 'breezy', 'pinpoint', 'rippling', 'join'];
+const VENDOR_ORDER = ['gh', 'ashby', 'lever', 'personio', 'workable', 'smartrecruiters', 'recruitee', 'bamboohr', 'breezy', 'pinpoint', 'rippling', 'join'];
 
 // Workday instance subdomains, most common first. Used only when the user gives
 // a tenant + site but no instance: we try each `<tenant>.<inst>.myworkdayjobs.com`
@@ -130,7 +138,7 @@ const USAGE = `Usage:
 portals.yml is a user-layer file: this command NEVER writes it unless you pass
 --write. The default previews the entries it would add (see pendingEntries).
 
-Vendors: gh, ashby, lever, workable, smartrecruiters, recruitee, bamboohr,
+Vendors: gh, ashby, lever, personio, workable, smartrecruiters, recruitee, bamboohr,
 breezy, pinpoint, rippling, join (all resolve from a name/slug) and workday
 (resolves from a coordinate hint — a name alone can't locate a Workday site).
 Default: all of them, probed in that order, first match wins.
