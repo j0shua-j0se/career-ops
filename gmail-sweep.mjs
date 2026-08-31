@@ -280,6 +280,103 @@ export function buildGmailQuery(apps, { days = 30, maxLength = 1800 } = {}) {
  *
  * @returns {{updates: object[], review: object[], noise: object[]}}
  */
+/**
+ * Requisition IDs, the one signal that survives near-identical titles.
+ *
+ * Every ATS rejection quotes the req it is about — "(516786)", "(301278)",
+ * "JR_1047706" — and the tracker row carries the same id in its notes and in
+ * its posting URL. The fuzzy company+role matcher cannot see any of it, so a
+ * Siemens rejection for req 516786 was matched to a DIFFERENT Siemens row
+ * (#77, Climate Data & Analytics) at "high" confidence, while #115, whose own
+ * notes read "Job ID 516786", was never considered. An employer with many open
+ * roles is exactly where a wrong match is both most likely and most costly.
+ *
+ * merge-tracker.mjs already treats a req ID as decisive for the same reason
+ * (AGENTS.md, #1524/#2009). This applies the same rule to inbound mail.
+ *
+ * Bare digit runs need SIX or more, so German postcodes (five) cannot collide.
+ */
+const REQ_LABELLED_RE = /\b(?:job\s*id|requisition|req|posting\s*id|ref|jr|r)[\s_#:-]*([a-z]*\d[a-z0-9_-]*)/gi;
+const REQ_PREFIXED_RE = /\b([a-z]{1,3})[_-](\d{4,10})\b/gi;
+const REQ_BARE_RE = /\b(\d{6,10})\b/g;
+
+export function extractReqIds(text) {
+  const out = new Set();
+  const s = String(text ?? '');
+  for (const m of s.matchAll(REQ_LABELLED_RE)) {
+    const id = m[1].replace(/[_-]/g, '').toUpperCase();
+    if (/\d/.test(id) && id.length >= 4) out.add(id);
+  }
+  // A short alpha prefix is distinguishing (JR-10423 and R-10423 are different
+  // requisitions), so keep the prefixed form AS WELL AS the bare digits — the
+  // labelled rule above eats the separator and would otherwise collapse them.
+  // Both sides of a comparison run through here, so emitting both is safe.
+  for (const m of s.matchAll(REQ_PREFIXED_RE)) {
+    out.add(`${m[1]}${m[2]}`.toUpperCase());
+    out.add(m[2]);
+  }
+  for (const m of s.matchAll(REQ_BARE_RE)) out.add(m[1].toUpperCase());
+  return out;
+}
+
+/**
+ * How strongly a row CLAIMS an id, so a passing mention cannot outrank the row
+ * the id actually belongs to.
+ *
+ * Notes are prose and prose talks about other rows. Row #85 (Sana) carries the
+ * sentence "Every other application that evening (Siemens 516786, Siemens
+ * Energy 301278, Thieme, Trench) produced a genuine acknowledgement" — written
+ * during an earlier session — which made it a bare-number match for two ids
+ * belonging to entirely different employers. Three rows matched 516786 and the
+ * resolver, requiring uniqueness, gave up and let the wrong fuzzy match stand.
+ *
+ *   2  the id is in the row's posting URL — the row IS that requisition
+ *   1  the id is labelled in the notes ("Job ID 516786", "req JR-10423")
+ *   0  a bare number somewhere in the prose — could be about anything
+ *
+ * The best tier wins, and only if exactly one row holds it.
+ */
+function reqIdTier(app, ids) {
+  const raw = String(app?.raw ?? '');
+  const notes = String(app?.notes ?? '');
+  const urls = raw.match(/https?:\/\/\S+/g) ?? [];
+  for (const id of ids) {
+    if (urls.some((u) => u.toUpperCase().includes(id))) return 2;
+  }
+  const labelled = new Set();
+  for (const m of notes.matchAll(REQ_LABELLED_RE)) {
+    const v = m[1].replace(/[_-]/g, '').toUpperCase();
+    if (/\d/.test(v) && v.length >= 4) labelled.add(v);
+  }
+  for (const id of ids) if (labelled.has(id)) return 1;
+  const bare = extractReqIds(`${notes} ${raw}`);
+  for (const id of ids) if (bare.has(id)) return 0;
+  return -1;
+}
+
+/**
+ * Re-point a match using the requisition id the message quotes. Deliberately
+ * conservative: it acts only when ONE row holds the id at the strongest tier
+ * present, so a genuinely ambiguous id changes nothing and the fuzzy result
+ * stands.
+ */
+export function resolveByReqId(candidate, apps, matchedNum) {
+  const text = `${candidate.subject ?? ''} ${candidate.body_snippet ?? ''} ${candidate.body ?? ''}`;
+  const msgIds = extractReqIds(text);
+  if (msgIds.size === 0) return null;
+
+  const scored = apps
+    .map((a) => ({ app: a, tier: reqIdTier(a, msgIds) }))
+    .filter((x) => x.tier >= 0);
+  if (scored.length === 0) return null;
+
+  const best = Math.max(...scored.map((x) => x.tier));
+  const top = scored.filter((x) => x.tier === best);
+  if (top.length !== 1) return null;
+  if (matchedNum != null && top[0].app.num === matchedNum) return null;
+  return top[0].app;
+}
+
 export function buildPlan(candidates, apps, followups = []) {
   const matches = matchCandidates(candidates, apps, followups);
   const updates = [], review = [], noise = [];
@@ -288,7 +385,18 @@ export function buildPlan(candidates, apps, followups = []) {
     const candidate = candidates.find((c) => c.message_id === match.message_id);
     if (!candidate) continue;
     const classification = classifyReply(candidate);
-    const app = apps.find((a) => a.num === match.application_num) || null;
+    let app = apps.find((a) => a.num === match.application_num) || null;
+
+    // A requisition id quoted in the mail outranks the fuzzy company+role
+    // guess: it is the only signal that separates two open roles at the same
+    // employer. Applied whether the fuzzy pass matched the wrong row or none.
+    const byReq = resolveByReqId(candidate, apps, app ? app.num : null);
+    if (byReq) {
+      match.signals = Array.from(new Set([...(match.signals ?? []), 'req-id']));
+      match.confidence = 'high';
+      match.rematchedFrom = app ? app.num : null;
+      app = byReq;
+    }
 
     const entry = {
       message_id: match.message_id,
@@ -303,6 +411,7 @@ export function buildPlan(candidates, apps, followups = []) {
       currentStatus: app ? app.status : null,
       confidence: match.confidence,
       signals: match.signals,
+      ...(match.rematchedFrom !== undefined ? { rematchedFrom: match.rematchedFrom } : {}),
     };
 
     if (classification.type === 'Noise' || classification.type === 'Auto-confirmation') {
