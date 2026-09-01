@@ -393,3 +393,68 @@ try {
     fail(`real URLs were wrongly collapsed: ${JSON.stringify(realUrls.queued.map((o) => o.url))}`);
   }
 }
+
+// ── Redirector identity must survive across runs ─────────────────────
+//
+// Indeed mints a new token per search, so the URL guard is useless between
+// runs: tomorrow's sweep yields different URLs for the same postings, all of
+// them "unseen". Caught the hard way — running one sweep file through ingest
+// twice queued three jobs already in the inbox, because rows dropped as URL
+// duplicates never registered their identity and their sibling tokens then
+// looked new.
+{
+  const { planIngest, knownRedirectIdentities } = await import(pathToFileURL(SCRIPT).href);
+
+  const historyText = [
+    'url\tfirst_seen\tportal\ttitle\tcompany',
+    'https://to.indeed.com/oldtoken\t2026-09-01\tindeed-mcp\tWerkstudent Data Analytics\tSiemens',
+  ].join('\n');
+  const pipelineText = '- [x] https://to.indeed.com/proctoken | Estateanfrage | Werkstudent AI Engineer (m/w/d) | München | posted: 2026-06-19 | via: indeed-mcp';
+  const ids = knownRedirectIdentities(historyText, pipelineText);
+
+  // A brand-new token for a job already in history must not be queued.
+  const fresh = planIngest(
+    [{ url: 'https://to.indeed.com/newtoken1', company: 'Siemens', title: 'Werkstudent Data Analytics' }],
+    new Set(),
+    { seenIdentities: ids },
+  );
+  if (fresh.queued.length === 0 && fresh.duplicates.length === 1) {
+    pass('a fresh token for a job already in history is refused');
+  } else {
+    fail(`history identity not honoured: ${JSON.stringify(fresh.queued)}`);
+  }
+
+  // Same for a job already PROCESSED in the inbox — re-queuing it would pay to
+  // re-skip something a previous pass already judged.
+  const proc = planIngest(
+    [{ url: 'https://to.indeed.com/newtoken2', company: 'Estateanfrage', title: 'Werkstudent AI Engineer (m/w/d)' }],
+    new Set(),
+    { seenIdentities: ids },
+  );
+  if (proc.queued.length === 0) {
+    pass('a fresh token for an already-processed inbox row is refused');
+  } else {
+    fail(`processed-row identity not honoured: ${JSON.stringify(proc.queued)}`);
+  }
+
+  // A genuinely new job at the same employer still gets through.
+  const genuine = planIngest(
+    [{ url: 'https://to.indeed.com/newtoken3', company: 'Siemens', title: 'Werkstudent Machine Learning' }],
+    new Set(),
+    { seenIdentities: ids },
+  );
+  if (genuine.queued.length === 1) {
+    pass('a genuinely new role at the same employer is still queued');
+  } else {
+    fail(`a new role was wrongly refused: ${JSON.stringify(genuine.duplicates)}`);
+  }
+
+  // Real board URLs must never be indexed this way — their path carries
+  // identity, and two same-titled postings there are two requisitions.
+  const realHistory = 'url\tfirst_seen\tportal\ttitle\tcompany\nhttps://jobs.siemens.com/en_US/externaljobs/JobDetail/111\t2026-09-01\tsiemens-api\tWerkstudent Data Analytics\tSiemens';
+  if (knownRedirectIdentities(realHistory, '').size === 0) {
+    pass('a real board URL is not indexed by company+title');
+  } else {
+    fail('a non-redirector history row leaked into the identity index');
+  }
+}

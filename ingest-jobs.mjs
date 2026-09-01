@@ -128,9 +128,46 @@ function isOpaqueRedirect(url) {
 }
 
 /** Company + title, normalised — the only identity an opaque URL leaves us. */
-function identityKey(offer) {
+function identityKeyOf(company, title) {
   const norm = (v) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
-  return `${norm(offer.company)}|${norm(offer.title)}`;
+  return `${norm(company)}|${norm(title)}`;
+}
+
+function identityKey(offer) {
+  return identityKeyOf(offer.company, offer.title);
+}
+
+/**
+ * Company+title of everything already seen that arrived behind an opaque
+ * redirect, so a LATER sweep cannot re-queue the same job under a fresh token.
+ *
+ * Indeed mints a new token per search, which makes the URL guard useless across
+ * runs: tomorrow's sweep of the same board yields different URLs for the same
+ * postings, every one of them unseen. Without this the inbox grows a fresh copy
+ * on every pass. Observed immediately — running the same sweep file through
+ * ingest twice queued three jobs that were already in the inbox, because the
+ * rows dropped as URL-duplicates never registered their identity and their
+ * sibling tokens then looked new.
+ *
+ * Only redirector rows are indexed. A real board's URL carries identity, and
+ * indexing those by company+title would refuse a genuinely separate
+ * requisition that happens to share a title.
+ */
+export function knownRedirectIdentities(historyText = '', pipelineText = '') {
+  const seen = new Set();
+  for (const line of String(historyText).split('\n')) {
+    const col = line.split('\t');
+    // scan-history.tsv: url, first_seen, portal, title, company, ...
+    if (col.length < 5 || !isOpaqueRedirect(col[0])) continue;
+    seen.add(identityKeyOf(col[4], col[3]));
+  }
+  // Inbox rows are `- [ ] {url} | {company} | {title} | ...`.
+  for (const line of String(pipelineText).split('\n')) {
+    const m = line.match(/^- \[[ x]\]\s+(\S+)\s*\|\s*([^|]*)\|\s*([^|]*)/);
+    if (!m || !isOpaqueRedirect(m[1])) continue;
+    seen.add(identityKeyOf(m[2], m[3]));
+  }
+  return seen;
 }
 
 function hostMatches(hostname, needle) {
@@ -275,7 +312,19 @@ export function planIngest(offers, seen, opts = {}) {
   // matching, see AGENTS.md), and nothing here can see a req ID, so the cheaper
   // mistake is the right one. Deliberately narrow: exact match, same batch,
   // and only for hosts that are pure redirectors.
+  // Seeded from three places, because a token that looks new is not evidence
+  // the job is:
+  //   1. identities already in history/inbox behind a redirector (opts.seenIdentities),
+  //      so tomorrow's freshly-minted tokens do not re-queue today's jobs;
+  //   2. rows just dropped as URL duplicates — their identity is spoken for even
+  //      though they are not in `candidates`. Missing this is what let a
+  //      re-run of the same sweep file queue three jobs already in the inbox;
+  //   3. the surviving candidates themselves, in order.
   const seenIdentities = new Map();
+  for (const key of opts.seenIdentities ?? []) seenIdentities.set(key, 'a previously seen posting');
+  for (const d of duplicates) {
+    if (isOpaqueRedirect(d.url)) seenIdentities.set(identityKey(d), d.url);
+  }
   const afterCollapse = [];
   for (const o of candidates) {
     if (!isOpaqueRedirect(o.url)) { afterCollapse.push(o); continue; }
@@ -395,7 +444,7 @@ silently. Queues only; never evaluates or submits.`);
   const { queued, duplicates, invalid, rejected, duplicateIds } = planIngest(
     offers,
     knownUrls(historyText, pipelineText),
-    { allowListing }
+    { allowListing, seenIdentities: knownRedirectIdentities(historyText, pipelineText) },
   );
 
   const today = new Date().toISOString().slice(0, 10);
