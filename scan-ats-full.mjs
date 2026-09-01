@@ -224,7 +224,7 @@ export const SOURCES = {
 const KNOWN_FLAGS = [
   '--since', '--limit', '--ats', '--seeds', '--dry-run', '--liveness',
   '--verbose', '--md-out', '--json', '--include-undated', '--include-blacklisted',
-  '--shuffle', '--resume', '--help', '-h',
+  '--shuffle', '--resume', '--keep-unlocated', '--help', '-h',
 ];
 
 // Flags that consume the next argv token as a value (space-separated form —
@@ -242,6 +242,7 @@ const USAGE = `Usage:
   node scan-ats-full.mjs --verbose            # log per-board fetch failures
   node scan-ats-full.mjs --md-out <dir>       # also write a dated markdown digest to <dir>
   node scan-ats-full.mjs --resume             # continue an interrupted sweep from its checkpoint
+  node scan-ats-full.mjs --keep-unlocated     # queue postings that report no location (unfilterable)
   node scan-ats-full.mjs --help               # print this usage block and exit`;
 
 function parseArgs(argv) {
@@ -310,6 +311,7 @@ function parseArgs(argv) {
     mdOut: valueOf('--md-out'),
     json: args.includes('--json'),
     includeUndated: args.includes('--include-undated'),
+    keepUnlocated: args.includes('--keep-unlocated'),
     includeBlacklisted: args.includes('--include-blacklisted'),
     shuffle: args.includes('--shuffle'),
     resume: args.includes('--resume'),
@@ -682,6 +684,7 @@ async function main() {
   let droppedNoDate = cc.droppedNoDate || 0;
   let droppedContent = cc.droppedContent || 0;
   let droppedCountryEligibility = cc.droppedCountryEligibility || 0;
+  let droppedNoLocation = cc.droppedNoLocation || 0;
   // Postings with no description for the eligibility filter to read. Carried
   // so a resumed sweep does not restart the tally and report a smaller,
   // healthier-looking number than the run actually earned.
@@ -703,6 +706,7 @@ async function main() {
   const snapshotCounters = () => ({
     totalCompaniesScanned, totalErrors, droppedNoDate, droppedContent,
     droppedCountryEligibility, countryEligibilityUntestable,
+    droppedNoLocation,
     noDateSkipCompanies, noDateSkipJobs, cappedBoards,
   });
   const checkpointBase = () => ({
@@ -754,6 +758,20 @@ async function main() {
       if (!contentFilter(job.description, matchedTitleKeywords(job.title, config?.title_filter))) { droppedContent++; continue; }
       if (!countryEligibilityTestable(job.description)) countryEligibilityUntestable++;
       if (!countryEligibilityFilter(job.description)) { droppedCountryEligibility++; continue; }
+      // A posting with no location cannot be judged against a location
+      // requirement, and location_filter cannot penalise missing data — so it
+      // passes every geographic gate and lands in the inbox as an unfilterable
+      // "maybe" that costs an agent fetch to resolve.
+      //
+      // That is tolerable for the curated portals in portals.yml, which are
+      // hand-picked and few. It is not tolerable here: this sweep contacts
+      // ~38k companies of unknown geography, and one run left 186 location-less
+      // iCIMS rows in the inbox, none of which could be recovered — the tenants
+      // publish no location on the list page and their detail pages carry none
+      // either.
+      //
+      // --keep-unlocated opts out for a sweep where that breadth is wanted.
+      if (!opts.keepUnlocated && !String(job.location ?? '').trim()) { droppedNoLocation++; continue; }
       const dedupUrl = normalizeUrlForDedup(job.url);
       if (seenUrls.has(dedupUrl)) continue;
       seenUrls.add(dedupUrl); // intra-scan dedup
@@ -983,6 +1001,7 @@ async function main() {
     }
   }
   if (droppedContent) log(`Content-filtered:   ${droppedContent}`);
+  if (droppedNoLocation) log(`No location:        ${droppedNoLocation} (unfilterable — use --keep-unlocated to queue them anyway)`);
   // Same rule as scan.mjs: never a bare zero. "0 removed" reads as all-clear
   // when it almost always means the filter had nothing to read.
   if (config?.country_eligibility_filter || droppedCountryEligibility) {
