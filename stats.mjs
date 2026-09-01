@@ -274,6 +274,13 @@ export function scanCompanyNames(content) {
  * @param {object|null} scanStats - Result of computeScanStats (for activePortals).
  * @param {string[]} [producingCompanyNames] - From scanCompanyNames().
  */
+// A portal is called collapsed when it once returned at least this many
+// postings and now returns at most this share of its own best. Both bounds
+// exist to keep the signal honest: a board that peaked at three postings
+// dropping to one is noise, and a busy board halving is ordinary churn.
+const YIELD_COLLAPSE_FLOOR = 20;
+const YIELD_COLLAPSE_RATIO = 0.2;
+
 export function computePortalStats(portalsYmlContent, scanStats, producingCompanyNames = [], portalHealthContent = null) {
   let cfg;
   try {
@@ -291,6 +298,8 @@ export function computePortalStats(portalsYmlContent, scanStats, producingCompan
   for (const name of configuredNames) if (producing.has(name)) producingCompanies++;
 
   let persistentlyDead = 0;
+  /** @type {Array<{company:string,was:number,now:number}>} */
+  const yieldCollapsed = [];
   if (portalHealthContent) {
     const lines = portalHealthContent.split('\n');
     const healthRecords = [];
@@ -299,7 +308,12 @@ export function computePortalStats(portalsYmlContent, scanStats, producingCompan
       if (!line) continue;
       const parts = line.split('\t');
       if (parts.length >= 3) {
-        healthRecords.push({ company: parts[1], status: parts[2] });
+        // parts[3] (jobs) is the unfiltered posting count for that run, and
+        // may be absent on rows written before the column existed. Absent is
+        // null — unmeasured — and never folded in as a zero.
+        const rawJobs = parts.length >= 4 ? parts[3].trim() : '';
+        const jobs = rawJobs === '' || !Number.isFinite(Number(rawJobs)) ? null : Number(rawJobs);
+        healthRecords.push({ company: parts[1], status: parts[2], jobs });
       }
     }
     const streaks = new Map();
@@ -318,6 +332,34 @@ export function computePortalStats(portalsYmlContent, scanStats, producingCompan
         persistentlyDead++;
       }
     }
+
+    // A portal that still answers but has stopped producing.
+    //
+    // This is the failure a status column structurally cannot show. Deutsche
+    // Bahn was pinned to a search id serving an events board and FAU was
+    // fetching one URL per keyword and never the listing; both answered every
+    // probe, both logged `reachable` every run, and between them they were
+    // withholding roughly 500 postings. The status was accurate the whole
+    // time. What changed was the count, and nothing was reading it.
+    //
+    // Reported only when there is a measured before and a measured after: a
+    // row with no count means the run predates the column, and comparing
+    // against it would invent a collapse that never happened.
+    const measured = new Map();
+    for (const r of healthRecords) {
+      if (r.jobs === null) continue;
+      if (!measured.has(r.company)) measured.set(r.company, []);
+      measured.get(r.company).push(r.jobs);
+    }
+    for (const [company, counts] of measured.entries()) {
+      if (counts.length < 2) continue;
+      const latest = counts[counts.length - 1];
+      const best = Math.max(...counts.slice(0, -1));
+      if (best >= YIELD_COLLAPSE_FLOOR && latest <= best * YIELD_COLLAPSE_RATIO) {
+        yieldCollapsed.push({ company, was: best, now: latest });
+      }
+    }
+    yieldCollapsed.sort((a, b) => (b.was - b.now) - (a.was - a.now));
   }
 
   return {
@@ -327,6 +369,7 @@ export function computePortalStats(portalsYmlContent, scanStats, producingCompan
     producingCompanies,
     producingPct: pct(producingCompanies, configuredNames.size),
     persistentlyDead,
+    yieldCollapsed,
   };
 }
 

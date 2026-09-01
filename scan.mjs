@@ -2121,7 +2121,12 @@ export function appendScanRunSummary(c, filePath = SCAN_RUNS_PATH) {
 // ── Portal health persistence (#1744) ───────────────────────────────
 
 const PORTAL_HEALTH_PATH = 'data/portal-health.tsv';
-export const PORTAL_HEALTH_HEADER = 'timestamp\tcompany\tstatus\n';
+const LEGACY_PORTAL_HEALTH_HEADER = 'timestamp\tcompany\tstatus\n';
+// `jobs` is appended at the END so every existing 3-column row stays readable
+// and every existing reader keeps working. loadPortalHealth reports jobs:null
+// for a row written before the column existed — "not measured", which is a
+// different fact from a measured zero and must never be charted as one.
+export const PORTAL_HEALTH_HEADER = 'timestamp\tcompany\tstatus\tjobs\n';
 
 // Locked (portal-health-lock.mjs) so a concurrent read-modify-write of this
 // same file — e.g. tests/portal-health-guard.mjs's regression-cleanup path —
@@ -2129,10 +2134,23 @@ export const PORTAL_HEALTH_HEADER = 'timestamp\tcompany\tstatus\n';
 export async function appendPortalHealth(healthRecords, filePath = PORTAL_HEALTH_PATH) {
   await withPortalHealthLock(filePath, async () => {
     mkdirSync(path.dirname(filePath), { recursive: true });
-    if (!existsSync(filePath)) writeFileSync(filePath, PORTAL_HEALTH_HEADER, 'utf-8');
+    if (!existsSync(filePath)) {
+      writeFileSync(filePath, PORTAL_HEALTH_HEADER, 'utf-8');
+    } else {
+      // Widen a pre-`jobs` header in place. Only the header line is touched;
+      // the historical rows keep three columns and read back as jobs:null.
+      // Done under the same lock as the append, so no reader can observe a
+      // file whose header and rows disagree.
+      const existing = readFileSync(filePath, 'utf-8');
+      const nl = existing.indexOf('\n');
+      const firstLine = nl === -1 ? existing : existing.slice(0, nl + 1);
+      if (firstLine === LEGACY_PORTAL_HEALTH_HEADER) {
+        writeFileSync(filePath, PORTAL_HEALTH_HEADER + existing.slice(nl + 1), 'utf-8');
+      }
+    }
     let lines = '';
     for (const r of healthRecords) {
-      lines += [r.timestamp, r.company, r.status].join('\t') + '\n';
+      lines += [r.timestamp, r.company, r.status, r.jobs ?? ''].join('\t') + '\n';
     }
     if (lines) appendFileSync(filePath, lines, 'utf-8');
   });
@@ -2147,7 +2165,9 @@ export function loadPortalHealth(filePath = PORTAL_HEALTH_PATH) {
     if (!line) continue;
     const parts = line.split('\t');
     if (parts.length >= 3) {
-      records.push({ timestamp: parts[0], company: parts[1], status: parts[2] });
+      const rawJobs = parts.length >= 4 ? parts[3].trim() : '';
+      const jobs = rawJobs === '' || !Number.isFinite(Number(rawJobs)) ? null : Number(rawJobs);
+      records.push({ timestamp: parts[0], company: parts[1], status: parts[2], jobs });
     }
   }
   return records;
@@ -2570,6 +2590,8 @@ async function main() {
   const newOffers = [];
   const errors = [...resolveErrors];
   const emptyTargets = [];
+  /** @type {Map<string, number>} portal name -> postings returned this run, before any filter. */
+  const yieldByCompany = new Map();
 
   // Arm the failure-path row (#2643) now that the sweep is about to start and
   // every counter it reads is in scope. new_added is hardcoded 0 on a failed
@@ -2643,6 +2665,12 @@ async function main() {
         throw new Error(`${provider.id}: fetch() did not return an array`);
       }
       totalFound += jobs.length;
+      // The real, unbounded yield for this portal, kept for the health ledger.
+      // "reachable" cannot tell a portal that returned 467 postings from one
+      // that returned six: Deutsche Bahn served an events board and FAU
+      // returned 8 of its 48 for weeks, and both logged healthy every run. A
+      // count that collapses is visible; a status that stays green is not.
+      yieldByCompany.set(company.name, (yieldByCompany.get(company.name) || 0) + jobs.length);
       if (!company._isBoard && jobs.length === 0) {
         emptyTargets.push(company.name);
       }
@@ -2960,7 +2988,7 @@ async function main() {
     let status = errorKindByCompany.get(t.name) || 'reachable';
     if (status === 'reachable' && isEmpty) status = 'empty';
 
-    healthRecords.push({ timestamp: nowStr, company: t.name, status });
+    healthRecords.push({ timestamp: nowStr, company: t.name, status, jobs: yieldByCompany.get(t.name) ?? 0 });
   }
 
   const pastHealth = loadPortalHealth();
