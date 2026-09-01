@@ -7,7 +7,7 @@ console.log('\nProvider — beesite (milch \& zucker GJB search API)');
 try {
   const beesiteModule = await import(pathToFileURL(join(ROOT, 'providers/beesite.mjs')).href);
   const beesite = beesiteModule.default;
-  const { resolveConfig: beeConfig, buildSearchUrl, parseBeesiteDate, parseSearchResult } = beesiteModule;
+  const { resolveConfig: beeConfig, buildSearchUrl, parseBeesiteDate, parseSearchResult, isBeesiteHost } = beesiteModule;
 
   if (beesite.id === 'beesite') pass('beesite.id is "beesite"');
   else fail(`beesite.id is ${JSON.stringify(beesite.id)}`);
@@ -61,6 +61,43 @@ try {
   const beeJobs = await beesite.fetch({ name: 'MB', api: 'https://x.app.beesite.de' }, beeCtx);
   if (beeJobs.length === 102 && beeCalls === 2 && beeSeen[1].includes('"FirstItem":101')) pass('beesite.fetch() paginates via FirstItem and dedups across pages');
   else fail(`beesite.fetch() returned ${beeJobs.length} jobs after ${beeCalls} calls`);
+
+  // ── isBeesiteHost: an allowlist, not a pattern ─────────────────────
+  // Beesite is white-labelled, so a tenant can serve the identical JSON
+  // contract from its own domain. Mercedes-Benz did exactly that:
+  // mercedes-benz.app.beesite.de now 404s every path and the live public
+  // endpoint is jobs.api.mercedes-benz.com. The guard has to admit that host
+  // without becoming a pattern that admits arbitrary ones — this is the SSRF
+  // check, and a lookalike domain must still be refused.
+  if (isBeesiteHost('beesite.de') && isBeesiteHost('mercedes-benz.app.beesite.de')) {
+    pass('isBeesiteHost() still accepts beesite.de and its subdomains');
+  } else {
+    fail('isBeesiteHost() rejected a canonical beesite host');
+  }
+  if (isBeesiteHost('jobs.api.mercedes-benz.com') && isBeesiteHost('JOBS.API.MERCEDES-BENZ.COM')) {
+    pass('isBeesiteHost() accepts the enumerated Mercedes-Benz front, case-insensitively');
+  } else {
+    fail('isBeesiteHost() rejected the enumerated Mercedes-Benz host');
+  }
+  const refused = [
+    'mercedes-benz.com',                       // the parent domain is not the API
+    'evil.com',
+    'beesite.de.evil.com',                     // suffix-in-the-middle
+    'jobs.api.mercedes-benz.com.evil.com',     // allowlist entry as a prefix
+    'notbeesite.de',
+    '',
+  ];
+  if (refused.every((h) => !isBeesiteHost(h)) && !isBeesiteHost(null) && !isBeesiteHost(undefined)) {
+    pass('isBeesiteHost() refuses lookalikes, the bare parent domain, and non-strings');
+  } else {
+    fail(`isBeesiteHost() admitted one of: ${JSON.stringify(refused.filter((h) => isBeesiteHost(h)))}`);
+  }
+  const mbCfg = beeConfig({ name: 'Mercedes-Benz', api: 'https://jobs.api.mercedes-benz.com' });
+  if (mbCfg && mbCfg.searchApi === 'https://jobs.api.mercedes-benz.com/search') {
+    pass('resolveConfig() builds the search endpoint for the Mercedes-Benz front');
+  } else {
+    fail(`resolveConfig() wrong for the Mercedes-Benz front: ${JSON.stringify(mbCfg)}`);
+  }
 } catch (e) {
   fail(`beesite provider tests crashed: ${e.message}`);
 }

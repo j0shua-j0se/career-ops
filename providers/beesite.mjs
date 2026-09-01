@@ -51,6 +51,34 @@ const DESCRIPTOR = [
 ];
 
 /** @param {import('./_types.js').PortalEntry} entry */
+// Hosts allowed to serve a beesite /search endpoint.
+//
+// This is an SSRF guard, so it stays an allowlist rather than becoming a
+// pattern. Beesite is white-labelled, and a tenant that has put its own domain
+// in front of the same software is still beesite — Mercedes-Benz retired
+// mercedes-benz.app.beesite.de (every path 404s) and now serves the identical
+// JSON contract from jobs.api.mercedes-benz.com, which the suffix rule alone
+// rejects. Each such host is enumerated here, one line per verified tenant,
+// so adding one is a deliberate act with a name on it rather than a widened
+// regex that quietly admits anything.
+//
+// jobs.api.mercedes-benz.com is the PUBLIC front (gjbAddress in the careers
+// site's own config). Do not add the intranet sibling
+// mercedes-benz-beesite-production-gjb-intranet.app.beesite.de: its
+// PositionURIs point at internal-jobs.app.corpintra.net, which does not
+// resolve outside the corporate network, so every posting it returns would
+// carry a dead link.
+const EXTRA_BEESITE_HOSTS = new Set([
+  'jobs.api.mercedes-benz.com',
+]);
+
+/** @param {string} host Lowercased URL host. */
+export function isBeesiteHost(host) {
+  if (typeof host !== 'string' || !host) return false;
+  const h = host.toLowerCase();
+  return h === 'beesite.de' || h.endsWith('.beesite.de') || EXTRA_BEESITE_HOSTS.has(h);
+}
+
 export function resolveConfig(entry) {
   const raw = entry.api || entry.careers_url || '';
   let u;
@@ -61,7 +89,7 @@ export function resolveConfig(entry) {
   }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
   const host = u.host.toLowerCase();
-  if (host !== 'beesite.de' && !host.endsWith('.beesite.de')) return null;
+  if (!isBeesiteHost(host)) return null;
   const cfgBlock = entry.beesite && typeof entry.beesite === 'object' ? entry.beesite : {};
   return {
     searchApi: `${u.origin}/search`,
