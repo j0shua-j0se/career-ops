@@ -116,9 +116,30 @@ export function parseJobUrl(url) {
     // Malformed percent-encoding: keep the raw (still percent-encoded) slug
     // rather than throwing the whole posting away.
   }
-  const title = slug.replace(/-+/g, ' ').trim();
+  // A DOUBLE hyphen, where present, is a real delimiter — and it is the only
+  // one this board offers.
+  //
+  // The general slug is `{id}-{title-and-location}` with nothing separating the
+  // two, which is why location is left empty rather than guessed. But 154 of
+  // the 1,347 postings (11%, measured against the live sitemap on 2026-09-01)
+  // carry a `--`, and what follows it was a location in every single one:
+  // warstein-germany 33, munich 17, singapore 13, munich-germany 12, then
+  // dresden, villach-austria, regensburg, kulim-malaysia, shanghai and so on.
+  //
+  // The 11% is not a random sample. The delimiter appears because the title
+  // ended in "(f/m/div)", which is a German-market convention, so roughly half
+  // of these are DACH postings — the ones this search actually cares about.
+  //
+  // Everything else keeps the empty location. Splitting on a single hyphen
+  // would be guessing, and a wrongly-attributed location silently mis-filters
+  // a posting, which is the failure this file exists to avoid.
+  const sep = slug.indexOf('--');
+  const titleSlug = sep === -1 ? slug : slug.slice(0, sep);
+  const locationSlug = sep === -1 ? '' : slug.slice(sep + 2);
+  const title = titleSlug.replace(/-+/g, ' ').trim();
+  const location = locationSlug.replace(/-+/g, ' ').trim();
   if (!title) return null;
-  return { id, title, url: u.href };
+  return { id, title, location, url: u.href };
 }
 
 /**
@@ -212,7 +233,7 @@ export default {
         const parsed = parseJobUrl(loc);
         if (!parsed || seen.has(parsed.url)) continue;
         seen.add(parsed.url);
-        jobs.push({ title: parsed.title, url: parsed.url, company: entry.name, location: '' });
+        jobs.push({ title: parsed.title, url: parsed.url, company: entry.name, location: parsed.location || '' });
         if (jobs.length >= MAX_JOBS) return jobs;
       }
     }

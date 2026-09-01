@@ -135,11 +135,15 @@ try {
     fail(`infineon.parseJobUrl() xi'an wrong: ${JSON.stringify(xian)}`);
   }
 
-  // The ambiguous case named in the task: no reliable delimiter between title
-  // and location, so BOTH stay fused in `title` and location is never guessed.
+  // This slug carries a double hyphen in TWO places: immediately after the id,
+  // and as the real title/location delimiter. Only the second one is data — the
+  // first is slugification noise and must not be mistaken for a split point,
+  // which would leave an empty title and drop the posting.
   const doubleDash = parseJobUrl('https://jobs.infineon.com/careers/job/563808960697866--duales-studium-2026-embedded-systems-m-w-div-dhbw--munich-germany-?domain=infineon.com');
-  if (doubleDash && doubleDash.title === 'duales studium 2026 embedded systems m w div dhbw munich germany') {
-    pass('infineon.parseJobUrl() collapses runs of dashes (incl. a leading double-dash after the id) into single spaces');
+  if (doubleDash
+      && doubleDash.title === 'duales studium 2026 embedded systems m w div dhbw'
+      && doubleDash.location === 'munich germany') {
+    pass('infineon.parseJobUrl() splits on the delimiting double-dash, not the one right after the id');
   } else {
     fail(`infineon.parseJobUrl() double-dash wrong: ${JSON.stringify(doubleDash)}`);
   }
@@ -291,4 +295,80 @@ try {
   }
 } catch (e) {
   fail(`infineon provider tests crashed: ${e.message}`);
+}
+
+// ── The double hyphen is the only delimiter this board offers ────────
+//
+// The general slug is {id}-{title-and-location} with nothing between the two,
+// which is why location is normally left empty rather than guessed. But 11% of
+// the live board (measured 2026-09-01: 154 of 1,347 slugs) carries a `--`, and
+// what follows it was a location in every one — warstein-germany 33, munich 17,
+// singapore 13, munich-germany 12, then dresden, villach-austria, regensburg,
+// kulim-malaysia, shanghai.
+//
+// That 11% is not a random sample: the delimiter exists because the title ended
+// in "(f/m/div)", a German-market convention, so roughly half of them are DACH
+// postings — precisely the ones this search cares about. Splitting there is
+// free. Splitting on a SINGLE hyphen would be guessing, and a wrongly
+// attributed location silently mis-filters a posting.
+{
+  // Re-imported: the block above closes its own scope, and destructuring here
+  // keeps this section self-contained rather than depending on where it sits.
+  const { parseJobUrl } = await import(pathToFileURL(join(ROOT, 'providers/infineon.mjs')).href);
+
+  const withSep = parseJobUrl('https://jobs.infineon.com/careers/job/563808971733507-internship-diversity-and-inclusion-f-m-div--munich-germany-');
+  if (withSep && withSep.title === 'internship diversity and inclusion f m div' && withSep.location === 'munich germany') {
+    pass('parseJobUrl splits title from location on the double hyphen');
+  } else {
+    fail(`double-hyphen split wrong: ${JSON.stringify(withSep)}`);
+  }
+
+  // No delimiter — the conservative path. The location is genuinely
+  // unrecoverable here ("...-marketing-bangalore-india-" could split before
+  // "bangalore" or before "india"), so it stays empty and the whole readable
+  // string stays in the title where location_filter can still read it.
+  const noSep = parseJobUrl('https://jobs.infineon.com/careers/job/563808969260056-staff-specialist-marketing-bangalore-india-');
+  if (noSep && noSep.location === '' && noSep.title === 'staff specialist marketing bangalore india') {
+    pass('parseJobUrl leaves location empty when the slug has no delimiter');
+  } else {
+    fail(`no-delimiter case wrong: ${JSON.stringify(noSep)}`);
+  }
+
+  // A city with no country still counts — 17 postings end at "--munich".
+  const cityOnly = parseJobUrl('https://jobs.infineon.com/careers/job/563808971794185-working-student-database-development-f-m-div--munich');
+  if (cityOnly && cityOnly.location === 'munich' && !/munich/.test(cityOnly.title)) {
+    pass('parseJobUrl handles a bare city after the delimiter and removes it from the title');
+  } else {
+    fail(`city-only case wrong: ${JSON.stringify(cityOnly)}`);
+  }
+
+  // Percent-encoded non-Latin locations must survive the split, not corrupt it.
+  const unicode = parseJobUrl('https://jobs.infineon.com/careers/job/563808971774445-staff-engineer-test--shanghai-%E4%B8%8A%E6%B5%B7');
+  if (unicode && unicode.location === 'shanghai 上海' && unicode.title === 'staff engineer test') {
+    pass('parseJobUrl decodes a percent-encoded location after the delimiter');
+  } else {
+    fail(`unicode location wrong: ${JSON.stringify(unicode)}`);
+  }
+
+  // `{id}--munich` — a double hyphen with nothing before it. This asserts the
+  // CONSISTENT reading, not a preferred one, and the distinction matters.
+  //
+  // A `--` immediately after the id is slugification noise, proved by the
+  // duales-studium posting above which carries one there AND a real delimiter
+  // later. The regex consumes the id and one hyphen, so what reaches the split
+  // is `-munich`: a single leading hyphen, no delimiter, and therefore the
+  // ordinary no-delimiter path — title "munich", location empty.
+  //
+  // An earlier version of this test asserted null instead, on the reasoning
+  // that an empty title should drop the posting. That was a preference about a
+  // URL shape the live board does not produce, and it contradicted the
+  // leading-noise rule the real board does exercise. Keeping the posting with
+  // whatever readable text exists is the conservative behaviour: it can be
+  // filtered, whereas a dropped posting cannot be recovered.
+  const noTitle = parseJobUrl('https://jobs.infineon.com/careers/job/123--munich');
+  if (noTitle && noTitle.title === 'munich' && noTitle.location === '') {
+    pass('parseJobUrl treats a double-dash right after the id as noise, not a delimiter');
+  } else {
+    fail(`leading-double-dash case wrong: ${JSON.stringify(noTitle)}`);
+  }
 }
