@@ -88,7 +88,30 @@ export function parseIcimsSearchPage(html, origin, companyName) {
     // location_filter and the posting is dropped with nothing to explain it.
     // The lookarounds keep `field-label` a whole token, so a longer hyphenated
     // class like `field-label-inline` still doesn't count as a match.
-    const location = card.match(/<span\b[^>]*class=["'][^"']*(?<![\w-])field-label(?![\w-])[^"']*["'][^>]*>\s*Location\s*<\/span>\s*<span\b[^>]*>\s*([\s\S]*?)<\/span>/);
+    //
+    // The label and its value are NOT sibling spans. Live markup (verified
+    // 2026-09-01 against careers-baptisthealthal.icims.com) is a definition
+    // list, and the label sits inside the <dt> beside a map-marker glyph:
+    //
+    //   <dt class="iCIMS_JobHeaderField">
+    //     <span class="glyphicons glyphicons-map-marker" aria-hidden="true"></span>
+    //     <span class="sr-only field-label">Location</span>
+    //   </dt>
+    //   <dd class="iCIMS_JobHeaderData"><span >Brookwood Medical Hospital</span></dd>
+    //
+    // The old pattern required the value span to follow the label span
+    // directly, so it matched nothing: that tenant publishes 50 locations per
+    // page and the provider read zero. Every iCIMS posting therefore arrived
+    // location-less, sailed past location_filter (which cannot penalise
+    // missing data) and landed in triage - 188 of one run's 200 candidates.
+    // Allow the </dt><dd> hop, keeping the sibling-span form as an alternative
+    // for tenants that still emit it.
+    //
+    // This conjures no geography that was never published. Tenants configure
+    // their own list columns, and some (peraton, dewberry, sargentlundy -
+    // checked the same day) expose Requisition ID / Category / Telecommute
+    // Options and no Location at all. Those stay empty, correctly.
+    const location = card.match(/<span\b[^>]*class=["'][^"']*(?<![\w-])field-label(?![\w-])[^"']*["'][^>]*>\s*Location\s*<\/span>\s*(?:<\/dt>\s*<dd\b[^>]*>\s*)?<span\b[^>]*>\s*([\s\S]*?)<\/span>/);
     jobs.push({
       title: decodeEntities(title[1].replace(/\s+/g, ' ').trim()),
       url: `${parsed.origin}${parsed.pathname}`,

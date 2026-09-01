@@ -212,3 +212,75 @@ const mkCtx = (pages) => ({
     else fail(`JSON-LD with ${label}: postedAt ${job.postedAt}`);
   }
 }
+
+// ── The <dt>/<dd> location shape (verified live 2026-09-01) ──────────
+//
+// iCIMS renders the card's extra fields as a definition list. The label span
+// lives inside the <dt> beside a map-marker glyph; the value is in the <dd>
+// that follows. The parser used to require the value span to follow the label
+// span DIRECTLY, so it matched nothing on real markup:
+// careers-baptisthealthal.icims.com publishes 50 locations on one page and the
+// provider read zero of them. Every iCIMS posting then arrived location-less,
+// passed location_filter (which cannot penalise missing data), and reached
+// triage — 188 of one run's 200 candidates.
+{
+  const dlCard = `iCIMS_JobCardItem">
+<div class="col-xs-12 title">
+<a href="${ORIGIN}/jobs/322495/surgical-tech-ii/job?in_iframe=1" class="iCIMS_Anchor">
+<span class="sr-only field-label">Title</span>
+<h3 >
+Surgical Tech II</h3>
+</a>
+</div>
+<div class="col-xs-12 additionalFields">
+<dl class="iCIMS_JobHeaderGroup">
+<div class="iCIMS_JobHeaderTag">
+<dt class="iCIMS_JobHeaderField"><span class="glyphicons glyphicons-map-marker" aria-hidden="true"></span>
+<span class="sr-only field-label">Location</span>
+</dt>
+<dd class="iCIMS_JobHeaderData"><span >
+Brookwood Medical Hospital</span>
+</dd>
+</div>
+</dl>
+</div>`;
+  const dlJobs = parseIcimsSearchPage(dlCard, ORIGIN, 'baptisthealthal');
+  if (dlJobs.length === 1 && dlJobs[0].location === 'Brookwood Medical Hospital') {
+    pass('parseIcimsSearchPage reads a location across the </dt><dd> hop');
+  } else {
+    fail(`dt/dd location wrong: ${JSON.stringify(dlJobs)}`);
+  }
+
+  // The sibling-span form must keep working — tenants theme their portals and
+  // both shapes are in the wild.
+  const siblingCard = `iCIMS_JobCardItem">
+<a href="${ORIGIN}/jobs/1/a/job" class="iCIMS_Anchor"><h3>Analyst</h3></a>
+<span class="sr-only field-label">Location</span><span >Nürnberg, Germany</span>`;
+  const sibJobs = parseIcimsSearchPage(siblingCard, ORIGIN, 'acme');
+  if (sibJobs.length === 1 && sibJobs[0].location === 'Nürnberg, Germany') {
+    pass('parseIcimsSearchPage still reads the sibling-span location form');
+  } else {
+    fail(`sibling-span location wrong: ${JSON.stringify(sibJobs)}`);
+  }
+
+  // A tenant that publishes no Location column at all (peraton, dewberry and
+  // sargentlundy all do this — Requisition ID / Category / Telecommute Options
+  // and nothing else) must stay empty. The fix widens where the value is
+  // looked for; it must not invent geography that was never published.
+  const noLocCard = `iCIMS_JobCardItem">
+<a href="${ORIGIN}/jobs/2/b/job" class="iCIMS_Anchor"><h3>Engineer</h3></a>
+<dl class="iCIMS_JobHeaderGroup">
+<div class="iCIMS_JobHeaderTag">
+<dt class="iCIMS_JobHeaderField">Telecommute Options</dt>
+<dd class="iCIMS_JobHeaderData"><span >
+No remote/telework allowed</span>
+</dd>
+</div>
+</dl>`;
+  const noLocJobs = parseIcimsSearchPage(noLocCard, ORIGIN, 'peraton');
+  if (noLocJobs.length === 1 && noLocJobs[0].location === '') {
+    pass('parseIcimsSearchPage leaves location empty when the tenant publishes none');
+  } else {
+    fail(`no-location tenant wrong: ${JSON.stringify(noLocJobs)}`);
+  }
+}
