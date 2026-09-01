@@ -108,6 +108,31 @@ const SEARCH_QUERY_KEYS = new Set(['keywords', 'f_e', 'f_tpr', 'currentjobid']);
 // search agent fills this in with one of these instead of leaving it blank.
 const PLACEHOLDER_COMPANIES = new Set(['various', 'verschiedene', 'n/a', '-', '']);
 
+// Hosts whose URL is nothing but an opaque redirect token.
+//
+// `to.indeed.com/aammllw8xckm` carries no posting id, no slug, no employer —
+// the token IS the tracking parameter, and Indeed mints a different one for the
+// same job in a different search. One sweep returned 29 rows that were 25 jobs:
+// the same Siemens Werkstudent posting arrived three times under three tokens.
+// URL canonicalisation structurally cannot collapse those, and
+// extractPostingId() finds nothing to compare, so both existing guards pass
+// them straight through to be evaluated two and three times over.
+const OPAQUE_REDIRECT_HOSTS = ['to.indeed.com'];
+
+function isOpaqueRedirect(url) {
+  try {
+    return OPAQUE_REDIRECT_HOSTS.some((h) => hostMatches(new URL(url).hostname, h));
+  } catch {
+    return false;
+  }
+}
+
+/** Company + title, normalised — the only identity an opaque URL leaves us. */
+function identityKey(offer) {
+  const norm = (v) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return `${norm(offer.company)}|${norm(offer.title)}`;
+}
+
 function hostMatches(hostname, needle) {
   const h = String(hostname || '').toLowerCase();
   return h === needle || h.endsWith(`.${needle}`);
@@ -240,6 +265,30 @@ export function planIngest(offers, seen, opts = {}) {
     batch.add(url);
     candidates.push({ ...offer, url });
   }
+
+  // Opaque-redirect collapse: behind a pure tracking token, two rows with the
+  // same employer AND the same title are indistinguishable to us — there is no
+  // id, slug or path left to tell them apart. Keeping both means paying to
+  // evaluate one job twice; collapsing risks missing a genuinely separate
+  // requisition that shares a title. The tracker already has the answer for
+  // that rare case (a req/posting ID in the notes column overrides fuzzy title
+  // matching, see AGENTS.md), and nothing here can see a req ID, so the cheaper
+  // mistake is the right one. Deliberately narrow: exact match, same batch,
+  // and only for hosts that are pure redirectors.
+  const seenIdentities = new Map();
+  const afterCollapse = [];
+  for (const o of candidates) {
+    if (!isOpaqueRedirect(o.url)) { afterCollapse.push(o); continue; }
+    const key = identityKey(o);
+    if (seenIdentities.has(key)) {
+      duplicates.push({ ...o, reason: `same company and title as ${seenIdentities.get(key)} behind an opaque redirect token` });
+      continue;
+    }
+    seenIdentities.set(key, o.url);
+    afterCollapse.push(o);
+  }
+  candidates.length = 0;
+  candidates.push(...afterCollapse);
 
   // Duplicate-posting-ID guard: one extracted posting ID appearing under more
   // than one distinct company within this batch cannot be more than one real

@@ -334,3 +334,62 @@ try {
     try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 }
+
+// ── Opaque redirect tokens ──────────────────────────────────────────
+//
+// `to.indeed.com/aammllw8xckm` is nothing but a tracking token: no posting id,
+// no slug, no employer. Indeed mints a fresh one for the same job seen from a
+// different search, so one live sweep returned 29 rows that were 25 jobs — the
+// same Siemens Werkstudent posting arrived three times under three tokens.
+//
+// canonicalUrl() cannot help (the token IS the path) and extractPostingId()
+// finds no digits to compare, so both existing guards passed them through to be
+// evaluated two and three times over. Behind a pure redirector, company+title
+// is the only identity left.
+{
+  // Re-imported: the block above closes its own scope, so this section stands
+  // on its own rather than depending on where it happens to sit in the file.
+  const { planIngest } = await import(pathToFileURL(SCRIPT).href);
+
+  const collapse = planIngest([
+    { url: 'https://to.indeed.com/aammllw8xckm', company: 'Siemens', title: 'Werkstudent (w/m/d) Factory Digitalization Data Analytics' },
+    { url: 'https://to.indeed.com/aavbtrqwfvbj', company: 'siemens', title: 'Werkstudent (w/m/d)  Factory Digitalization Data Analytics ' },
+    { url: 'https://to.indeed.com/aakkq6j476c9', company: 'Siemens', title: 'Werkstudent (w/m/d) Logistik für Business Analytics' },
+  ], new Set());
+
+  if (collapse.queued.length === 2) {
+    pass('planIngest collapses opaque-redirect rows that share a company and title');
+  } else {
+    fail(`expected 2 queued, got ${collapse.queued.length}: ${JSON.stringify(collapse.queued.map((o) => o.url))}`);
+  }
+  if (collapse.duplicates.length === 1 && /opaque redirect/.test(collapse.duplicates[0].reason || '')) {
+    pass('the collapsed row is reported as a duplicate with its reason, not silently dropped');
+  } else {
+    fail(`collapse should report one reasoned duplicate: ${JSON.stringify(collapse.duplicates)}`);
+  }
+
+  // Case and whitespace must not defeat it, but a DIFFERENT title must survive
+  // — two real openings at one employer are not the same job.
+  const distinct = planIngest([
+    { url: 'https://to.indeed.com/aaa1', company: 'Siemens', title: 'Werkstudent Data Analytics' },
+    { url: 'https://to.indeed.com/aaa2', company: 'Siemens', title: 'Werkstudent Machine Learning' },
+  ], new Set());
+  if (distinct.queued.length === 2) {
+    pass('two different titles at the same employer both survive');
+  } else {
+    fail(`distinct titles were collapsed: ${JSON.stringify(distinct.queued.map((o) => o.title))}`);
+  }
+
+  // The collapse must NOT apply to real URLs. A normal board encodes identity
+  // in the path, so two same-titled postings there are two requisitions and
+  // both must be kept — the tracker's req-ID rule exists for exactly that.
+  const realUrls = planIngest([
+    { url: 'https://jobs.siemens.com/en_US/externaljobs/JobDetail/111111', company: 'Siemens', title: 'Werkstudent Data Analytics' },
+    { url: 'https://jobs.siemens.com/en_US/externaljobs/JobDetail/222222', company: 'Siemens', title: 'Werkstudent Data Analytics' },
+  ], new Set());
+  if (realUrls.queued.length === 2) {
+    pass('same title on two real posting URLs stays two rows — the collapse is redirector-only');
+  } else {
+    fail(`real URLs were wrongly collapsed: ${JSON.stringify(realUrls.queued.map((o) => o.url))}`);
+  }
+}
