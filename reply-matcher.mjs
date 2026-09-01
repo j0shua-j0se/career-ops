@@ -62,15 +62,33 @@ export function checkCompanyMatch(text, company) {
   if (!company || !text) return false;
   if (isPlaceholderCompany(company)) return false;
 
-  // A short name is decided by the boundary test alone: falling through to the
-  // substring checks below would reinstate the very match it just refused.
-  // Length is counted in CODE POINTS — `String.length` counts UTF-16 units, so a
-  // three-character supplementary-plane name reported 4 and slipped past the
-  // threshold into the substring path its BMP equivalent was refused.
-  const alphanumeric = company.replace(/[^\p{L}\p{N}]/gu, '');
-  const isShortName = Array.from(alphanumeric).length <= SHORT_NAME_MAX;
-  if (isShortName && !NO_WORD_SEPARATOR_RE.test(company)) {
-    return matchesOnWordBoundary(text, company);
+  // In a word-separated script, a company name is decided by the boundary test
+  // alone: falling through to the substring checks below would reinstate the
+  // very match it just refused.
+  //
+  // This used to apply only to names of SHORT_NAME_MAX characters or fewer,
+  // which put the threshold exactly one character too low. A tracker company
+  // literally named `dida` is four characters, so it took the substring path
+  // and matched inside the word "can-dida-tes" — two Mercedes-Benz rejections
+  // were attributed to dida, and only an unrelated guard (that row happened to
+  // be terminal) stopped them being written. `HP` inside `PHP` was the same bug
+  // one character earlier.
+  //
+  // Length was never the real signal. A company mention in an email is a WORD,
+  // at any length, and nothing legitimate is lost by requiring it to be one:
+  // the normalized and CJK paths below still handle spacing variants and
+  // scripts that do not separate words.
+  if (!NO_WORD_SEPARATOR_RE.test(company)) {
+    if (matchesOnWordBoundary(text, company)) return true;
+    // Spacing variants still count — "Acme Corp" must match "AcmeCorp" — but as
+    // a boundary match too. The variant is built from the COMPANY and tested
+    // against the RAW text: normalizing the text instead would strip the very
+    // separators the boundary needs ("Interview with AcmeCorp" collapses to
+    // "interviewwithacmecorp", where nothing is a word any more).
+    const cNoSpace = normalizeStr(company);
+    if (cNoSpace.length > 2 && cNoSpace !== company.toLowerCase()
+        && matchesOnWordBoundary(text, cNoSpace)) return true;
+    return false;
   }
 
   // Exact substring

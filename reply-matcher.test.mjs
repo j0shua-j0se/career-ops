@@ -532,3 +532,31 @@ test('classifyReply - need action vs scheduling', () => {
   assert.equal(scheduleRes.suggestedTrackerUpdate, 'Interview');
 });
 
+
+test('checkCompanyMatch - a company name must be a WORD, not an infix (#dida)', () => {
+  // A tracker company literally named `dida` is four characters, one past the
+  // old SHORT_NAME_MAX=3 guard, so it took the bare-substring path and matched
+  // inside "can-dida-tes". Two Mercedes-Benz rejections were attributed to it;
+  // only an unrelated guard (that row happened to be terminal) stopped them
+  // being written to the tracker.
+  assert.equal(
+    checkCompanyMatch('we decided to move forward with other candidates', 'dida'),
+    false,
+  );
+  // …but the real mention still matches.
+  assert.ok(checkCompanyMatch('Your application to dida has been received', 'dida'));
+
+  // The same bug one character earlier, which is why the guard existed at all.
+  assert.equal(checkCompanyMatch('We use PHP internally', 'HP'), false);
+  assert.ok(checkCompanyMatch('Contact HP support', 'HP'));
+
+  // Longer names are not exempt — length was never the real signal.
+  assert.equal(checkCompanyMatch('a sanatorium in the alps', 'Sana'), false);
+  assert.equal(checkCompanyMatch('trenchant analysis of the market', 'Trench'), false);
+  assert.ok(checkCompanyMatch('Thank you for your application at Trench', 'Trench'));
+
+  // Real employers in real subject lines keep matching.
+  assert.ok(checkCompanyMatch('An update on your recent Siemens application', 'Siemens'));
+  assert.ok(checkCompanyMatch('Feedback on your Mercedes-Benz application', 'Mercedes-Benz'));
+  assert.ok(checkCompanyMatch('Bewerbung bei Primetals Technologies', 'Primetals Technologies Germany GmbH') === false);
+});
