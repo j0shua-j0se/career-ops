@@ -43,7 +43,7 @@ import lever from './providers/lever.mjs';
 import ashby from './providers/ashby.mjs';
 import workday from './providers/workday.mjs';
 import icims from './providers/icims.mjs';
-import { buildTitleFilter, buildLocationFilter, buildContentFilter, matchedTitleKeywords, loadSeenUrls, normalizeUrlForDedup, appendToPipeline, appendToScanHistory, loadBlacklist, parseSinceDays } from './scan.mjs';
+import { buildTitleFilter, buildLocationFilter, buildContentFilter, buildCountryEligibilityFilter, countryEligibilityTestable, loadCandidateCountry, matchedTitleKeywords, loadSeenUrls, normalizeUrlForDedup, appendToPipeline, appendToScanHistory, loadBlacklist, parseSinceDays } from './scan.mjs';
 import { SEED_SOURCES, toPortalEntry } from './seeds/vc-portfolios.mjs';
 import { normalizeCompany } from './tracker-utils.mjs';
 import { validateFlags } from './lib/cli-flags.mjs';
@@ -621,6 +621,16 @@ async function main() {
   const config = yaml.load(readFileSync(PORTALS_PATH, 'utf-8'));
   const titleFilter = buildTitleFilter(config?.title_filter);
   const locationFilter = buildLocationFilter(config?.location_filter);
+  // The sweep imported title/location/content and simply never applied
+  // country_eligibility_filter, so the source that reaches the most foreign
+  // employers was the one source with no eligibility gate at all. It matters
+  // least often and most sharply: only 8 of 89 providers ship a description
+  // for it to read, but lever is one of them AND is a sweep source, so the
+  // postings it CAN judge were going unjudged.
+  const countryEligibilityFilter = buildCountryEligibilityFilter(
+    config?.country_eligibility_filter,
+    loadCandidateCountry(),
+  );
   // Same content_filter (incl. by_title_keyword scoping) scan.mjs applies —
   // see #1846. Built once here from the same portals.yml config.
   const contentFilter = buildContentFilter(config?.content_filter);
@@ -671,6 +681,11 @@ async function main() {
   let totalErrors = cc.totalErrors || 0;
   let droppedNoDate = cc.droppedNoDate || 0;
   let droppedContent = cc.droppedContent || 0;
+  let droppedCountryEligibility = cc.droppedCountryEligibility || 0;
+  // Postings with no description for the eligibility filter to read. Carried
+  // so a resumed sweep does not restart the tally and report a smaller,
+  // healthier-looking number than the run actually earned.
+  let countryEligibilityUntestable = cc.countryEligibilityUntestable || 0;
   let capHit = false;
   // Aggregated from providers/workday.mjs's jobs.workdayNoDateSkip tag — see
   // there for why this is a counter instead of a per-company console.error
@@ -687,6 +702,7 @@ async function main() {
 
   const snapshotCounters = () => ({
     totalCompaniesScanned, totalErrors, droppedNoDate, droppedContent,
+    droppedCountryEligibility, countryEligibilityUntestable,
     noDateSkipCompanies, noDateSkipJobs, cappedBoards,
   });
   const checkpointBase = () => ({
@@ -736,6 +752,8 @@ async function main() {
       // job.title so a title-stated remote role survives a city-only location.
       if (!locationFilter(job.location, job.url, job.title)) continue;
       if (!contentFilter(job.description, matchedTitleKeywords(job.title, config?.title_filter))) { droppedContent++; continue; }
+      if (!countryEligibilityTestable(job.description)) countryEligibilityUntestable++;
+      if (!countryEligibilityFilter(job.description)) { droppedCountryEligibility++; continue; }
       const dedupUrl = normalizeUrlForDedup(job.url);
       if (seenUrls.has(dedupUrl)) continue;
       seenUrls.add(dedupUrl); // intra-scan dedup
@@ -965,6 +983,14 @@ async function main() {
     }
   }
   if (droppedContent) log(`Content-filtered:   ${droppedContent}`);
+  // Same rule as scan.mjs: never a bare zero. "0 removed" reads as all-clear
+  // when it almost always means the filter had nothing to read.
+  if (config?.country_eligibility_filter || droppedCountryEligibility) {
+    const untestable = countryEligibilityUntestable
+      ? ` (${countryEligibilityUntestable} had no description to judge)`
+      : '';
+    log(`Country-ineligible: ${droppedCountryEligibility}${untestable}`);
+  }
   log(`New matches:        ${offers.length}`);
 
   if (offers.length) {

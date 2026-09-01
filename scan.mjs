@@ -627,6 +627,23 @@ export function buildContentFilter(contentFilter) {
 // exclusionary/inclusive/candidate-country-named semantics, which doesn't
 // fit content_filter's simpler two-list reject/require shape.
 
+/**
+ * Whether a posting carries any text this filter could actually judge.
+ *
+ * The filter reads the JD description, and 8 of 89 providers ship one: an ATS
+ * list payload almost never includes body text. So the honest reading of
+ * "Filtered by country eligibility: 0 removed" is usually not "nothing needed
+ * filtering" but "nothing could be filtered" — across one full run, 0 of 249
+ * candidates carried a description at all. Those two facts look identical in a
+ * summary and mean opposite things, which is precisely how a filter stays
+ * inert for a long time without anyone noticing.
+ *
+ * Counting untestable postings separately is what makes the difference legible.
+ */
+export function countryEligibilityTestable(description) {
+  return typeof description === 'string' && description.trim() !== '';
+}
+
 export function buildCountryEligibilityFilter(countryEligibilityFilter, candidateCountry) {
   if (!countryEligibilityFilter) return () => true;
 
@@ -2604,6 +2621,8 @@ async function main() {
   let totalFilteredSalary = 0;
   let totalFilteredContent = 0;
   let totalFilteredCountryEligibility = 0;
+  // Postings with no description for the filter to read — see countryEligibilityTestable.
+  let totalCountryEligibilityUntestable = 0;
   let totalFilteredBlacklist = 0;
   let annotatedBlacklisted = 0;
   let totalFilteredVisa = 0;
@@ -2753,6 +2772,7 @@ async function main() {
           totalFilteredContent++;
           continue;
         }
+        if (!countryEligibilityTestable(job.description)) totalCountryEligibilityUntestable++;
         if (!countryEligibilityFilter(job.description)) {
           totalFilteredCountryEligibility++;
           continue;
@@ -2918,7 +2938,12 @@ async function main() {
     console.log(`Filtered by content:   ${totalFilteredContent} removed`);
   }
   if (config.country_eligibility_filter || totalFilteredCountryEligibility > 0) {
-    console.log(`Filtered by country eligibility: ${totalFilteredCountryEligibility} removed`);
+    // Never print a bare "0 removed": it reads as "all clear" when it usually
+    // means the filter had nothing to read.
+    const untestable = totalCountryEligibilityUntestable
+      ? ` (${totalCountryEligibilityUntestable} had no description to judge)`
+      : '';
+    console.log(`Filtered by country eligibility: ${totalFilteredCountryEligibility} removed${untestable}`);
   }
   if (visaEnabled) {
     console.log(`Filtered by visa:      ${totalFilteredVisa} removed`);
