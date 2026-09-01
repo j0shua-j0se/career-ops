@@ -131,7 +131,35 @@ const GERMANY_RE = /(?<![a-zäöüß])(deutschland|germany)(?![a-zäöüß])/i;
 // limited to unambiguous country names and the "US"/"USA" forms that dominate
 // full-dataset ATS location cells ("US-TX-REMOTE", "US - Remote"). The lookaround
 // guards keep "us" from matching inside a word such as "Aarhus" or "Cottbus".
-const FOREIGN_COUNTRY_RE = /(?<![a-zäöüß0-9])(u\.?s\.?a?|united states|canada|u\.?k\.?|united kingdom|england|scotland|ireland|india|australia|singapore|japan|china|brazil|mexico|philippines|argentina)(?![a-zäöüß0-9])/i;
+const FOREIGN_COUNTRY_RE = /(?<![a-zäöüß0-9])(u\.?s\.?a?|united states|canada|u\.?k\.?|united kingdom|england|scotland|ireland|india|australia|singapore|japan|china|brazil|mexico|philippines|argentina|chile|colombia|peru|pakistan|bangladesh|vietnam|indonesia|malaysia|thailand|turkey|türkiye|israel|egypt|nigeria|kenya|south africa|new zealand|poland|polska|romania|românia|ukraine|portugal)(?![a-zäöüß0-9])/i;
+
+// Sub-national markers that identify a foreign country as reliably as its name.
+//
+// The abroad guard below only fired on COUNTRY names, and a US posting rarely
+// prints one: six of thirty-four high-priority inbox rows read "Remote -
+// California", "Ohio Remote", "Remote-TX" and "Chile, Remote". The remote
+// marker won outright and they scored 4.5 — the second-best tier — for a
+// candidate who cannot work in any of them.
+//
+// Two-letter abbreviations are included only in an anchored, punctuated form
+// ("Remote-TX", "US-TX-REMOTE", ", TX"), never bare: a loose /\bTX\b/ collides
+// with initialisms and German words. Maine and Montana are deliberately absent
+// — both are ordinary words elsewhere, and the cost of a false "abroad" is a
+// silently discarded posting.
+const FOREIGN_REGION_RE = new RegExp(
+  '(?<![a-zäöüß0-9])(' + [
+    'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut',
+    'delaware', 'florida', 'georgia', 'hawaii', 'idaho', 'illinois', 'indiana', 'iowa',
+    'kansas', 'kentucky', 'louisiana', 'maryland', 'massachusetts', 'michigan', 'minnesota',
+    'mississippi', 'missouri', 'nebraska', 'nevada', 'new hampshire', 'new jersey',
+    'new mexico', 'new york', 'north carolina', 'north dakota', 'ohio', 'oklahoma', 'oregon',
+    'pennsylvania', 'rhode island', 'south carolina', 'south dakota', 'tennessee', 'texas',
+    'utah', 'vermont', 'virginia', 'west virginia', 'wisconsin', 'wyoming',
+    'ontario', 'quebec', 'alberta', 'british columbia',
+  ].join('|') + ')(?![a-zäöüß0-9])'
+  + '|(?<=[-,/])\s?(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|md|ma|mi|mn|ms|mo|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)(?![a-z0-9])',
+  'i',
+);
 
 // Remote markers. A local copy rather than an import of scan.mjs's
 // REMOTE_TITLE_RE: scan.mjs has top-level side effects (see
@@ -221,7 +249,7 @@ export function classifyReach(location, title = '') {
     // and "Remote — Germany or US" are both genuinely reachable and must stay.
     const germanMarker = GERMANY_RE.test(loc) || OTHER_DE_CITY_RE.test(loc)
       || HOME_CITY_RE.test(loc) || MUNICH_CITY_RE.test(loc);
-    if (!germanMarker && FOREIGN_COUNTRY_RE.test(loc)) return 'abroad';
+    if (!germanMarker && (FOREIGN_COUNTRY_RE.test(loc) || FOREIGN_REGION_RE.test(loc))) return 'abroad';
     return 'remote';
   }
   // A location that carries no information is 'unknown', not 'abroad'. Falling

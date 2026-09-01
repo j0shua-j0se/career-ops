@@ -65,3 +65,47 @@ bucket('Werkstudent (w/m/d) Data Analytics', 'Erlangen') !== 'skip'
   }
   ok ? pass('the ranker tolerates empty and missing fields') : fail('rankEntry threw on junk input');
 }
+
+// ── Foreign "remote" is not reachable remote ─────────────────────────
+//
+// The abroad guard fired only on COUNTRY names, and a US posting rarely prints
+// one. Six of thirty-four high-priority inbox rows read "Remote - California",
+// "Ohio Remote", "Remote-TX" and "Chile, Remote": the remote marker won
+// outright and they scored 4.5 — the second-best reach tier — for a candidate
+// on a German student residence permit who cannot work in any of them.
+{
+  const { classifyReach } = await import('../triage-prefilter.mjs');
+
+  const foreign = ['Remote - California', 'Ohio Remote', 'Remote-TX', 'Chile, Remote', 'Pakistan', 'Remote - Poland'];
+  if (foreign.every((l) => classifyReach(l, '', '') === 'abroad')) {
+    pass('a remote role scoped to a foreign state or country reads as abroad');
+  } else {
+    fail(`still reachable: ${JSON.stringify(foreign.filter((l) => classifyReach(l, '', '') !== 'abroad'))}`);
+  }
+
+  // Genuinely reachable remote must survive — this guard must not become a
+  // blanket refusal of the word "remote".
+  const reachable = ['Remote', 'Remote, Germany', 'Deutschland Remote', 'Remote - Europe', 'Remote · EMEA'];
+  if (reachable.every((l) => classifyReach(l, '', '') === 'remote')) {
+    pass('remote with no foreign scope, or a German/European one, stays reachable');
+  } else {
+    fail(`wrongly refused: ${JSON.stringify(reachable.filter((l) => classifyReach(l, '', '') !== 'remote'))}`);
+  }
+
+  // The home and Munich tiers are unaffected.
+  if (classifyReach('Erlangen', '', '') === 'home' && classifyReach('München', '', '') === 'munich') {
+    pass('home and Munich tiers are untouched');
+  } else {
+    fail('the reachable German tiers regressed');
+  }
+
+  // Two-letter state codes are matched only in an anchored, punctuated form. A
+  // bare "IN" or "DE" inside ordinary text must never mean Indiana or Delaware
+  // — "DE" is also Deutschland's own code.
+  const safe = ['Berlin, Deutschland', 'Remote in Germany', 'München, DE'];
+  if (safe.every((l) => classifyReach(l, '', '') !== 'abroad')) {
+    pass('bare two-letter codes in German locations are not read as US states');
+  } else {
+    fail(`false abroad: ${JSON.stringify(safe.filter((l) => classifyReach(l, '', '') === 'abroad'))}`);
+  }
+}
