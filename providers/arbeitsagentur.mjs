@@ -1,5 +1,6 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
+import { sleep } from './_http.mjs';
 
 // Arbeitsagentur (Bundesagentur für Arbeit) provider — hits the public Jobsuche
 // REST API (the same endpoint arbeitsagentur.de uses), so it lives in-process
@@ -28,16 +29,36 @@
 //                               #   'title'  — regex on the job title only (cheap; misses body-level remote)
 //                               #   'off'    — skip the remote pass entirely
 //       remoteMaxPages: 10      # 'filter' mode: max pages to paginate (size each); default 1
+//       fetchDetails: true      # OPT-IN, default false — see the v4 detail note below (#2637)
+//       maxDetailFetches: 20    # hard cap on detail requests per fetch() call; default 20, max 100
 //     enabled: true
 
-// v6. The v4 search and detail endpoints both 404 as of 2026-08-04 (#2494);
-// v5 does too. v6 keeps every query parameter this provider sends
+// v6 for search. The v4 (and v5) SEARCH endpoint 404s as of 2026-08-04
+// (#2494); v6 keeps every query parameter this provider sends
 // (was/wo/umkreis/veroeffentlichtseit/angebotsart/homeoffice/page/size) but
 // renames the response fields — see normalizeJob().
+//
+// The DETAIL endpoint is a separate story, corrected 2026-09-01 (#2637): v4's
+// detail endpoint is alive and answers 200 (v6's answers 403 to this public
+// client key) — see fetchDetailDescription() and the note above
+// normalizeJob(). Search and detail versions are independent; don't conflate
+// "v4 search 404s" with "v4 detail is unusable".
 const API_URL = 'https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v6/jobs';
 const API_KEY = 'jobboerse-jobsuche'; // public client key the arbeitsagentur.de UI uses
 const DETAIL_BASE = 'https://www.arbeitsagentur.de/jobsuche/jobdetail/';
 const REMOTE_RE = /(remote|homeoffice|home[-\s]?office|ortsunabh|deutschlandweit|bundesweit|100\s*%|full[-\s]?remote|fully remote)/i;
+
+// Opt-in per-posting detail fetch (FINDING 2, #2637) — see the note above
+// normalizeJob() for why v4, not v6. Off by default: a keyword sweep can
+// return hundreds of postings, and this is one extra request per posting.
+const V4_DETAIL_BASE = 'https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobdetails/';
+const DEFAULT_MAX_DETAIL_FETCHES = 20;
+const HARD_MAX_DETAIL_FETCHES = 100;
+const DETAIL_FETCH_DELAY_MS = 300; // polite pacing between detail requests
+
+// Enum values observed on `verguetungsangabe`/`vertragsdauer` that carry no
+// signal worth surfacing ("no information given"). Anything else is shown verbatim.
+const VERGUETUNG_NO_INFO = 'KEINE_ANGABEN';
 
 // Clamp a runtime integer into [min, max], falling back to `def` for NaN, so a
 // stray portals.yml value can't produce empty (size=0) or pathological queries.
@@ -50,7 +71,7 @@ function intInRange(val, def, min, max) {
 /**
  * Reads and sanitizes the entry's `arbeitsagentur:` config block.
  * @param {{ arbeitsagentur?: any }} entry
- * @returns {{ keywords: string[], wo: string, umkreis: number, days: number, size: number, remoteNationwide: boolean, remoteMatch: 'title'|'filter'|'off', remoteMaxPages: number }}
+ * @returns {{ keywords: string[], wo: string, umkreis: number, days: number, size: number, remoteNationwide: boolean, remoteMatch: 'title'|'filter'|'off', remoteMaxPages: number, fetchDetails: boolean, maxDetailFetches: number }}
  */
 export function parseArbeitsagenturConfig(entry) {
   const cfg = (entry && entry.arbeitsagentur) || {};
@@ -67,6 +88,10 @@ export function parseArbeitsagenturConfig(entry) {
     // Remote-detection mode is config-driven (not hardcoded).
     remoteMatch: ['title', 'filter', 'off'].includes(cfg.remoteMatch) ? cfg.remoteMatch : 'title',
     remoteMaxPages: intInRange(cfg.remoteMaxPages, 1, 1, 20),
+    // Opt-in v4 detail fetch (FINDING 2, #2637). Default OFF — costs one
+    // request per posting, so it must be explicitly enabled in portals.yml.
+    fetchDetails: cfg.fetchDetails === true,
+    maxDetailFetches: intInRange(cfg.maxDetailFetches, DEFAULT_MAX_DETAIL_FETCHES, 1, HARD_MAX_DETAIL_FETCHES),
   };
 }
 
@@ -94,6 +119,34 @@ export function buildLocation(lokationen) {
 }
 
 /**
+ * Folds the search response's structured facts into a compact one-line
+ * description, the way `providers/fau.mjs`'s `describe()` folds its card
+ * metadata. The Job contract (`providers/_types.js`) has no first-class home
+ * for "full-time", "home office possible", "contract duration", or "the
+ * employer's own posting URL" — adding four narrow fields nothing else reads
+ * would be more surface area than the facts are worth, and `description` is
+ * exactly the free-text bucket the contract already documents for this case.
+ * Only facts with real signal are emitted; a flag whose absence is not
+ * informative (most postings ARE full-time, most are NOT home-office) is
+ * dropped rather than printed as a wall of booleans (#2637).
+ * @param {any} job
+ */
+export function describeJob(job) {
+  if (!job || typeof job !== 'object') return '';
+  const parts = [];
+  if (job.arbeitszeitVollzeit === true) parts.push('Vollzeit');
+  if (job.homeofficemoeglich === true) parts.push('Homeoffice möglich');
+  const vertragsdauer = typeof job.vertragsdauer === 'string' ? job.vertragsdauer.trim() : '';
+  if (vertragsdauer) parts.push(`Vertrag: ${vertragsdauer}`);
+  const verguetung = typeof job.verguetungsangabe === 'string' ? job.verguetungsangabe.trim() : '';
+  if (verguetung && verguetung !== VERGUETUNG_NO_INFO) parts.push(`Vergütung: ${verguetung}`);
+  if (job.istGeringfuegigeBeschaeftigung === true) parts.push('Geringfügige Beschäftigung');
+  const externeURL = typeof job.externeURL === 'string' ? job.externeURL.trim() : '';
+  if (/^https?:\/\//i.test(externeURL)) parts.push(`Extern: ${externeURL}`);
+  return parts.join(' · ');
+}
+
+/**
  * Normalizes one raw Arbeitsagentur posting into a Job plus its `refnr` (kept
  * for dedup, stripped before the provider returns). Returns null when the
  * posting lacks a usable reference number or title.
@@ -102,8 +155,12 @@ export function buildLocation(lokationen) {
  * `stellenangebotsTitel`, `arbeitgeber` → `firma`, `arbeitsort` →
  * `stellenlokationen[]` (#2494). The public job-detail page still resolves by
  * reference number, so the outgoing URL is unchanged.
+ *
+ * `description` carries whatever `describeJob()` can fold from the search
+ * response for free (#2637); a posting with none of those facts gets an
+ * empty string, same as fau's empty-metadata case.
  * @param {any} job
- * @returns {({title: string, url: string, company: string, location: string, refnr: string}) | null}
+ * @returns {({title: string, url: string, company: string, location: string, description: string, refnr: string}) | null}
  */
 export function normalizeJob(job) {
   const refnr = job && job.referenznummer;
@@ -114,8 +171,39 @@ export function normalizeJob(job) {
     url: DETAIL_BASE + encodeURIComponent(String(refnr)),
     company: String((job && job.firma) || '').trim(),
     location: buildLocation(job && job.stellenlokationen),
+    description: describeJob(job),
     refnr: String(refnr),
   };
+}
+
+/**
+ * Base64-encodes a `referenznummer` into the id the v4 detail endpoint takes.
+ * @param {string} refnr
+ */
+export function buildDetailId(refnr) {
+  return Buffer.from(String(refnr)).toString('base64');
+}
+
+/**
+ * Opt-in v4 detail fetch (FINDING 2, #2637). Fetches the full posting body
+ * (`stellenangebotsBeschreibung`) for one refnr, or returns '' on any failure
+ * — a detail miss must not take down the postings already fetched.
+ * @param {string} refnr
+ * @param {{ fetchJson: (url: string, opts?: object) => Promise<any> }} ctx
+ */
+export async function fetchDetailDescription(refnr, ctx) {
+  try {
+    const id = buildDetailId(refnr);
+    const json = await ctx.fetchJson(`${V4_DETAIL_BASE}${encodeURIComponent(id)}`, {
+      headers: { 'X-API-Key': API_KEY, accept: 'application/json' },
+      redirect: 'error',
+      timeoutMs: 12_000,
+    });
+    const text = json && json.stellenangebotsBeschreibung;
+    return typeof text === 'string' ? text.trim() : '';
+  } catch {
+    return '';
+  }
 }
 
 // What `remoteMatch: 'filter'` lost in the v6 move, and why it still exists.
@@ -123,11 +211,20 @@ export function normalizeJob(job) {
 // v4 proved a role was fully remote by reading `homeofficetyp: VOLLSTAENDIG`
 // from the detail endpoint, because the `homeoffice=nv_true` query alone also
 // returns `NACH_VEREINBARUNG` ("nach Absprache") — an office-anchored hybrid.
-// That proof is gone: v6's detail endpoint answers 403 to this public client
-// key, and the only home-office field on a v6 search hit is the boolean
-// `homeofficemoeglich`, which is exactly what nv_true already filtered on (a
-// sampled nv_true page was 100% `true`). A boolean that cannot separate
-// fully-remote from hybrid is not evidence.
+//
+// CORRECTED 2026-09-01 (#2637): the earlier version of this comment claimed
+// the detail endpoint outright doesn't work, full stop. Re-verified live: v6's
+// detail endpoint (`pc/v6/jobdetails/{id}`) does answer 403 to this public
+// client key, but v4's (`pc/v4/jobdetails/{id}`, same base64(refnr) id
+// scheme) answers 200 — measured across four postings, with a
+// `stellenangebotsBeschreibung` body 1252–3145 chars long. See
+// `fetchDetailDescription()` / the `fetchDetails` opt-in below. What is still
+// true: that v4 response does NOT carry `homeofficetyp` — checked its full key
+// list — so the fully-remote-vs-hybrid proof this comment mourns is still
+// gone, and `homeofficemoeglich` (present on both v6 search hits and the v4
+// detail) is exactly what nv_true already filtered on (a sampled nv_true page
+// was 100% `true`). A boolean that cannot separate fully-remote from hybrid is
+// not evidence.
 //
 // So 'filter' keeps the half that still works — the server-side query narrows
 // the candidate set far better than a nationwide sweep — and falls back to the
@@ -145,10 +242,10 @@ export default {
    * Fetches and normalizes postings from the Arbeitsagentur Jobsuche API.
    * @param {{ name?: string, arbeitsagentur?: any }} entry
    * @param {{ fetchJson: (url: string, opts?: object) => Promise<any> }} ctx
-   * @returns {Promise<Array<{title: string, url: string, company: string, location: string}>>}
+   * @returns {Promise<Array<{title: string, url: string, company: string, location: string, description?: string}>>}
    */
   async fetch(entry, ctx) {
-    const { keywords, wo, umkreis, days, size, remoteNationwide, remoteMatch, remoteMaxPages } = parseArbeitsagenturConfig(entry);
+    const { keywords, wo, umkreis, days, size, remoteNationwide, remoteMatch, remoteMaxPages, fetchDetails, maxDetailFetches } = parseArbeitsagenturConfig(entry);
     if (!keywords.length) {
       throw new Error(`arbeitsagentur: entry "${entry.name || '(unnamed)'}" has no arbeitsagentur.keywords[]`);
     }
@@ -251,6 +348,24 @@ export default {
     // deduped result size — otherwise a legitimately-empty search throws.
     if (succeeded === 0 && errors.length) {
       throw new Error(`arbeitsagentur: all ${keywords.length} keyword request(s) failed — ${errors[0]}`);
+    }
+
+    // Opt-in v4 detail fetch (FINDING 2, #2637). Bounded by maxDetailFetches
+    // regardless of how many keywords/passes fed byRef — a keyword sweep can
+    // dedupe to hundreds of postings, and each detail is one extra request.
+    // A miss just leaves that posting's description as normalizeJob() already
+    // folded it; it never discards a posting or aborts the run.
+    if (fetchDetails) {
+      const jobs = [...byRef.values()];
+      const limit = Math.min(maxDetailFetches, jobs.length);
+      for (let i = 0; i < limit; i++) {
+        const job = jobs[i];
+        const detail = await fetchDetailDescription(job.refnr, ctx);
+        if (detail) {
+          job.description = job.description ? `${detail}\n\n${job.description}` : detail;
+        }
+        if (i < limit - 1) await sleep(DETAIL_FETCH_DELAY_MS, ctx);
+      }
     }
 
     return [...byRef.values()].map(({ refnr, ...job }) => job);

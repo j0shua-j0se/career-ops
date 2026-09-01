@@ -23,7 +23,7 @@ const page = (...jobs) => ({ ergebnisliste: jobs });
 try {
   const arbeitsagenturModule = await import(pathToFileURL(join(ROOT, 'providers/arbeitsagentur.mjs')).href);
   const aa = arbeitsagenturModule.default;
-  const { parseArbeitsagenturConfig, buildLocation, normalizeJob } = arbeitsagenturModule;
+  const { parseArbeitsagenturConfig, buildLocation, normalizeJob, describeJob, buildDetailId, fetchDetailDescription } = arbeitsagenturModule;
 
   if (aa.id === 'arbeitsagentur') pass('arbeitsagentur.id is "arbeitsagentur"');
   else fail(`arbeitsagentur.id is ${JSON.stringify(aa.id)}`);
@@ -275,6 +275,188 @@ try {
     pass('aa.fetch() preserves primary (Pass A) results when the remote pass (Pass B) fails');
   } else {
     fail(`aa.fetch() Pass B failure dropped primary: ${JSON.stringify(passBFail)}`);
+  }
+
+  // ============================================================================
+  // FINDING 1/2 (#2637): the search response's extra free fields (externeURL,
+  // arbeitszeitVollzeit, homeofficemoeglich, verguetungsangabe, vertragsdauer,
+  // istGeringfuegigeBeschaeftigung) folded into description, plus the opt-in
+  // v4 detail fetch. See providers/arbeitsagentur.mjs describeJob()/
+  // fetchDetailDescription() for the reasoning.
+  // ============================================================================
+
+  // A raw v6 search hit carrying every field FINDING 1 says is free.
+  const rawFull = {
+    referenznummer: '11949-17338293-S',
+    stellenangebotsTitel: 'Data Scientist',
+    firma: 'Xchannels.ai FlexCo',
+    stellenlokationen: [{ adresse: { ort: 'Wien,Landstraße', land: 'OESTERREICH' } }],
+    arbeitszeitVollzeit: true,
+    homeofficemoeglich: true,
+    verguetungsangabe: 'AT_GEHALT',
+    vertragsdauer: 'UNBEFRISTET',
+    istGeringfuegigeBeschaeftigung: true,
+    externeURL: 'https://jobs.example.com/public/emps/jobs/abc-123',
+    alleBerufe: ['Data Scientist'],
+  };
+
+  // ---- describeJob: the free-text fold (no first-class Job field for these) ----
+  const fullDesc = describeJob(rawFull);
+  if (fullDesc === 'Vollzeit · Homeoffice möglich · Vertrag: UNBEFRISTET · Vergütung: AT_GEHALT · Geringfügige Beschäftigung · Extern: https://jobs.example.com/public/emps/jobs/abc-123') {
+    pass('describeJob() folds all six facts in order, separated by " · "');
+  } else {
+    fail(`describeJob() full fold wrong: ${JSON.stringify(fullDesc)}`);
+  }
+
+  const noInfoDesc = describeJob({ ...rawFull, verguetungsangabe: 'KEINE_ANGABEN' });
+  if (!noInfoDesc.includes('Vergütung')) pass('describeJob() drops verguetungsangabe when it is the "no information" sentinel (KEINE_ANGABEN)');
+  else fail(`describeJob() should have dropped Vergütung: ${JSON.stringify(noInfoDesc)}`);
+
+  const emptyDesc = describeJob({ referenznummer: 'x', stellenangebotsTitel: 'y' });
+  if (emptyDesc === '') pass('describeJob() returns "" when none of the optional facts are present');
+  else fail(`describeJob() should be empty for a bare posting: ${JSON.stringify(emptyDesc)}`);
+
+  if (describeJob(null) === '' && describeJob(undefined) === '' && describeJob('nope') === '') {
+    pass('describeJob() tolerates non-object input without throwing');
+  } else {
+    fail('describeJob() should return "" for null/undefined/non-object input');
+  }
+
+  // A false flag is not "no information" — it just isn't worth printing
+  // (most postings aren't home-office; a wall of "Homeoffice: nein" would be noise).
+  const falseFlagsDesc = describeJob({ ...rawFull, arbeitszeitVollzeit: false, homeofficemoeglich: false, istGeringfuegigeBeschaeftigung: false, vertragsdauer: '', externeURL: '' });
+  if (falseFlagsDesc === 'Vergütung: AT_GEHALT') pass('describeJob() omits false/absent boolean and empty-string facts, keeping only real signal');
+  else fail(`describeJob() should have kept only Vergütung: ${JSON.stringify(falseFlagsDesc)}`);
+
+  // ---- normalizeJob: the new fields survive into description; url/dedup key unchanged ----
+  const jobWithFacts = normalizeJob(rawFull);
+  if (jobWithFacts && jobWithFacts.description === fullDesc) pass('normalizeJob() carries describeJob()\'s fold into job.description');
+  else fail(`normalizeJob() description wrong: ${JSON.stringify(jobWithFacts && jobWithFacts.description)}`);
+  if (jobWithFacts && jobWithFacts.url === 'https://www.arbeitsagentur.de/jobsuche/jobdetail/11949-17338293-S') {
+    pass('normalizeJob() keeps the arbeitsagentur.de detail page as job.url (the dedup key), not externeURL');
+  } else {
+    fail(`normalizeJob() url wrong: ${JSON.stringify(jobWithFacts && jobWithFacts.url)}`);
+  }
+
+  // A posting missing all the FINDING 1 fields must not break — same as before this change.
+  const bareJob = normalizeJob({ referenznummer: '999', stellenangebotsTitel: 'Bare Posting' });
+  if (bareJob && bareJob.description === '' && bareJob.title === 'Bare Posting') {
+    pass('normalizeJob() on a posting missing the optional fields still returns a valid job with description ""');
+  } else {
+    fail(`normalizeJob() should tolerate a bare posting: ${JSON.stringify(bareJob)}`);
+  }
+
+  // ---- buildDetailId: base64(refnr), verified against a live refnr/id pair ----
+  if (buildDetailId('11949-17338293-S') === 'MTE5NDktMTczMzgyOTMtUw==') {
+    pass('buildDetailId() matches the live-verified base64(refnr) id scheme');
+  } else {
+    fail(`buildDetailId() wrong: ${buildDetailId('11949-17338293-S')}`);
+  }
+
+  // ---- fetchDetailDescription: success, non-string body, and failure all degrade to '' ----
+  const okCtx = { fetchJson: async (url) => {
+    // encodeURIComponent() percent-encodes the base64 id's "=" padding, so match
+    // on the un-padded portion rather than the raw buildDetailId() output.
+    if (!url.includes('MTE5NDktMTczMzgyOTMtUw')) throw new Error(`unexpected id in url: ${url}`);
+    return { stellenangebotsBeschreibung: '  Full JD text.  ' };
+  } };
+  const okText = await fetchDetailDescription('11949-17338293-S', okCtx);
+  if (okText === 'Full JD text.') pass('fetchDetailDescription() returns the trimmed stellenangebotsBeschreibung on success');
+  else fail(`fetchDetailDescription() success case wrong: ${JSON.stringify(okText)}`);
+
+  const missingFieldCtx = { fetchJson: async () => ({ someOtherField: true }) };
+  const missingText = await fetchDetailDescription('x', missingFieldCtx);
+  if (missingText === '') pass('fetchDetailDescription() returns "" when stellenangebotsBeschreibung is absent/non-string');
+  else fail(`fetchDetailDescription() should be "" without the field: ${JSON.stringify(missingText)}`);
+
+  const failCtx = { fetchJson: async () => { const e = new Error('403 Forbidden'); throw e; } };
+  const failText = await fetchDetailDescription('x', failCtx);
+  if (failText === '') pass('fetchDetailDescription() swallows a fetch failure (e.g. v6-style 403) and returns ""');
+  else fail(`fetchDetailDescription() should degrade to "" on failure: ${JSON.stringify(failText)}`);
+
+  // ---- parseArbeitsagenturConfig: fetchDetails/maxDetailFetches default off, clamped ----
+  const detailDefaultCfg = parseArbeitsagenturConfig({ arbeitsagentur: { keywords: ['x'] } });
+  if (detailDefaultCfg.fetchDetails === false && detailDefaultCfg.maxDetailFetches === 20) {
+    pass('parseArbeitsagenturConfig() defaults fetchDetails to false and maxDetailFetches to 20');
+  } else {
+    fail(`parseArbeitsagenturConfig() detail defaults wrong: ${JSON.stringify({ fetchDetails: detailDefaultCfg.fetchDetails, maxDetailFetches: detailDefaultCfg.maxDetailFetches })}`);
+  }
+  const enabledCfg = parseArbeitsagenturConfig({ arbeitsagentur: { keywords: ['x'], fetchDetails: true, maxDetailFetches: 500 } });
+  if (enabledCfg.fetchDetails === true && enabledCfg.maxDetailFetches === 100) {
+    pass('parseArbeitsagenturConfig() honors fetchDetails:true and clamps maxDetailFetches to the hard cap (100)');
+  } else {
+    fail(`parseArbeitsagenturConfig() clamp wrong: ${JSON.stringify({ fetchDetails: enabledCfg.fetchDetails, maxDetailFetches: enabledCfg.maxDetailFetches })}`);
+  }
+  // A truthy-but-not-strictly-true value must not silently enable a per-posting request fan-out.
+  const stringyCfg = parseArbeitsagenturConfig({ arbeitsagentur: { keywords: ['x'], fetchDetails: 'true' } });
+  if (stringyCfg.fetchDetails === false) pass('parseArbeitsagenturConfig() requires fetchDetails === true (boolean), not a truthy string');
+  else fail(`parseArbeitsagenturConfig() should reject a non-boolean fetchDetails: ${JSON.stringify(stringyCfg.fetchDetails)}`);
+
+  // ---- fetch(): the opt-in detail fetch is bounded by maxDetailFetches, off by default ----
+  const rawHit = (n) => ({
+    referenznummer: `REF-${n}`,
+    stellenangebotsTitel: `Job ${n}`,
+    firma: 'Test GmbH',
+    stellenlokationen: [{ adresse: { ort: 'Berlin', land: 'DEUTSCHLAND' } }],
+  });
+
+  // Default (fetchDetails absent) must never touch the v4 detail endpoint.
+  let detailCallsOff = 0;
+  const offCtx = {
+    fetchJson: async (url) => {
+      if (url.includes('/v4/jobdetails/')) detailCallsOff++;
+      return { ergebnisliste: [rawHit(1), rawHit(2), rawHit(3)] };
+    },
+    sleep: async () => {},
+  };
+  const offJobs = await aa.fetch({ name: 'Test Portal', arbeitsagentur: { keywords: ['Data Scientist'] } }, offCtx);
+  if (offJobs.length === 3 && detailCallsOff === 0) {
+    pass('fetch() never calls the v4 detail endpoint when fetchDetails is not set (default off)');
+  } else {
+    fail(`fetch() default-off wrong: ${offJobs.length} jobs, ${detailCallsOff} detail calls`);
+  }
+
+  // fetchDetails:true with maxDetailFetches:2 over 3 deduped jobs: capped at 2 detail
+  // requests and 1 sleep (limit - 1), regardless of the 3 jobs available.
+  let detailCallsOn = 0;
+  let sleepCalls = 0;
+  const onCtx = {
+    fetchJson: async (url) => {
+      if (url.includes('/v4/jobdetails/')) {
+        detailCallsOn++;
+        return { stellenangebotsBeschreibung: `Detail body #${detailCallsOn}` };
+      }
+      return { ergebnisliste: [rawHit(1), rawHit(2), rawHit(3)] };
+    },
+    sleep: async () => { sleepCalls++; },
+  };
+  const onJobs = await aa.fetch({ name: 'Test Portal', arbeitsagentur: { keywords: ['Data Scientist'], fetchDetails: true, maxDetailFetches: 2 } }, onCtx);
+  if (detailCallsOn === 2) pass('fetch() caps v4 detail requests at maxDetailFetches even though more postings are available');
+  else fail(`fetch() detail cap wrong: expected 2 detail calls, got ${detailCallsOn}`);
+  if (sleepCalls === 1) pass('fetch() paces detail requests with one sleep between calls, none after the last');
+  else fail(`fetch() sleep pacing wrong: expected 1 sleep call, got ${sleepCalls}`);
+  const withDetail = onJobs.filter(j => j.description && j.description.startsWith('Detail body'));
+  const withoutDetail = onJobs.filter(j => !j.description);
+  if (withDetail.length === 2 && withoutDetail.length === 1) {
+    pass('fetch() attaches the fetched detail body only to the postings within the cap, leaving the rest untouched');
+  } else {
+    fail(`fetch() detail attachment wrong: ${JSON.stringify(onJobs.map(j => j.description))}`);
+  }
+
+  // A detail-fetch failure (e.g. a v6-shaped 403 on some tenant) must not drop the posting.
+  let failingDetailCalls = 0;
+  const failingDetailCtx = {
+    fetchJson: async (url) => {
+      if (url.includes('/v4/jobdetails/')) { failingDetailCalls++; throw new Error('403 Forbidden'); }
+      return { ergebnisliste: [rawHit(1)] };
+    },
+    sleep: async () => {},
+  };
+  const survivedJobs = await aa.fetch({ name: 'Test Portal', arbeitsagentur: { keywords: ['Data Scientist'], fetchDetails: true, maxDetailFetches: 5 } }, failingDetailCtx);
+  if (survivedJobs.length === 1 && failingDetailCalls === 1 && survivedJobs[0].description === '') {
+    pass('fetch() survives a detail-fetch failure — the posting stays, just without the extra body');
+  } else {
+    fail(`fetch() should tolerate a detail-fetch failure: ${JSON.stringify(survivedJobs)}`);
   }
 
 } catch (e) {
