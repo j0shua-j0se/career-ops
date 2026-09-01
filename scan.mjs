@@ -47,6 +47,27 @@ import { makeHttpCtx } from './providers/_http.mjs';
 // One retry, not the shared two: a portal that is genuinely down should not
 // cost three full timeouts before the scan moves on.
 const PORTAL_HTTP = { timeoutMs: 25_000, retry: { retries: 1, baseDelayMs: 1_000, maxDelayMs: 8_000 } };
+
+// Upper bound on a portals.yml `timeout_ms:` override. Some boards really are
+// this slow — Schaeffler's SuccessFactors tenant answers
+// /tile-search-results/ in 85-97s, measured twice, returning 1.1 MB — and no
+// scan-wide default can accommodate that without making every other portal
+// wait on the worst one. The override exists so a curated entry can say "this
+// one is slow, wait for it"; the cap exists so a typo cannot hang the scan.
+const PORTAL_TIMEOUT_CAP_MS = 180_000;
+
+/**
+ * HTTP policy for one portal: the scan-wide default, unless the entry asked
+ * for more time. A malformed or non-positive `timeout_ms:` is ignored rather
+ * than honoured as zero, which would abort every request instantly.
+ *
+ * @param {{name?: string, timeout_ms?: unknown}} entry
+ */
+export function portalHttpFor(entry) {
+  const raw = Number(entry?.timeout_ms);
+  if (!Number.isFinite(raw) || raw <= 0) return PORTAL_HTTP;
+  return { ...PORTAL_HTTP, timeoutMs: Math.min(raw, PORTAL_TIMEOUT_CAP_MS) };
+}
 import { buildTrustValidator } from './providers/_trust-validator.mjs';
 import { loadProviders, resolveProvider } from './providers/_registry.mjs';
 import { mergeProviderPlugins } from './plugins/_engine.mjs';
@@ -2643,7 +2664,7 @@ async function main() {
     // load) and jobs.fau.de (~4.3s idle) dropped out of the scan entirely
     // whenever the network was busy — 467 and 48 postings respectively,
     // reported as one error line inside an otherwise clean summary.
-    const ctx = { ...makeHttpCtx(PORTAL_HTTP), sinceMs: earlyStopSinceMs, includeUndated: true };
+    const ctx = { ...makeHttpCtx(portalHttpFor(company)), sinceMs: earlyStopSinceMs, includeUndated: true };
     let sourceName = provider.id === 'local-parser' ? 'local-parser' : `${provider.id}-api`;
     try {
       let jobs;
