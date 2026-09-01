@@ -314,11 +314,45 @@ export async function fetchTextWithRetry(ctx, url, opts = {}, policy = {}) {
   return withRetry(() => ctx.fetchText(url, opts), ctx, policy);
 }
 
-export function makeHttpCtx() {
+/**
+ * Transport context handed to every provider.
+ *
+ * `makeHttpCtx()` with no arguments is the historical behaviour: one attempt,
+ * DEFAULT_TIMEOUT_MS, no retry. That is the right policy for the full-directory
+ * sweep, which contacts thousands of boards and wants a dead one to fail fast.
+ *
+ * It is the WRONG policy for the curated portal scan, and the failure it
+ * produced does not look like a failure. Two of the German portals in
+ * portals.yml are slow, server-rendered boards: db.jobs answers a results page
+ * in ~3s idle and was measured at ~7.7s while a sweep was running, and
+ * jobs.fau.de takes ~4.3s idle. Both sit under the 10s cap with room to spare
+ * on a quiet line and both blow straight through it the moment anything else
+ * uses the network — at which point the entire portal leaves the scan as one
+ * line ("operation was aborted", "fetch failed") among a summary that otherwise
+ * reads as a clean run. Deutsche Bahn lost 467 postings that way; FAU lost 48.
+ *
+ * So the caller states its policy. Pass {timeoutMs, retry} for a scan that
+ * would rather wait than silently drop a board.
+ *
+ * @param {{timeoutMs?: number, retry?: {retries?: number, baseDelayMs?: number, maxDelayMs?: number}}} [options]
+ */
+export function makeHttpCtx(options = {}) {
+  const { timeoutMs, retry } = options;
+  if (timeoutMs === undefined && retry === undefined) {
+    return { transport: 'http', fetchJson, fetchText, fetchResponse };
+  }
+  // A per-call timeoutMs from a provider still wins: a provider that has tuned
+  // its own bound knows something the scan-wide default does not.
+  const withDefaults = (opts = {}) => (timeoutMs === undefined || opts.timeoutMs !== undefined
+    ? opts
+    : { ...opts, timeoutMs });
+  const wrap = (fn) => (retry === undefined
+    ? (url, opts = {}) => fn(url, withDefaults(opts))
+    : (url, opts = {}) => withRetry(() => fn(url, withDefaults(opts)), null, retry));
   return {
     transport: 'http',
-    fetchJson,
-    fetchText,
-    fetchResponse,
+    fetchJson: wrap(fetchJson),
+    fetchText: wrap(fetchText),
+    fetchResponse: wrap(fetchResponse),
   };
 }

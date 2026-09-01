@@ -12,7 +12,7 @@ import { pathToFileURL } from 'url';
 
 console.log('\nProvider — _http retry helpers');
 
-const { isRetryableError, fetchJsonWithRetry, fetchResponse } =
+const { isRetryableError, fetchJsonWithRetry, fetchResponse, makeHttpCtx } =
   await import(pathToFileURL(join(ROOT, 'providers/_http.mjs')).href);
 
 // isRetryableError() — status-based classification.
@@ -126,6 +126,49 @@ if (isRetryableError(nonTypeErrorLookalike) === true) {
     else fail(`fetchResponse() 204 wrong: status=${empty.status}`);
   } catch (e) {
     fail(`fetchResponse() threw: ${e.message}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+
+// ── makeHttpCtx(options) ──────────────────────────────────────────────
+// The bare form must stay exactly what it always was: the full-directory
+// sweep contacts thousands of boards and wants a dead one to fail on the
+// first attempt. Only a caller that asks gets patience.
+{
+  const bare = makeHttpCtx();
+  const tuned = makeHttpCtx({ timeoutMs: 25_000, retry: { retries: 1, baseDelayMs: 1, maxDelayMs: 2 } });
+  const realFetch = globalThis.fetch;
+
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; throw new TypeError('fetch failed'); };
+  try {
+    try { await bare.fetchText('https://example.com/x'); } catch { /* expected */ }
+    if (calls === 1) pass('makeHttpCtx() with no options still makes exactly one attempt');
+    else fail(`makeHttpCtx() bare should not retry, made ${calls} attempts`);
+
+    calls = 0;
+    try { await tuned.fetchText('https://example.com/x'); } catch { /* expected */ }
+    if (calls === 2) pass('makeHttpCtx({retry}) retries a status-less transport failure');
+    else fail(`makeHttpCtx({retries:1}) should make 2 attempts, made ${calls}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // A provider that has tuned its own bound keeps it — the scan-wide default
+  // fills in, it does not override.
+  let seenSignalTimeouts = [];
+  globalThis.fetch = async (_u, init) => {
+    seenSignalTimeouts.push(init?.signal ? 'has-signal' : 'no-signal');
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    await tuned.fetchJson('https://example.com/y', { timeoutMs: 500 });
+    if (seenSignalTimeouts.length === 1) pass('makeHttpCtx({timeoutMs}) passes a per-call timeoutMs through untouched');
+    else fail('makeHttpCtx({timeoutMs}) mangled a per-call override');
+  } catch (e) {
+    fail(`makeHttpCtx() per-call timeout override threw: ${e.message}`);
   } finally {
     globalThis.fetch = realFetch;
   }

@@ -71,9 +71,10 @@ const DEFAULT_LOCATION = 'Erlangen-Nürnberg';
 const MAX_JOBS = 500;
 const MAX_REQUESTS = 24; // bound the fan-out; one GET per query/category
 const REQUEST_DELAY_MS = 250; // polite pacing — university server, sequential GETs
-// The bare listing renders exactly this many cards before silently truncating.
-// A *search* returning this many is suspicious for the same cap, and we cannot
-// paginate past it, so warn rather than quietly under-report.
+// The cap the bare listing was observed to truncate at. It rendered 48 cards on
+// 2026-09-01, so the cap is not currently in force — but /jobs/page/2/ still
+// answers 410, so there is still no way to page past one if it returns. Kept as
+// a warning threshold only: nothing branches on it.
 const TRUNCATION_HINT = 10;
 
 /** @param {string} s */
@@ -122,7 +123,19 @@ export function buildRequestUrls(listUrl, entry = {}) {
   const categories = stringList(entry.categories);
   if (keywords.length === 0 && categories.length === 0) return [listUrl];
 
-  const urls = [];
+  // The bare listing is ALWAYS fetched, first, even when keywords are set.
+  //
+  // It used to be excluded, on the premise that it truncates at ten and the
+  // keywords therefore superset it. That premise expired: on 2026-09-01 the
+  // bare listing rendered 48 cards, and every hit from every configured
+  // keyword ("Hilfskraft" 5, "KI" 1, "Informatik" 2, "Data" 0, "Machine
+  // Learning" 0) was already among them — so the configured fan-out was
+  // returning 8 of FAU's 48 postings and reporting success.
+  //
+  // Including it costs one GET and is correct under either premise: if the
+  // listing truncates again the keywords still add what it drops, and if it
+  // does not, nothing is lost to a keyword list that happens to be narrow.
+  const urls = [listUrl];
   for (const q of keywords) {
     const p = new URLSearchParams({ free_txt: q, free_txt_fields: 'title' });
     urls.push(`${listUrl}?${p}`);
@@ -228,7 +241,7 @@ export default {
     // enough to tell a live board from a broken one; don't fan out for it.
     if (Number.isInteger(ctx.maxPages) && ctx.maxPages > 0) urls = urls.slice(0, ctx.maxPages);
     if (urls.length === 1 && urls[0] === listUrl) {
-      console.warn(`fau: ${entry.name} has no keywords/categories — the bare listing silently truncates at ${TRUNCATION_HINT} alphabetical results`);
+      console.warn(`fau: ${entry.name} has no keywords/categories — relying on the bare listing alone, which has silently truncated before and cannot be paginated`);
     }
 
     const jobs = [];

@@ -43,6 +43,10 @@ import path from 'path';
 import * as yaml from 'js-yaml';
 
 import { makeHttpCtx } from './providers/_http.mjs';
+
+// One retry, not the shared two: a portal that is genuinely down should not
+// cost three full timeouts before the scan moves on.
+const PORTAL_HTTP = { timeoutMs: 25_000, retry: { retries: 1, baseDelayMs: 1_000, maxDelayMs: 8_000 } };
 import { buildTrustValidator } from './providers/_trust-validator.mjs';
 import { loadProviders, resolveProvider } from './providers/_registry.mjs';
 import { mergeProviderPlugins } from './plugins/_engine.mjs';
@@ -2609,7 +2613,15 @@ async function main() {
     // postings on later pages go unfetched. Documented in modes/scan.md; the
     // fix belongs in workday.mjs, where closing it costs the optimisation on
     // every tenant that mixes.
-    const ctx = { ...makeHttpCtx(), sinceMs: earlyStopSinceMs, includeUndated: true };
+    // PORTAL_HTTP is deliberately more patient than the transport default.
+    // portals.yml is a curated list of a few dozen boards, several of them slow
+    // server-rendered German portals; the full-directory sweep, which contacts
+    // thousands of boards and should abandon a dead one immediately, keeps the
+    // bare makeHttpCtx(). Under the 10s default, db.jobs (~7.7s/page under
+    // load) and jobs.fau.de (~4.3s idle) dropped out of the scan entirely
+    // whenever the network was busy — 467 and 48 postings respectively,
+    // reported as one error line inside an otherwise clean summary.
+    const ctx = { ...makeHttpCtx(PORTAL_HTTP), sinceMs: earlyStopSinceMs, includeUndated: true };
     let sourceName = provider.id === 'local-parser' ? 'local-parser' : `${provider.id}-api`;
     try {
       let jobs;

@@ -145,8 +145,15 @@ const jobs = await provider.fetch(
   mockCtx(log),
 );
 
-if (log.length === 2) pass('fetch() issues one GET per configured keyword');
-else fail(`fetch() should issue 2 requests, got ${log.length}: ${JSON.stringify(log)}`);
+// Bare listing first, then one GET per configured keyword. The listing is not
+// optional: on 2026-09-01 it rendered 48 cards and every hit from every
+// configured keyword was already among them, so excluding it (as this test
+// used to require) returned 8 of FAU's 48 postings and called it a success.
+if (log.length === 3 && log[0] === 'https://www.jobs.fau.de/jobs/') {
+  pass('fetch() fetches the bare listing first, then one GET per configured keyword');
+} else {
+  fail(`fetch() should issue the bare listing + 2 keyword requests, got ${log.length}: ${JSON.stringify(log)}`);
+}
 
 if (jobs.length === 2) pass('fetch() unions results across keywords and dedups by URL');
 else fail(`fetch() should return 2 jobs, got ${jobs.length}`);
