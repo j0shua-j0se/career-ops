@@ -80,28 +80,37 @@ const bare = buildRequestUrls(LIST, {});
 if (bare.length === 1 && bare[0] === LIST) pass('buildRequestUrls() falls back to the bare listing with no config');
 else fail(`buildRequestUrls() bare wrong: ${JSON.stringify(bare)}`);
 
+// The bare listing leads every configured request set. It used to be excluded
+// whenever keywords were set, on the premise that the listing truncates at ten
+// alphabetical results and the keywords therefore superset it. That premise
+// expired: on 2026-09-01 the listing rendered 48 cards and every hit from every
+// configured keyword was already among them, so the fan-out was returning 8 of
+// FAU's 48 postings and reporting success.
 const queried = buildRequestUrls(LIST, { keywords: ['Hilfskraft', 'Machine Learning', 'Hilfskraft', ''] });
-if (queried.length === 2) pass('buildRequestUrls() dedups and drops empty keywords');
-else fail(`buildRequestUrls() should build 2 keyword URLs, got ${JSON.stringify(queried)}`);
-
-if (queried[0] === `${LIST}?free_txt=Hilfskraft&free_txt_fields=title`) {
-  pass('buildRequestUrls() searches the title field, not the description');
+if (queried.length === 3 && queried[0] === LIST) {
+  pass('buildRequestUrls() leads with the bare listing, then dedups and drops empty keywords');
 } else {
-  fail(`buildRequestUrls() keyword URL wrong: ${queried[0]}`);
+  fail(`buildRequestUrls() should build the listing + 2 keyword URLs, got ${JSON.stringify(queried)}`);
 }
 
-if (queried[1].includes('free_txt=Machine+Learning')) pass('buildRequestUrls() form-encodes a multi-word keyword');
-else fail(`buildRequestUrls() encoding wrong: ${queried[1]}`);
+if (queried[1] === `${LIST}?free_txt=Hilfskraft&free_txt_fields=title`) {
+  pass('buildRequestUrls() searches the title field, not the description');
+} else {
+  fail(`buildRequestUrls() keyword URL wrong: ${queried[1]}`);
+}
+
+if (queried[2].includes('free_txt=Machine+Learning')) pass('buildRequestUrls() form-encodes a multi-word keyword');
+else fail(`buildRequestUrls() encoding wrong: ${queried[2]}`);
 
 const categorized = buildRequestUrls(LIST, { categories: ['hiwi', 'wiss'] });
-if (categorized[0] === `${LIST}?job_category%5B%5D=hiwi`) {
-  pass('buildRequestUrls() encodes job_category[] as an array param');
+if (categorized[0] === LIST && categorized[1] === `${LIST}?job_category%5B%5D=hiwi`) {
+  pass('buildRequestUrls() encodes job_category[] as an array param, after the listing');
 } else {
-  fail(`buildRequestUrls() category URL wrong: ${categorized[0]}`);
+  fail(`buildRequestUrls() category URL wrong: ${JSON.stringify(categorized.slice(0, 2))}`);
 }
 
 const both = buildRequestUrls(LIST, { keywords: ['Data'], categories: ['hiwi'] });
-if (both.length === 2) pass('buildRequestUrls() combines keywords and categories');
+if (both.length === 3 && both[0] === LIST) pass('buildRequestUrls() combines the listing, keywords and categories');
 else fail(`buildRequestUrls() combined wrong: ${JSON.stringify(both)}`);
 
 // ── parseListing ──────────────────────────────────────────────────────
