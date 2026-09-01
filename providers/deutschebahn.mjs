@@ -1,6 +1,7 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 import { decodeEntities } from './_html-entities.mjs';
+import { fetchTextWithRetry } from './_http.mjs';
 
 // Deutsche Bahn provider — single-company (pattern: ibm/dassault/rheinmetall).
 // DB's careers run on the custom db.jobs portal (the branded Avature front,
@@ -24,6 +25,15 @@ const ITEMS_PER_PAGE = 20; // DB's default page size
 const MAX_PAGES = 60; // safety cap on request count (60*20 = 1200 postings)
 const MAX_JOBS = 1000; // cap total postings pulled
 const PAGE_DELAY_MS = 150; // polite pacing between page requests
+// db.jobs renders each results page server-side and is slow about it: pages
+// take ~3s from a quiet line and were measured at ~7.7s each during a
+// concurrent full-ATS sweep. The shared 10s default therefore aborts DB
+// whenever anything else is using the network, and the whole portal drops out
+// of the scan as a single "operation was aborted" line — 479 live requisitions
+// missing, with nothing that reads as a bug. Give it room, and retry the abort
+// (isRetryableError already treats a status-less abort as transient).
+const PAGE_TIMEOUT_MS = 30_000;
+const RETRY_POLICY = { retries: 2, baseDelayMs: 1_000, maxDelayMs: 8_000 };
 
 /** @param {string} s */
 function clean(s) {
@@ -119,7 +129,12 @@ export default {
     for (let page = 0; page < maxPages; page++) {
       if (page > 0) await wait(PAGE_DELAY_MS);
       const url = `${cfg.searchBase}?qli=true&query=&sort=score&itemsPerPage=${ITEMS_PER_PAGE}&pageNum=${page}`;
-      const html = await ctx.fetchText(url, { headers: { accept: 'text/html' } });
+      const html = await fetchTextWithRetry(
+        ctx,
+        url,
+        { headers: { accept: 'text/html' }, timeoutMs: PAGE_TIMEOUT_MS },
+        RETRY_POLICY,
+      );
       const rows = parseHits(html, cfg.origin);
       if (rows.length === 0) break; // past the last page
 

@@ -72,6 +72,34 @@ try {
   const fallbackJobs = await db.fetch({ name: 'Deutsche Bahn', api: 'https://db.jobs/service/search/de-de/5441588', max_pages: 0 }, fallbackCtx);
   if (fallbackJobs.length === 5 && fallbackCalls === 6) pass('deutschebahn.fetch() falls back to the default page cap for a non-positive max_pages');
   else fail(`deutschebahn.fetch() max_pages fallback wrong: ${fallbackJobs.length} jobs after ${fallbackCalls} calls`);
+
+  // A transient abort must not take the whole portal down. db.jobs renders
+  // every results page server-side and is slow about it (~3s quiet, ~7.7s
+  // measured under a concurrent sweep), so the shared 10s default aborted it
+  // whenever anything else used the network — 479 live requisitions vanished
+  // behind one "operation was aborted" line. The provider now retries a
+  // status-less abort, and asks for a page timeout the portal can actually
+  // meet.
+  let abortCalls = 0;
+  let seenTimeout = null;
+  const abortCtx = {
+    sleep: async () => {},
+    fetchText: async (_url, opts) => {
+      abortCalls++;
+      seenTimeout = opts?.timeoutMs ?? seenTimeout;
+      if (abortCalls === 1) {
+        const err = new Error('This operation was aborted');
+        err.name = 'AbortError'; // no .status — the transport-error shape
+        throw err;
+      }
+      return abortCalls === 2 ? dbHit('700300', 'Nach dem Abbruch', 'München, Deutschland') : '<html></html>';
+    },
+  };
+  const abortJobs = await db.fetch({ name: 'Deutsche Bahn', api: 'https://db.jobs/service/search/de-de/5441588' }, abortCtx);
+  if (abortJobs.length === 1 && abortCalls === 3) pass('deutschebahn.fetch() retries a transient abort instead of losing the portal');
+  else fail(`deutschebahn.fetch() abort retry wrong: ${abortJobs.length} jobs after ${abortCalls} calls`);
+  if (seenTimeout && seenTimeout > 10_000) pass('deutschebahn.fetch() asks for a page timeout above the 10s shared default');
+  else fail(`deutschebahn.fetch() passed timeoutMs=${seenTimeout}, which the portal cannot meet`);
 } catch (e) {
   fail(`deutschebahn provider tests crashed: ${e.message}`);
 }
