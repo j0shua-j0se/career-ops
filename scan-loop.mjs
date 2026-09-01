@@ -40,6 +40,9 @@ import {
   resolveLoopConfig, newState, normalizeState, ingestOffers, recordScores,
   parseTriageOutput, decideNextAction, summarize, qualifiedCandidates,
   renderShortlist, renderRunLogEntry, toHumanUrl,
+  HALT_BUDGET,
+  HALT_ABORTED,
+  classifyHaltReason,
 } from './loop-core.mjs';
 import { parsePipeline, rankEntry } from './triage-prefilter.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
@@ -156,6 +159,11 @@ function cmdNext() {
   // the shortlist both explain why the run stopped short.
   if (decision.action === 'halt' && !state.halted_reason) {
     state.halted_reason = decision.reason;
+    // Every reason decideNextAction can halt on is a bound the loop was given,
+    // so this is the loop finishing its ladder — not failing. Recorded
+    // structurally because run-all.mjs has to tell it apart from an abort, and
+    // matching on the message text is not a contract.
+    state.halted_kind = HALT_BUDGET;
     saveState(state);
     log(state, 'halt', decision.reason);
   }
@@ -412,6 +420,9 @@ function cmdStatus() {
     run_id: state.run_id,
     phase: state.phase,
     halted_reason: state.halted_reason,
+    // Falls back to classifying the message for states written before the field
+    // existed; unrecognised text stays 'aborted', the cautious reading.
+    halted_kind: state.halted_kind ?? classifyHaltReason(state.halted_reason),
     ...summarize(state),
     waves: state.waves,
     next: decideNextAction(state),
@@ -557,6 +568,7 @@ function cmdAbort(flags) {
   const state = requireState();
   state.phase = 'done';
   state.halted_reason = flags.note || 'aborted by the user';
+  state.halted_kind = HALT_ABORTED;
   saveState(state);
   log(state, 'abort', state.halted_reason);
   return { aborted: true, reason: state.halted_reason };

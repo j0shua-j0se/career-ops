@@ -491,6 +491,47 @@ export function decideNextAction(state) {
  * order that produces the most useful message. Returns null when the loop may
  * keep going.
  */
+/**
+ * How a halted loop ended.
+ *
+ * `budget` means the loop ran its ladder and stopped on a bound it was given —
+ * every reason haltReason() can return is one of those. That is the loop
+ * WORKING: it looked, the cheap sources were barren, and it declined to
+ * escalate into a multi-hour sweep to prove it twice.
+ *
+ * `aborted` means a human or an agent gave up on the run. Only that one
+ * genuinely delivered nothing.
+ *
+ * run-all.mjs conflated the two, because it inferred abnormality from the mere
+ * presence of a halted_reason. A pass whose scan honestly found nothing was
+ * therefore told to start a FRESH loop, which re-ran the same waves and tripped
+ * the same breaker — up to maxStageAttempts times, each one a full portal scan,
+ * to relearn what the first had already established.
+ */
+export const HALT_BUDGET = 'budget';
+export const HALT_ABORTED = 'aborted';
+
+/**
+ * Classify a halted_reason written before halt_kind existed.
+ *
+ * A legacy bridge, deliberately narrow: it matches only the four shapes
+ * haltReason() produces, and anything unrecognised stays `aborted` so an
+ * unknown state keeps the old, cautious behaviour instead of being waved
+ * through as a clean finish.
+ */
+export function classifyHaltReason(reason) {
+  const r = String(reason ?? '');
+  if (!r) return null;
+  // Anchored AND including the em-dash separator every generated reason uses.
+  // A prefix alone was not enough: an operator's abort note reading "circuit
+  // breakers are fine but I am stopping anyway" starts with those very words
+  // and was waved through as a clean finish. The full signature is not
+  // something a hand-written note reproduces by accident.
+  return /^(scoring budget spent|circuit breaker|wave budget spent|escalation ladder exhausted) — /.test(r)
+    ? HALT_BUDGET
+    : HALT_ABORTED;
+}
+
 function haltReason(state, config, stats) {
   if (stats.scored >= config.maxScored) {
     return `scoring budget spent — ${stats.scored} candidate(s) triaged (loop.maxScored = ${config.maxScored})`;

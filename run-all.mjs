@@ -48,6 +48,7 @@ import {
   currentStage, isFinished, kitCandidates, summarize, renderRunLogEntry,
 } from './run-core.mjs';
 import { parsePipeline } from './triage-prefilter.mjs';
+import { HALT_ABORTED, classifyHaltReason } from './loop-core.mjs';
 import { parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
 
 // Every artifact is redirectable through the one-env-var-per-artifact
@@ -132,7 +133,22 @@ function loopFacts() {
     // `phase === 'done'` (loop-core's decideNextAction, cmdStart's
     // already-running guard, and the `running` flag), so the inference is fixed
     // here rather than the vocabulary everywhere.
-    const endedAbnormally = Boolean(status.halted_reason);
+    // Not "was there a halt" — "was it a GIVING UP".
+    //
+    // Every reason the loop can halt on by itself is a bound it was given:
+    // scoring budget, wave budget, ladder exhausted, or the circuit breaker
+    // after consecutive barren waves. All four are the loop working — it
+    // looked, the cheap sources were empty, and it declined to escalate into a
+    // multi-hour sweep to prove it a second time. Only an explicit `abort` is a
+    // run that delivered nothing.
+    //
+    // Reading the mere PRESENCE of halted_reason as abnormal meant a pass whose
+    // scan honestly found nothing was told to start a FRESH loop. That loop ran
+    // the same two waves, tripped the same breaker, and produced the same
+    // instruction — a retry that could only repeat itself, up to
+    // maxStageAttempts full portal scans (~11,500 postings each) to relearn
+    // what the first one had already established.
+    const endedAbnormally = (status.halted_kind ?? classifyHaltReason(status.halted_reason)) === HALT_ABORTED;
     return {
       done: status.phase === 'done' && !endedAbnormally,
       // The loop's own start timestamp. decideNextStage compares it against the

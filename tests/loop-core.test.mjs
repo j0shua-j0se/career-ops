@@ -398,3 +398,63 @@ console.log('\nloop-core — wave ladder order reflects cost vs measured yield')
     ? pass(`the ladder fits the max_waves cap (${ids.length} <= 6)`)
     : fail(`ladder has ${ids.length} waves but max_waves is 6 — the tail can never run`);
 }
+
+// ── A halt is not a crash ────────────────────────────────────────────
+//
+// Every reason haltReason() can produce is a bound the loop was given —
+// scoring budget, wave budget, ladder exhausted, or the circuit breaker after
+// consecutive barren waves. All four are the loop WORKING: it looked, the cheap
+// sources were empty, and it declined to escalate into a multi-hour sweep to
+// prove it twice. Only an explicit `abort` delivered nothing.
+//
+// run-all.mjs inferred abnormality from the mere PRESENCE of a halted_reason,
+// so a pass whose scan honestly found nothing was told to start a fresh loop —
+// which ran the same waves, tripped the same breaker, and returned the same
+// instruction. A retry that could only repeat itself, up to maxStageAttempts
+// full portal scans of ~11,500 postings each.
+{
+  const { classifyHaltReason, HALT_BUDGET, HALT_ABORTED } =
+    await import('../loop-core.mjs');
+
+  const budgetReasons = [
+    'circuit breaker — 2 consecutive wave(s) produced no candidate at or above 3.5',
+    'scoring budget spent — 120 candidate(s) triaged (loop.maxScored = 120)',
+    'wave budget spent — 6 wave(s) run (loop.maxWaves = 6)',
+    'escalation ladder exhausted — all 6 strategies have been run',
+  ];
+  if (budgetReasons.every((r) => classifyHaltReason(r) === HALT_BUDGET)) {
+    pass('classifyHaltReason() calls all four self-imposed bounds a budget halt');
+  } else {
+    const bad = budgetReasons.filter((r) => classifyHaltReason(r) !== HALT_BUDGET);
+    fail(`misclassified as abnormal: ${JSON.stringify(bad)}`);
+  }
+
+  // An abort carries the operator's own note, which can say anything at all —
+  // so anything unrecognised must stay on the cautious side.
+  const abortReasons = [
+    'aborted by the user',
+    'stopping: the pending candidates predate a provider fix',
+    'circuit breakers are fine but I am stopping anyway',
+    'wave budget looked wrong so I killed it',
+  ];
+  if (abortReasons.every((r) => classifyHaltReason(r) === HALT_ABORTED)) {
+    pass('classifyHaltReason() treats an unrecognised reason as an abort, not a clean finish');
+  } else {
+    const bad = abortReasons.filter((r) => classifyHaltReason(r) !== HALT_ABORTED);
+    fail(`waved through as a budget halt: ${JSON.stringify(bad)}`);
+  }
+
+  if (classifyHaltReason('') === null && classifyHaltReason(null) === null && classifyHaltReason(undefined) === null) {
+    pass('classifyHaltReason() returns null for no reason at all — a loop that never halted');
+  } else {
+    fail('an absent reason should classify as null, not as a halt');
+  }
+
+  // The bridge must not match a budget phrase buried mid-sentence: an operator
+  // note that merely MENTIONS the circuit breaker is still an abort.
+  if (classifyHaltReason('I stopped it before the circuit breaker could fire') === HALT_ABORTED) {
+    pass('classifyHaltReason() anchors at the start, so a note mentioning a bound is still an abort');
+  } else {
+    fail('a mid-sentence budget phrase was read as a budget halt');
+  }
+}
