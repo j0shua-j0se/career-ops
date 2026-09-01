@@ -43,6 +43,7 @@ import {
 } from './loop-core.mjs';
 import { parsePipeline, rankEntry } from './triage-prefilter.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
+import { loadCheckpoint, checkpointCompatible } from './scan-ats-full.mjs';
 
 // Every artifact the driver writes is redirectable, following the one-env-var-
 // per-artifact convention the rest of the repo uses (CAREER_OPS_TRACKER,
@@ -213,6 +214,34 @@ function prefilterReject(state) {
   return rejected;
 }
 
+/**
+ * The scanner's argv for this rung, with `--resume` added when a compatible
+ * checkpoint from an interrupted sweep is sitting on disk.
+ *
+ * Only ever ADDS the flag — never removes a caller's, never resumes a
+ * checkpoint the compatibility test rejects, and never touches a dry run.
+ */
+function buildWaveArgs(strategy, flags) {
+  const base = flags['dry-run'] ? [...strategy.args, '--dry-run'] : [...strategy.args];
+  if (flags['dry-run']) return base;
+  if (!/scan-ats-full\.mjs/.test(String(strategy.args?.[0] ?? ''))) return base;
+  if (base.includes('--resume')) return base;
+  try {
+    const cp = loadCheckpoint();
+    if (!cp) return base;
+    const sinceIdx = base.indexOf('--since');
+    const since = sinceIdx >= 0 ? Number(base[sinceIdx + 1]) : undefined;
+    const ats = String(strategy.args.find((a, i) => strategy.args[i - 1] === '--ats') ?? '').split(',').filter(Boolean);
+    if (!checkpointCompatible(cp, { since, ats: ats.length ? ats : undefined })) return base;
+    const held = Array.isArray(cp.offers) ? cp.offers.length : 0;
+    console.error(`  resuming an interrupted sweep: ${cp.completedSources?.join(', ') || 'none'} complete, `
+      + `${cp.current?.name ?? '?'} at ${cp.current?.resumeAt ?? '?'}/${cp.current?.datasetLen ?? '?'}, ${held} offer(s) held.`);
+    return [...base, '--resume'];
+  } catch {
+    return base;   // a checkpoint we cannot read is not a reason to skip the wave
+  }
+}
+
 function cmdWave(flags) {
   const state = requireState();
   const decision = decideNextAction(state);
@@ -236,7 +265,21 @@ function cmdWave(flags) {
 
   const before = pipelineSnapshot();
   const started = new Date().toISOString();
-  const args = flags['dry-run'] ? [...strategy.args, '--dry-run'] : strategy.args;
+  // Continue an interrupted sweep instead of silently restarting it.
+  //
+  // scan-ats-full.mjs persists only when every requested source has finished,
+  // so a sweep killed part-way discards every match it holds — and the loop
+  // then re-invokes it with no --resume, which walks the same companies from
+  // company 0 and, if it is interrupted again at the same point, can never make
+  // progress. Observed 2026-08-31: the ats-recent wave was SIGTERMed after ~24
+  // minutes holding 55 matched offers (54 of them new), greenhouse complete and
+  // lever at 969/4368. All of it was dropped, and the five -full portals showed
+  // as producing nothing for 13 days.
+  //
+  // The checkpoint and its compatibility test already existed and were already
+  // exported; nothing ever consulted them. Now the loop does, and says so —
+  // a resumed sweep is a fact the run log should carry, not a silent detail.
+  const args = buildWaveArgs(strategy, flags);
   // The scanner's progress goes to OUR stderr, not our stdout: a rung runs for
   // minutes so its output has to stream live, but this command's contract is a
   // single JSON object on stdout and an agent piping it to a parser must not

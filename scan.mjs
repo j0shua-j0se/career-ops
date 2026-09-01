@@ -1104,7 +1104,36 @@ export function normalizeUrlForDedup(url) {
   }
   parsed.hash = '';
   parsed.pathname = parsed.pathname.replace(/\/+$/, '').toLowerCase() || '/';
+  parsed.pathname = canonicalStellenwerkPath(parsed);
   return parsed.toString();
+}
+
+/**
+ * One stellenwerk posting is listed on several CITY boards under one id.
+ *
+ *   /erlangen-nuernberg/mitarbeiter-...-data-scientist-...-260824-275054
+ *   /muenchen/mitarbeiter-...-data-scientist-...-260824-275054
+ *
+ * Same posting, same trailing `-YYMMDD-<id>`, different path — so the URL dedup
+ * key differs and it is ingested again as new. Measured on 2026-08-31: 5 of 59
+ * stellenwerk postings in scan-history appear under two or three city paths, one
+ * of them three times.
+ *
+ * Nothing else could catch it. `providers/stellenwerk.mjs` builds its rows from
+ * the SITEMAP, which carries neither a company nor a description, so the
+ * company field is empty and `fingerprint = fingerprintText(description)` is
+ * empty too. With both content keys blank the URL is the only identity left,
+ * and it is the one thing that varies. The cost is not just wasted triage: a
+ * posting already evaluated and SKIPped returns as a fresh candidate — #146 was
+ * back in the inbox the same day it was closed.
+ *
+ * Keyed on the posting id, which is what stellenwerk itself treats as the
+ * identity. The city segment is a listing surface, not part of the job.
+ */
+function canonicalStellenwerkPath(parsed) {
+  if (!/(^|\.)stellenwerk\.de$/i.test(parsed.hostname)) return parsed.pathname;
+  const m = parsed.pathname.match(/^\/[^/]+\/(.+)-(\d{6})-(\d+)$/);
+  return m ? `/_/${m[1]}-${m[2]}-${m[3]}` : parsed.pathname;
 }
 
 /**
