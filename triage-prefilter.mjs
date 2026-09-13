@@ -57,6 +57,19 @@ const DISCARD_LOG_PATH = join(ROOT, 'data', 'discard.log');
 // Trailing fields are optional and many rows carry no date at all, so `posted:`
 // is pulled out by name rather than by index — reading it positionally is how a
 // three-field row silently became a dated one.
+//
+// `posted:` is not the only labeled segment `modes/pipeline.md` ("Format of
+// pipeline.md") documents riding on a row: `trust: {score} {flags}`, `note:
+// {text}` and `rank: {score}/5 — {reason}` all use the same `{label}: {value}`
+// convention, and `via: {source}` shows up in practice from importers even
+// though it is not yet in that doc. Every one of them must be stripped before
+// the remaining cells are read positionally, or a labeled segment lands in
+// `company`/`title`/`location` exactly as if it were data. A stellenanzeigen.de
+// row with a `trust:` tag but no location cell — `… | iMerit | AI Response
+// Analyst | trust: 95 posting_on_job_board` — used to hand `trust: 95
+// posting_on_job_board` to classifyReach as the location, which read it as
+// "abroad" and hard-dropped the posting.
+const LABELED_SEGMENT_RE = /^(posted|trust|note|rank|via|deadline):/i;
 
 /**
  * Parse one `- [ ]` pipeline line.
@@ -76,6 +89,10 @@ export function parsePipelineLine(line) {
   for (const part of parts.slice(1)) {
     const tagged = /^posted:\s*(\d{4}-\d{2}-\d{2})$/i.exec(part);
     if (tagged) { postedAt = tagged[1]; continue; }
+    // Any other labeled segment (trust:/note:/rank:/via:/deadline:) is metadata,
+    // not a positional cell — skip it so company/title/location keep their
+    // positions regardless of what rides alongside them.
+    if (LABELED_SEGMENT_RE.test(part)) continue;
     fields.push(part);
   }
   return {
@@ -120,7 +137,16 @@ export function parsePipeline(md) {
 
 const HOME_CITY_RE = /(?<![a-zäöüß])(erlangen|n[üu]rnberg|nuremberg|f[üu]rth|herzogenaurach|forchheim|bamberg|zirndorf|schwabach|uttenreuth|spardorf|baiersdorf|m[öo]hrendorf|ansbach|mittelfranken)(?![a-zäöüß])/i;
 
-const MUNICH_CITY_RE = /(?<![a-zäöüß])(m[üu]nchen|munich|garching|ismaning|unterf[öo]hring|neubiberg|ottobrunn|taufkirchen|unterhaching|oberhaching|gr[üu]nwald|planegg|martinsried|oberschlei[ßs]heim|freising|dachau)(?![a-zäöüß])/i;
+// Extended to the rest of the Munich commuter ring (~25 km of the centre,
+// reachable the same way as the towns already above): Unterschleißheim,
+// Eching, Haar, Pullach, Feldkirchen, Aschheim, Kirchheim bei München, Poing,
+// Gräfelfing, Germering, Puchheim. "Kirchheim bei München" is matched as the
+// full phrase, not bare "kirchheim" — the bare word collides with Kirchheim
+// unter Teck and other unrelated towns of the same name. Deliberately stops
+// short of Gilching or Starnberg: real places, but a materially longer commute
+// than anything else in this list, so they are left to the 'unknown' fallback
+// (fix (b) below) rather than asserted as reachable.
+const MUNICH_CITY_RE = /(?<![a-zäöüß])(m[üu]nchen|munich|garching|ismaning|unterf[öo]hring|neubiberg|ottobrunn|taufkirchen|unterhaching|oberhaching|gr[üu]nwald|planegg|martinsried|oberschlei[ßs]heim|unterschlei[ßs]heim|freising|dachau|eching|haar|pullach|feldkirchen|aschheim|kirchheim bei m[üu]nchen|poing|gr[äa]felfing|germering|puchheim)(?![a-zäöüß])/i;
 
 // Deliberately narrow: "de" is not in here. It matches inside ordinary foreign
 // location strings ("Ciudad de México") and would file them as German.
@@ -131,7 +157,50 @@ const GERMANY_RE = /(?<![a-zäöüß])(deutschland|germany)(?![a-zäöüß])/i;
 // limited to unambiguous country names and the "US"/"USA" forms that dominate
 // full-dataset ATS location cells ("US-TX-REMOTE", "US - Remote"). The lookaround
 // guards keep "us" from matching inside a word such as "Aarhus" or "Cottbus".
-const FOREIGN_COUNTRY_RE = /(?<![a-zäöüß0-9])(u\.?s\.?a?|united states|canada|u\.?k\.?|united kingdom|england|scotland|ireland|india|australia|singapore|japan|china|brazil|mexico|philippines|argentina|chile|colombia|peru|pakistan|bangladesh|vietnam|indonesia|malaysia|thailand|turkey|türkiye|israel|egypt|nigeria|kenya|south africa|new zealand|poland|polska|romania|românia|ukraine|portugal)(?![a-zäöüß0-9])/i;
+//
+// "spain" sits here on the same footing as "poland"/"romania"/"portugal" above:
+// all four are EU member states, and EU membership is not authorization —
+// config/profile.yml -> location.authorized_in lists only Germany, so a role
+// scoped to any one of them is exactly as unworkable as one scoped to the US.
+//
+// Austria and Switzerland are the two neighbours easiest to mistake for
+// "close enough": both border Bavaria, both are German-speaking, and neither
+// is in `config/profile.yml` -> location.authorized_in (Germany only). A
+// posting scoped to either is exactly as unworkable as one scoped to the US.
+const FOREIGN_COUNTRY_RE = /(?<![a-zäöüß0-9])(u\.?s\.?a?|united states|canada|u\.?k\.?|united kingdom|england|scotland|ireland|india|australia|singapore|japan|china|brazil|m[ée]xico|philippines|argentina|chile|colombia|peru|costa rica|pakistan|bangladesh|vietnam|indonesia|malaysia|thailand|turkey|türkiye|israel|egypt|nigeria|kenya|south africa|new zealand|poland|polska|romania|românia|ukraine|portugal|spain|[öo]sterreich|austria|schweiz|switzerland|suisse)(?![a-zäöüß0-9])/i;
+
+// Unambiguous major foreign cities. City names are riskier than country names
+// (more of them double as ordinary words or company names), so this list is
+// deliberately narrow: only cities that show up in real job-board location
+// cells and carry no plausible German or English other-meaning. It exists for
+// the location strings that name a foreign CITY but no foreign country,
+// region, or remote scope — "Wien" and "Milano" carry no country name at all,
+// and even "Amsterdam, Netherlands" has none FOREIGN_COUNTRY_RE recognises.
+// Without this, fix (b) below would read a bare foreign city as 'unknown'
+// rather than 'abroad'.
+//
+// Extended with the US metros that actually show up in ATS location cells but
+// carry no US state or country marker alongside them — "Atlanta - Hybrid",
+// "Rosemont IL" (before the state code even helps: "IL" trails the city, not
+// leading a remote/hybrid cell, so it never reaches FOREIGN_REGION_RE),
+// "San Antonio Home Office I". `austin` and `dublin` were already present.
+// Skipped deliberately: bare city names that double as common German words or
+// name real German places — e.g. no "berlin" (New Hampshire has one, but it
+// collides with the capital of Germany) and no "hanover"/"frankfort" (both are
+// English-spelling near-duplicates of real German cities already in
+// OTHER_DE_CITY_RE — "hannover"/"frankfurt" — one letter apart is too close to
+// risk). "durham" and "addison" are fine: neither is a German place or word.
+const FOREIGN_CITY_RE = /(?<![a-zäöüß])(london|paris|amsterdam|milano|milan|madrid|barcelona|lisbon|dublin|warsaw|warszawa|krak[óo]w|prague|praha|vienna|wien|z[üu]rich|basel|geneva|gen[èe]ve|bern|brussels|copenhagen|stockholm|oslo|helsinki|tallinn|riga|vilnius|bucharest|sofia|belgrade|budapest|athens|istanbul|limassol|paphos|yerevan|tel aviv|dubai|bangalore|bengaluru|hyderabad|pune|mumbai|delhi|chennai|toronto|vancouver|montreal|mississauga|ottawa|new york|san francisco|seattle|austin|boston|chicago|sydney|melbourne|singapore|tokyo|seoul|s[ãa]o paulo|buenos aires|mexico city|bogot[áa]|lima|santiago|manila|cairo|lagos|nairobi|cape town|johannesburg|atlanta|san antonio|dallas|houston|denver|phoenix|philadelphia|pittsburgh|washington,?\s*d\.?c\.?|los angeles|san diego|san jose|san carlos|emeryville|portland|miami|detroit|minneapolis|nashville|charlotte|raleigh|durham|salt lake city|alpharetta|ashburn|rosemont|addison|crawley|cork)(?![a-zäöüß])/i;
+
+// Supra-national regions and the one US idiom that name no single country but
+// are exactly as disqualifying: "Remote, Americas" (montecarlodata), "Remote
+// (North America)" (hightouch), "Latin America" (luxurypresence), "Remote in
+// AMER" (testlio — Greenhouse's own AMER/EMEA/APAC region shorthand), and
+// "Nationwide Remote" (empower — nobody advertises a German role as
+// "nationwide", it is a US-only idiom for "any US state"). EMEA is
+// deliberately absent from this list: it includes Europe, so "Remote · EMEA"
+// (camunda) must stay reachable rather than being read as foreign.
+const FOREIGN_REMOTE_SCOPE_RE = /(?<![a-zäöüß])(americas|north america|south america|latin america|latam|apac|amer|nationwide)(?![a-zäöüß])/i;
 
 // Sub-national markers that identify a foreign country as reliably as its name.
 //
@@ -146,6 +215,16 @@ const FOREIGN_COUNTRY_RE = /(?<![a-zäöüß0-9])(u\.?s\.?a?|united states|canad
 // with initialisms and German words. Maine and Montana are deliberately absent
 // — both are ordinary words elsewhere, and the cost of a false "abroad" is a
 // silently discarded posting.
+//
+// This whole regex is built from plain JS strings, not a regex literal — which
+// bit the punctuated branch below: `\s?` inside a normal '...' string is NOT
+// the escape sequence for whitespace. `\s` is not a recognized string escape,
+// so JS silently drops the backslash and leaves the literal character `s`. The
+// intended "optional whitespace" became "optional literal s", so ", VA"
+// (comma-SPACE-VA, as ATS boards actually print it) never matched — only the
+// space-free "US-TX-REMOTE" form did, because there was no separator character
+// for the phantom `s?` to fail to consume. The fix is `\\s?`, a real backslash
+// followed by `s`, so the resulting pattern text carries `\s?`.
 const FOREIGN_REGION_RE = new RegExp(
   '(?<![a-zäöüß0-9])(' + [
     'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut',
@@ -157,7 +236,26 @@ const FOREIGN_REGION_RE = new RegExp(
     'utah', 'vermont', 'virginia', 'west virginia', 'wisconsin', 'wyoming',
     'ontario', 'quebec', 'alberta', 'british columbia',
   ].join('|') + ')(?![a-zäöüß0-9])'
-  + '|(?<=[-,/])\s?(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|md|ma|mi|mn|ms|mo|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)(?![a-z0-9])',
+  // Two-letter codes embedded after a separator: "Remote-TX", "US-TX-REMOTE",
+  // "Ashburn, VA (Hybrid)". `\\s?` (not `\s?` — see note above) so the space
+  // after a comma is actually consumed.
+  + '|(?<=[-,/])\\s?(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|md|ma|mi|mn|ms|mo|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)(?![a-z0-9])'
+  // Two-letter codes LEADING the cell, the other shape ATS boards print:
+  // "CA-Remote", "NJ - Remote", "TX - Hybrid". Anchored to the very start of
+  // the string, then the code, then optional space, then the hyphen that
+  // separates the code from "Remote"/"Hybrid" — that hyphen is what keeps this
+  // from colliding with an ordinary word or German initialism at the front of
+  // a location string, the same way the punctuated branch above relies on its
+  // leading separator.
+  //
+  // "de" is deliberately excluded from this branch only. Every other US state
+  // code is safe to read leading a cell, but "DE" leading a cell is exactly as
+  // likely to be the ISO country code Germany's own ATS listings use ("DE
+  // Remote", "DE-Germany-Home Office") as it is to be Delaware, and nothing in
+  // this branch can tell the two apart. The punctuated branch above still
+  // recognizes "US-DE-REMOTE" as Delaware — that context is safe because it
+  // sits beside an explicit "US" marker instead of standing alone.
+  + '|^(al|ak|az|ar|ca|co|ct|fl|ga|hi|id|il|in|ia|ks|ky|la|md|ma|mi|mn|ms|mo|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)(?=\\s?-)',
   'i',
 );
 
@@ -190,8 +288,17 @@ const HOME_PLZ_RANGES = [
 
 const MUNICH_PLZ_RANGES = [
   [80331, 81929], // München
-  [82008, 82152], // southern ring — Unterhaching · Grünwald · Planegg · Martinsried
-  [85521, 85774], // northern/eastern ring — Ottobrunn · Neubiberg · Garching · Ismaning
+  // southern/western ring — Unterhaching · Grünwald · Planegg · Martinsried ·
+  // Pullach (82049) · Germering (82110) · Gräfelfing (82166) · Puchheim (82178)
+  [82008, 82178],
+  // northern/eastern ring — Ottobrunn · Neubiberg · Garching · Ismaning ·
+  // Haar (85540) · Kirchheim bei München (85551) · Aschheim (85609) ·
+  // Feldkirchen (85622) · Poing (85586) · Unterschleißheim (85716)
+  [85521, 85774],
+  // Eching (85386/85379) is NOT in a PLZ range, same treatment as Freising and
+  // Dachau above it in MUNICH_CITY_RE: it is far enough outside the two ranges
+  // above that folding it in would also sweep in unrelated Freising-district
+  // codes, so it is recognised by name only.
 ];
 
 /**
@@ -249,7 +356,15 @@ export function classifyReach(location, title = '') {
     // and "Remote — Germany or US" are both genuinely reachable and must stay.
     const germanMarker = GERMANY_RE.test(loc) || OTHER_DE_CITY_RE.test(loc)
       || HOME_CITY_RE.test(loc) || MUNICH_CITY_RE.test(loc);
-    if (!germanMarker && (FOREIGN_COUNTRY_RE.test(loc) || FOREIGN_REGION_RE.test(loc))) return 'abroad';
+    // FOREIGN_REMOTE_SCOPE_RE and FOREIGN_CITY_RE catch the same class of
+    // foreign-scoped remote posting the two checks above were already built
+    // for, just spelled a different way: "Remote - Nationwide" and "(North
+    // America) Remote" name no single country, and "San Antonio Home Office I"
+    // names no country, region, or remote scope at all — only a US city. All
+    // three used to win on the bare REMOTE_RE match below with no foreign
+    // check ever firing.
+    if (!germanMarker && (FOREIGN_COUNTRY_RE.test(loc) || FOREIGN_REGION_RE.test(loc)
+      || FOREIGN_REMOTE_SCOPE_RE.test(loc) || FOREIGN_CITY_RE.test(loc))) return 'abroad';
     return 'remote';
   }
   // A location that carries no information is 'unknown', not 'abroad'. Falling
@@ -261,7 +376,20 @@ export function classifyReach(location, title = '') {
   // not knowing where a role is must never be evidence that it is abroad.
   if (UNINFORMATIVE_LOCATION_RE.test(loc)) return 'unknown';
   if (GERMANY_RE.test(loc) || OTHER_DE_CITY_RE.test(loc)) return 'germany';
-  return 'abroad';
+  // Nothing above recognised the location as home, Munich, remote, or
+  // elsewhere-in-Germany. That is not, by itself, evidence the role is abroad —
+  // the exact same principle as the placeholder case above, just for a real
+  // place name this filter has never seen. A stellenanzeigen.de posting in
+  // "Unterschleißheim" was hard-dropped with reason "outside Germany" purely
+  // because that town was not yet in MUNICH_CITY_RE; the same fallback would
+  // drop any small German town not in HOME_CITY_RE / MUNICH_CITY_RE /
+  // OTHER_DE_CITY_RE. Only an EXPLICIT foreign signal — a foreign country, a
+  // supra-national remote scope, a US state/region, or an unambiguous foreign
+  // city — earns 'abroad'; a single unrecognised place name with none of those
+  // is 'unknown', exactly like an empty cell.
+  if (FOREIGN_COUNTRY_RE.test(loc) || FOREIGN_REGION_RE.test(loc)
+    || FOREIGN_REMOTE_SCOPE_RE.test(loc) || FOREIGN_CITY_RE.test(loc)) return 'abroad';
+  return 'unknown';
 }
 
 /** Location score from modes/_brief.md "Location Scoring". Remote-in-Germany is 4.5. */
@@ -850,6 +978,17 @@ function selfTest() {
   check(parsePipelineLine('not a list item') === null, 'a non-entry line is ignored');
   check(parsePipelineLine('- [x] https://ex.com/3 | A | B | C')?.done === true, 'a ticked entry is marked done');
 
+  // ── D3: labeled segments (trust:/note:/rank:/via:/deadline:) are not
+  // positional fields. A row with a trust: tag but no location cell used to
+  // hand `trust: 95 posting_on_job_board` to classifyReach as the location.
+  const imerit = parsePipelineLine('- [ ] https://remoteOK.com/remote-jobs/x | iMerit Technology | AI Response Analyst | trust: 95 posting_on_job_board');
+  check(imerit?.company === 'iMerit Technology' && imerit?.title === 'AI Response Analyst', 'a trust: segment does not shift company/title');
+  check(imerit?.location === '', 'a trust: segment with no location cell leaves location empty, not the trust text');
+  const trustedLoc = parsePipelineLine('- [ ] https://ex.com/t | Acme | Werkstudent X | Unterschleißheim | trust: 95 posting_on_job_board');
+  check(trustedLoc?.location === 'Unterschleißheim', 'a trust: segment after a real location cell does not overwrite it');
+  const viaLine = parsePipelineLine('- [ ] https://ex.com/v | Acme | Werkstudent X | Nürnberg | posted: 2026-08-19 | via: indeed-mcp');
+  check(viaLine?.location === 'Nürnberg' && viaLine?.postedAt === '2026-08-19', 'a via: segment is skipped and posted: is still read');
+
   const parsed = parsePipeline(`## Pending\n${line}\n\n## Processed\n- [ ] https://ex.com/9 | X | Y | Z\n`);
   check(parsed.pending.length === 1 && parsed.processed.length === 1, 'parsePipeline splits on the section heading');
 
@@ -872,6 +1011,20 @@ function selfTest() {
   check(classifyReach('Ciudad de México') === 'abroad', 'a Spanish "de" is not read as Deutschland');
   check(classifyReach('') === 'unknown', 'an empty location is unknown, not abroad');
   check(classifyReach('Munich', 'Program Manager - Non-Remote') === 'munich', 'a negated remote marker does not create a remote tier');
+
+  // ── D1: unrecognized German towns are 'unknown', never 'abroad' ──
+  // Real case: a stellenanzeigen.de posting in "Unterschleißheim" (a Munich-ring
+  // town ~15 km from Munich) was hard-dropped with reason "outside Germany"
+  // because the town was not in MUNICH_CITY_RE.
+  check(classifyReach('Unterschleißheim') === 'munich', 'Unterschleißheim is now a recognised Munich-ring town');
+  check(classifyReach('Kleinstadt-am-See') === 'unknown', 'an unrecognised place with no foreign marker is unknown, not abroad');
+  check(classifyReach('Milano') === 'abroad', 'Milano names a foreign city with no country marker at all');
+  check(classifyReach('Amsterdam, Netherlands') === 'abroad', 'Amsterdam is abroad even though "Netherlands" itself is not in FOREIGN_COUNTRY_RE');
+  check(classifyReach('Wien') === 'abroad', 'Wien (Vienna) is abroad');
+  check(classifyReach('Remote - California') === 'abroad', 'a US-state-scoped remote posting is still abroad');
+  check(classifyReach('Remote, Germany') === 'remote', 'an explicit German-scoped remote posting is still remote');
+  check(classifyReach('Berlin (Hybrid)') === 'germany', 'a hybrid marker does not change Berlin out of the germany tier');
+  check(classifyReach('Erlangen') === 'home', 'Erlangen is still home');
 
   // "Remote" scoped to a foreign country is remote WITHIN that country. These
   // were scoring 4.5 — the second-best tier — and reaching the shortlist.
@@ -942,6 +1095,51 @@ function selfTest() {
   // The country lookarounds must not fire inside a word.
   check(classifyReach('Remote, Aarhus') === 'remote', '"us" inside Aarhus is not the United States');
 
+  // ── E1: three defects that let obvious US postings through as 'remote' or
+  // 'unknown' instead of 'abroad' ──
+  //
+  // (a) FOREIGN_REGION_RE's punctuated branch was built from `'\s?'` inside a
+  // plain string, not a regex literal — an unescaped `\s` in a JS string is
+  // not a recognized escape sequence, so the backslash was silently dropped
+  // and the pattern text carried "optional literal s" instead of "optional
+  // whitespace". ", VA" (comma-SPACE-VA, the form real ATS cells use) never
+  // matched; only the space-free "US-TX-REMOTE" form did.
+  check(classifyReach('Ashburn, VA (Hybrid)') === 'abroad', '", VA" now matches now that \\s? is a real escape, not "unknown"');
+  check(classifyReach('Emeryville, CA (Hybrid)') === 'abroad', '", CA" now matches; Emeryville is also in FOREIGN_CITY_RE as backup');
+  // A state code LEADING a remote/hybrid cell ("CA-Remote", "NJ - Remote",
+  // "TX - Hybrid") needed its own anchored branch — the punctuated branch only
+  // ever looked for a separator BEFORE the code, and there is none at the
+  // very start of a string.
+  check(classifyReach('CA-Remote') === 'abroad', '"CA-Remote" — a leading state code with no space — is abroad, not remote');
+  check(classifyReach('NJ - Remote') === 'abroad', '"NJ - Remote" — a leading state code with spaces — is abroad, not remote');
+  check(classifyReach('TX - Hybrid') === 'abroad', '"TX - Hybrid" — a leading state code with no remote marker at all — is abroad');
+  // (b) The remote branch's abroad guard only ever checked FOREIGN_COUNTRY_RE
+  // and FOREIGN_REGION_RE, so a foreign-scoped remote posting that named a
+  // supra-national region, a US idiom, or a bare US city sailed through as
+  // 'remote' because nothing there matches a country or a US state.
+  check(classifyReach('Remote - Nationwide') === 'abroad', '"Nationwide" is a US-only remote idiom, not a German one');
+  check(classifyReach('Nationwide Remote') === 'abroad', 'word order must not matter for the same idiom');
+  check(classifyReach('(North America) Remote') === 'abroad', 'a supra-national remote scope is abroad, not remote');
+  check(classifyReach('San Antonio Home Office I') === 'abroad', 'a US city with no country/region/scope marker at all is abroad, not remote');
+  // (c) FOREIGN_CITY_RE was missing common US metros that show up in ATS
+  // cells with no state or country marker alongside them at all.
+  check(classifyReach('Atlanta - Hybrid') === 'abroad', 'Atlanta is now a recognised foreign city');
+  check(classifyReach('Rosemont IL') === 'abroad', 'Rosemont is now a recognised foreign city (the trailing "IL" never reached FOREIGN_REGION_RE — it only leads or follows a separator)');
+  // Must-stay-remote / must-stay-German cases, unaffected by (a)-(c) above.
+  check(classifyReach('Remote · EMEA') === 'remote', 'EMEA includes Europe and stays reachable');
+  check(classifyReach('Remote Europe') === 'remote', '"Europe" is not a foreign-scope marker');
+  check(classifyReach('DE-Germany-Home Office') === 'remote', '"Germany" wins regardless of the leading "DE"');
+  check(classifyReach('Deutschland Remote') === 'remote', 'an explicit Deutschland-scoped remote posting is still remote');
+  // "DE" is the ISO country code Germany's own ATS listings use, and nothing
+  // can tell it apart from Delaware by itself — so "de" is deliberately
+  // excluded from the new leading-state-code branch. Without the exclusion,
+  // this would misfire as 'abroad' for every DE-market posting using the
+  // country code instead of the country name.
+  check(classifyReach('DE Remote') === 'remote', '"DE" leading a cell is Deutschland, not Delaware — must not become abroad');
+  check(classifyReach('Milano') === 'abroad', 'Milano names a foreign city with no country marker at all (unaffected regression check)');
+  check(classifyReach('Kleinstadt-am-See') === 'unknown', 'an unrecognised place with no foreign marker is still unknown, not abroad (unaffected regression check)');
+  check(classifyReach('Erlangen') === 'home', 'Erlangen is still home (unaffected regression check)');
+
   // With no location at all, a generic technical word must not earn a shortlist
   // slot — otherwise every location-less row in a full-dataset ATS sweep does.
   check(rankEntry({ title: 'Substation Electrical Engineer Intern - Grid', location: '' }).bucket === 'maybe',
@@ -950,6 +1148,14 @@ function selfTest() {
     'unknown location + a real domain signal still reaches the shortlist (the DLR case)');
   check(rankEntry({ title: 'Werkstudent Software Development Edge AI (m/w/d)', location: 'Erlangen' }).bucket === 'look',
     'a known home location is unaffected by the domain gate');
+
+  // ── D1(c): an unrecognised-town 'unknown' reach flows through the fit stage
+  // exactly like an empty-cell 'unknown' — never hard-dropped at stage 1, but
+  // still subject to the same domain-signal gate as before.
+  check(rankEntry({ title: 'Werkstudent Data Science', location: 'Kleinstadt-am-See' }).bucket !== 'skip',
+    'an unrecognised-town student data/AI posting is not hard-dropped, and reaches the fit stage');
+  check(rankEntry({ title: 'Werkstudent Translation & Localization', location: 'Kleinstadt-am-See' }).bucket === 'skip',
+    'an unrecognised-town non-technical posting is still dropped by the fit stage');
 
   // ── D1: the term whose absence dropped both Healthineers thesis postings ──
   check(TECH_RE.test('Masterarbeit: User Experience in a Medical Remote Desktop Application (Agentic Coding Project)'), 'TECH_RE matches "Agentic"');
