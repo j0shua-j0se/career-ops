@@ -160,3 +160,37 @@ try {
 } catch (e) {
   fail(`doctor CONFIRM: placeholder tests crashed: ${e.message}`);
 }
+
+// Regression: doctor.mjs used to parse and validate process.argv at MODULE
+// SCOPE (outside the entry-point guard above), so importing it in-process
+// inherited whatever argv the HOST process was started with. test-all.mjs's
+// own flags (`--quick`, `--only <substring>`) are not in doctor.mjs's
+// KNOWN_FLAGS, so validateFlags() rejected them and called process.exit(1)
+// straight out from under the whole suite — `node test-all.mjs --quick`
+// crashed before the summary printer ever ran. Simulate that host argv here directly
+// (rather than relying on however test-all.mjs itself happens to be
+// invoked) so this stays red if the module-scope parsing ever comes back.
+// The cache-busting query string forces a fresh module evaluation — Node
+// caches ES module imports by resolved URL, and the import above already
+// evaluated doctor.mjs once in this process.
+try {
+  const foreignFlag = '--quick';
+  process.argv.push(foreignFlag);
+  try {
+    const mod2 = await import(`${pathToFileURL(join(ROOT, 'doctor.mjs')).href}?bust=${Date.now()}-${Math.random()}`);
+    if (typeof mod2.findConfirmFields === 'function') {
+      pass('importing doctor.mjs with a foreign host flag (--quick) on process.argv does not throw');
+    } else {
+      fail('doctor.mjs re-imported under a foreign argv flag but findConfirmFields is missing');
+    }
+  } finally {
+    // Restore argv exactly — pop() undoes the single push() above regardless
+    // of what else ran in between.
+    const popped = process.argv.pop();
+    if (popped !== foreignFlag) {
+      fail(`process.argv restoration mismatch: expected to pop "${foreignFlag}", got ${JSON.stringify(popped)}`);
+    }
+  }
+} catch (e) {
+  fail(`doctor.mjs re-import under a foreign argv flag crashed: ${e.message}`);
+}

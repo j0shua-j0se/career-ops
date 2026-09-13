@@ -38,7 +38,7 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, renameSync } from 'fs';
 import { dirname, join } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { spawnSync } from 'child_process';
 import * as yaml from 'js-yaml';
 
@@ -495,4 +495,13 @@ function main() {
   }
 }
 
-main();
+// Direct-invocation guard: tests/run-all.test.mjs statically imports SYNC_STEPS
+// from this file, and test-all.mjs runs discovered suites IN-PROCESS. Without
+// this guard, importing run-all.mjs made main() read the HOST process's own
+// argv (e.g. `--quick` from `node test-all.mjs --quick`), print
+// `run-all: unknown command "--quick".`, and process.exit(1) — killing
+// test-all mid-run before finish() could print its summary. Same bug class
+// and same fix as doctor.mjs (see its matching guard).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

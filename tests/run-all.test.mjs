@@ -18,11 +18,65 @@ import { execFileSync } from 'child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { pathToFileURL } from 'url';
 import { SYNC_STEPS } from '../run-all.mjs';
 
 console.log('\nUtility - run-all (end-to-end run driver)');
 
 const SCRIPT = join(ROOT, 'run-all.mjs');
+
+// ── direct-invocation guard (#run-all-entry-guard) ──────────────────────────
+// This suite (and test-all.mjs's discovered-suite runner) statically imports
+// SYNC_STEPS from run-all.mjs, and test-all.mjs runs discovered suites
+// IN-PROCESS. Before the entry-point guard existed, importing run-all.mjs
+// made its unconditional `main()` call read the HOST process's own argv — so
+// `node test-all.mjs --quick` made run-all's main() see "--quick", print
+// `run-all: unknown command "--quick".`, and process.exit(1), killing
+// test-all mid-run before the global summary could print. Reproduced live
+// pre-fix: `node test-all.mjs --quick` exited 1 with exactly that message.
+//
+// Exercised via a child process (not an in-process import) because the old,
+// buggy behavior calls process.exit() — which would kill this very test
+// process if run in-process here.
+{
+  const foreignArgv = [
+    `process.argv[1] = ${JSON.stringify(join(ROOT, 'test-all.mjs'))};`,
+    `process.argv.push('--quick');`,
+    `import(${JSON.stringify(pathToFileURL(SCRIPT).href)})`,
+    `  .then(() => { console.log('IMPORT_OK'); })`,
+    `  .catch((e) => { console.error('IMPORT_FAILED: ' + e.message); process.exitCode = 1; });`,
+  ].join('\n');
+
+  let guardResult;
+  try {
+    const stdout = execFileSync(NODE, ['-e', foreignArgv], {
+      cwd: ROOT, encoding: 'utf-8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    guardResult = { code: 0, stdout, stderr: '' };
+  } catch (e) {
+    guardResult = {
+      code: e?.status ?? null,
+      stdout: e?.stdout == null ? '' : String(e.stdout),
+      stderr: e?.stderr == null ? '' : String(e.stderr),
+    };
+  }
+
+  if (guardResult.code === 0) {
+    pass('importing run-all.mjs with a foreign --quick flag on process.argv does not exit the host process');
+  } else {
+    fail(`importing run-all.mjs with a foreign argv exited ${guardResult.code} — the entry-point guard regressed`);
+  }
+  if (/IMPORT_OK/.test(guardResult.stdout)) {
+    pass('the import resolves normally (main() did not run and did not throw)');
+  } else {
+    fail(`import did not report IMPORT_OK — stdout: ${guardResult.stdout.slice(0, 200)} stderr: ${guardResult.stderr.slice(0, 200)}`);
+  }
+  if (!/unknown command/.test(guardResult.stdout + guardResult.stderr)) {
+    pass('no "unknown command" output leaks from an import-time argv collision');
+  } else {
+    fail(`unexpected "unknown command" output: ${(guardResult.stdout + guardResult.stderr).slice(0, 300)}`);
+  }
+}
 
 const TRACKER = `# Applications Tracker
 

@@ -18,7 +18,6 @@ import { validateFlags } from './lib/cli-flags.mjs';
 import { geminiNodeFloor } from './lib/gemini-node-floor.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const argv = process.argv.slice(2);
 
 // CLIs the doctor recognises.
 const VALID_CLIS = ['claude', 'codex', 'opencode', 'antigravity', 'grok', 'qwen', 'kimi', 'copilot', 'gemini'];
@@ -43,18 +42,23 @@ const USAGE = `Usage:
 
 CLIs: ${VALID_CLIS.join(', ')}`;
 
-validateFlags(argv, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS });
-
-const targetIdx = argv.indexOf('--target');
-const projectRoot =
-  targetIdx !== -1 && argv[targetIdx + 1] ? argv[targetIdx + 1] : __dirname;
-const JSON_OUT = argv.includes('--json');
+// Parsed CLI state. Left at these import-safe defaults until the entry-point
+// guard at the bottom of this file populates them — importing doctor.mjs (as
+// tests/doctor-confirm-fields.test.mjs and friends do, in-process, to reach
+// findConfirmFields()) must never touch process.argv or call validateFlags():
+// the host process (test-all.mjs) has its OWN flags (--quick, --only <x>)
+// that doctor.mjs does not know, and validateFlags() would reject them and
+// process.exit(1) out from under the whole test run (#2775 regression). Every
+// module-scope function below that reads projectRoot/cliFlag/etc. is only
+// ever invoked from main()/onboardingState(), both of which run exclusively
+// inside the guard, after real values have been assigned.
+let argv = [];
+let projectRoot = __dirname;
+let JSON_OUT = false;
 // --strict adds a live ATS-slug probe of portals.yml (network). Opt-in so the
 // default `npm run doctor` stays fast and fully offline.
-const STRICT = argv.includes('--strict');
-
-const cliIdx = argv.indexOf('--cli');
-const cliFlag = cliIdx !== -1 ? argv[cliIdx + 1] : null;
+let STRICT = false;
+let cliFlag = null;
 
 // ANSI colors (only on TTY)
 const isTTY = process.stdout.isTTY;
@@ -719,6 +723,17 @@ function onboardingState(root) {
 // process.exit(0) terminated test-all before finish() could print its summary, so
 // the suite reported nothing at all and still exited 0.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  argv = process.argv.slice(2);
+  validateFlags(argv, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS });
+
+  const targetIdx = argv.indexOf('--target');
+  projectRoot = targetIdx !== -1 && argv[targetIdx + 1] ? argv[targetIdx + 1] : __dirname;
+  JSON_OUT = argv.includes('--json');
+  STRICT = argv.includes('--strict');
+
+  const cliIdx = argv.indexOf('--cli');
+  cliFlag = cliIdx !== -1 ? argv[cliIdx + 1] : null;
+
   if (JSON_OUT) {
     console.log(JSON.stringify(onboardingState(projectRoot)));
     process.exit(0);
