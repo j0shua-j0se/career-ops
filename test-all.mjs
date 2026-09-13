@@ -173,7 +173,10 @@ async function runDiscovered(filter = null) {
     // finish() prints the global summary and exits — inside a discovered suite
     // it forges the verdict line and decapitates every suite sorting after it,
     // sailing past the process.exit() check above (the exit lives in helpers).
-    if (/\bfinish\s*\(\s*\)/.test(src)) {
+    // Same stripCommentLines() treatment as the process.exit() guard above: a
+    // suite that only MENTIONS finish() in a comment (e.g. documenting why it
+    // doesn't call it) must not be flagged.
+    if (/\bfinish\s*\(\s*\)/.test(stripCommentLines(src))) {
       fail(`${f.slice(ROOT.length + 1)} calls finish() — only test-all.mjs may print the global summary; discovered suites use pass/fail and return`);
       continue;
     }
