@@ -54,11 +54,30 @@ Defaults in `loop-core.mjs`, overridable per user under `loop:` in
 | `minScore` | 3.8 | the bar, on the same 0–5 scale as `modes/triage.md` |
 | `maxWaves` | 6 | hard cap on discovery waves |
 | `maxBarrenWaves` | 2 | circuit breaker: consecutive fully-scored waves yielding nothing |
-| `maxScored` | 120 | token-budget proxy — total postings triaged in one run |
+| `maxScored` | 120 | token-budget proxy — postings that spent an **LLM** triage call in one run |
 | `scoreBatch` | 12 | postings handed to the agent per scoring turn |
 
 A non-finite or non-positive override is ignored rather than applied, so a typo
 in `profile.yml` cannot uncap a budget.
+
+**`maxScored` counts only paid triage calls.** A candidate the zero-token
+prefilter rejects for free (`prefilterReject()` in `scan-loop.mjs`, marked
+`prefiltered: true`) — or one an agent rejects by hand through `record` with a
+reason starting `"zero-token prefilter"` — never touched the budget, because it
+never reached the agent. `summarize()` in `loop-core.mjs` reports both
+`scored` (everything with a verdict, free rejections included, kept for
+backward compatibility) and `llmScored` (the subset that actually spent a
+call); `haltReason()` checks `llmScored` against `maxScored`.
+
+Measured 2026-09-14: a run halted after ONE wave with "183 candidate(s)
+triaged (loop.maxScored = 120)". Of those 183, 134 were free prefilter
+rejections and only 49 spent an LLM call — the budget was starving waves 2+
+for no cost reason, because it was counting work that cost nothing. Under the
+corrected accounting that same wave (49 `llmScored` against a 120 budget)
+would not halt at all; the loop now only stops when `llmScored` itself
+reaches 120, with a message that names both counts, e.g. `"scoring budget
+spent — 120 LLM-triaged candidate(s) (loop.maxScored = 120); 134 more
+rejected by the zero-token prefilter"`.
 
 The loop halts — honestly short, with `halted_reason` recorded and printed —
 when any budget is spent. **It never lowers `minScore` to reach `target`.** A

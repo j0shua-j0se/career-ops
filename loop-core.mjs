@@ -407,18 +407,42 @@ export function barrenWaveStreak(state) {
   return streak;
 }
 
+/**
+ * A candidate that never cost an LLM triage call: either `prefilterReject()`
+ * marked it (`prefiltered === true`), or its recorded reason starts with the
+ * same "zero-token prefilter" text that function writes — which is what an
+ * older `loop-state.json` (written before the `prefiltered` flag existed) or
+ * an agent applying the same zero-token rule by hand through `record` leaves
+ * behind instead. Reason-prefix matching is the fallback, not the primary
+ * signal, so a state file from before this flag existed still loads and still
+ * counts its free rejections as free.
+ */
+function isFreeTriage(c) {
+  return c?.prefiltered === true || /^zero-token prefilter/i.test(String(c?.reason ?? ''));
+}
+
 /** Roll-up used by every decision and every status print. */
 export function summarize(state) {
   const config = { ...DEFAULT_LOOP_CONFIG, ...(state?.config || {}) };
   const candidates = allCandidates(state);
   const qualified = candidates.filter((c) => c.verdict === 'qualified').length;
   const unscored = candidates.filter((c) => c.verdict === 'pending').length;
+  const scored = candidates.length - unscored;
+  // Only candidates scored so far can be free rejections — a pending one has
+  // no reason yet, so this can never overcount against `scored`.
+  const freeRejected = candidates.filter((c) => c.verdict !== 'pending' && isFreeTriage(c)).length;
   return {
     target: config.target,
     minScore: config.minScore,
     waves: state?.waves?.length ?? 0,
     discovered: candidates.length,
-    scored: candidates.length - unscored,
+    // `scored`: every candidate with a verdict, free rejections included —
+    // kept for backward compatibility with anything reading this field.
+    scored,
+    // `llmScored`: the subset that actually spent a triage call. This is what
+    // `loop.maxScored` budgets — see `haltReason()`.
+    llmScored: scored - freeRejected,
+    freeRejected,
     unscored,
     qualified,
     rejected: candidates.filter((c) => c.verdict === 'rejected').length,
@@ -533,8 +557,16 @@ export function classifyHaltReason(reason) {
 }
 
 function haltReason(state, config, stats) {
-  if (stats.scored >= config.maxScored) {
-    return `scoring budget spent — ${stats.scored} candidate(s) triaged (loop.maxScored = ${config.maxScored})`;
+  // `maxScored` caps PAID triage calls. A candidate the zero-token prefilter
+  // rejected for free (`prefilterReject()`, or an agent applying the same
+  // rule by hand through `record`) never touched the budget — see
+  // `isFreeTriage()`. Measured 2026-09-14: a run halted after one wave with
+  // "183 candidate(s) triaged (loop.maxScored = 120)", but 134 of those were
+  // free prefilter rejections and only 49 spent an LLM call; the budget was
+  // starving later waves for no cost reason.
+  if (stats.llmScored >= config.maxScored) {
+    return `scoring budget spent — ${stats.llmScored} LLM-triaged candidate(s) (loop.maxScored = ${config.maxScored}); `
+      + `${stats.freeRejected} more rejected by the zero-token prefilter`;
   }
   if (stats.barrenWaves >= config.maxBarrenWaves) {
     return `circuit breaker — ${stats.barrenWaves} consecutive wave(s) produced no candidate at or above ${config.minScore}`;

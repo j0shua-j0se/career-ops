@@ -263,6 +263,91 @@ eq(parseTriageLine(''), null, 'an empty line parses to null');
   eq(d.action, 'halt', 'the scoring budget halts the loop');
   check(/scoring budget/.test(d.reason), 'the halt reason names the scoring budget');
 }
+// ── maxScored counts only LLM-triaged candidates, not free prefilter
+// rejections ─────────────────────────────────────────────────────────────
+//
+// Measured 2026-09-14: a run halted after ONE wave with "183 candidate(s)
+// triaged (loop.maxScored = 120)" — 134 of those were zero-token prefilter
+// rejections (prefilterReject() in scan-loop.mjs) and only 49 spent an LLM
+// triage call. The budget is meant to cap PAID calls; it was counting free
+// ones too and starving later waves for no cost reason.
+{
+  // (a) 134 free prefilter rejections + 49 LLM-scored, maxScored 120 → the
+  // loop is nowhere near its real budget and keeps going.
+  const s = stateWith({ target: 10, maxScored: 120, maxBarrenWaves: 9, maxWaves: 9 }, 1);
+  ingestOffers(s, Array.from({ length: 134 }, (_, i) => ({ url: `https://free.example.com/${i}` })), 1);
+  for (const c of allCandidates(s)) {
+    c.verdict = 'rejected';
+    c.score = 1.0;
+    c.reason = 'zero-token prefilter (title + location only): no match';
+    c.prefiltered = true;
+  }
+  // Ingest + score the LLM batch directly with explicit keys (rather than the
+  // `seed()` helper), because `seed()` matches its scores onto candidates by
+  // filtering `wave === 1` and indexing positionally — which would collide
+  // with the 134 free rows already sitting in wave 1 above.
+  const llmOffers = Array.from({ length: 49 }, (_, i) => ({ url: `https://llm.example.com/${i}` }));
+  ingestOffers(s, llmOffers, 1);
+  recordScores(s, llmOffers.map((o) => ({ key: candidateKey(o.url), score: 2.0 })));
+
+  const stats = summarize(s);
+  eq(stats.scored, 183, 'scored counts free rejections and LLM triages together');
+  eq(stats.llmScored, 49, 'llmScored counts only the paid triage calls');
+  eq(stats.freeRejected, 134, 'freeRejected counts the zero-token prefilter rejections');
+  eq(decideNextAction(s).action, 'scan', '49/120 LLM triages is nowhere near budget — the loop is NOT halted');
+}
+{
+  // (b) 121 LLM-scored candidates, maxScored 120 → halted on the real budget.
+  const s = stateWith({ target: 10, maxScored: 120, maxBarrenWaves: 9, maxWaves: 9 }, 1);
+  seed(s, 1, Array.from({ length: 121 }, () => ({ score: 2.0 })));
+  const d = decideNextAction(s);
+  eq(d.action, 'halt', '121 LLM-triaged candidates trips the scoring budget');
+  check(/scoring budget/.test(d.reason), 'the halt reason names the scoring budget');
+}
+{
+  // (c) A candidate carrying the zero-token prefilter reason text but with NO
+  // `prefiltered` flag — the shape of an older loop-state.json written before
+  // that flag existed, or a reason an agent wrote by hand through `record`.
+  // It must still be treated as free.
+  const s = stateWith({ target: 10, maxScored: 5, maxBarrenWaves: 9, maxWaves: 9 }, 1);
+  ingestOffers(s, [{ url: 'https://e.com/legacy' }], 1);
+  const c = allCandidates(s)[0];
+  c.verdict = 'rejected';
+  c.score = 1.0;
+  c.reason = 'zero-token prefilter (title + location only): legacy row, no prefiltered flag';
+  // deliberately no c.prefiltered = true
+  const stats = summarize(s);
+  eq(stats.scored, 1, 'the legacy row counts as scored');
+  eq(stats.llmScored, 0, 'a reason-only zero-token rejection is free even without the flag');
+  eq(stats.freeRejected, 1, 'it is counted as a free rejection');
+}
+{
+  // (d) The halt message names both the LLM count and the free-rejected count.
+  const s = stateWith({ target: 10, maxScored: 3, maxBarrenWaves: 9, maxWaves: 9 }, 1);
+  ingestOffers(s, Array.from({ length: 2 }, (_, i) => ({ url: `https://free2.example.com/${i}` })), 1);
+  for (const c of allCandidates(s)) {
+    c.verdict = 'rejected';
+    c.score = 1.0;
+    c.reason = 'zero-token prefilter (title + location only): no match';
+    c.prefiltered = true;
+  }
+  const llmOffers = [
+    { url: 'https://llm2.example.com/0' },
+    { url: 'https://llm2.example.com/1' },
+    { url: 'https://llm2.example.com/2' },
+  ];
+  ingestOffers(s, llmOffers, 1);
+  recordScores(s, [
+    { key: candidateKey(llmOffers[0].url), score: 2.0 },
+    { key: candidateKey(llmOffers[1].url), score: 2.1 },
+    { key: candidateKey(llmOffers[2].url), score: 2.2 },
+  ]);
+  const d = decideNextAction(s);
+  eq(d.action, 'halt', 'budget spent by LLM triages alone (3 of them, matching maxScored)');
+  check(d.reason.includes('3 LLM-triaged candidate(s)'), 'the halt reason names the LLM-triaged count');
+  check(d.reason.includes('2 more rejected by the zero-token prefilter'), 'the halt reason names the free-rejected count');
+}
+
 {
   const s = stateWith({ target: 10, maxWaves: 2, maxBarrenWaves: 9, maxScored: 999 }, 2);
   seed(s, 1, [{ score: 4.5 }]);

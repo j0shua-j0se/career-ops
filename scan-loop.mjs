@@ -614,6 +614,7 @@ function printSummary(result) {
   console.log(`  waves       ${s.waves?.length ?? s.waves ?? 0}`);
   console.log(`  discovered  ${s.discovered}`);
   console.log(`  triaged     ${s.scored}  (${s.unscored} pending)`);
+  console.log(`  llm-scored  ${s.llmScored}  (loop.maxScored budget) · ${s.freeRejected} free — zero-token prefilter`);
   console.log(`  qualified   ${s.qualified}/${s.target} at or above ${s.minScore}`);
   if (s.halted_reason) console.log(`  halted      ${s.halted_reason}`);
   if (s.next) console.log(`  next        ${s.next.action} — ${s.next.reason}`);
