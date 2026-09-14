@@ -460,34 +460,6 @@ const SYSTEM_PATHS = [
   'seed-fixture.mjs',
   'test-fixtures/',
   'upgrade-tests.mjs',
-
-  // v1.32.0 merge (#3096-era release) — new system-layer files upstream added
-  // that the coverage guard flagged as unregistered (validate-system-paths-
-  // coverage.mjs, section 5). All script/doc content, none user-owned data.
-  'LOOP.md',
-  'batch/run-worker-brief.md',
-  'build-application.mjs',
-  'check-followups-due.mjs',
-  'clean-artifacts.mjs',
-  'deadline-sweep.mjs',
-  'eures-core.mjs',
-  'followup-draft.mjs',
-  'gmail-sweep.mjs',
-  'ingest-jobs.mjs',
-  'language-loss.mjs',
-  'loop-core.mjs',
-  'modes/run.md',
-  'provider-health.mjs',
-  'referral-links.mjs',
-  'robots-gate.mjs',
-  'run-all.mjs',
-  'run-core.mjs',
-  'scan-eures.mjs',
-  'scan-loop.mjs',
-  'scan-run-health.mjs',
-  'triage-prefilter.mjs',
-  'verify-pdf-ats.mjs',
-  'websearch-plan.mjs',
 ];
 
 const BOOTSTRAP_PATHS = [
