@@ -1,6 +1,7 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 import { decodeEntities } from './_html-entities.mjs';
+import { recognizePlace } from './_place-from-slug.mjs';
 
 // Infineon provider — single-company (pattern: deutschebahn/fau — no usable
 // JSON API, so this reads the public job sitemap instead).
@@ -49,10 +50,25 @@ import { decodeEntities } from './_html-entities.mjs';
 // sometimes leave a city sitting in `title` — a wrong location silently
 // mis-filters a posting against portals.yml's location_filter, which is worse
 // than no location at all. So this provider puts the WHOLE de-slugged text in
-// `title` and leaves `location` empty, the same trade-off FAU accepted for
-// the mirror-image problem (a bare listing with no way to find more postings).
-// A `title_filter` in portals.yml still matches normally, since the location
-// words are simply extra tokens at the end of the title string.
+// `title`, the same trade-off FAU accepted for the mirror-image problem (a
+// bare listing with no way to find more postings). A `title_filter` in
+// portals.yml still matches normally, since the location words are simply
+// extra tokens at the end of the title string.
+//
+// `location` is a different story now. Position-guessing is still off the
+// table, but portals.yml's location_filter cannot penalize an EMPTY location
+// (by design — "do not penalize missing data"), so leaving it empty for
+// every slug with no fixed delimiter meant these postings sailed past the
+// filter and into LLM triage wholesale — 161 of 166 Infineon postings in one
+// 2026-09 window. parseJobUrl now also runs the de-slugged text through
+// recognizePlace (providers/_place-from-slug.mjs): not a second guessing
+// strategy, just a check against an explicit, maintained list of place names
+// (German cities, plus the foreign cities/countries actually seen on this
+// board — Singapore, Kulim, Villach, Shanghai, and so on), matched as whole
+// words wherever they sit in the text. A location is set only when the text
+// contains one of those; anything else still leaves `location` empty exactly
+// as before. Measured against the same window: 160 of 161 previously-empty
+// titles now carry a recognized location.
 
 const SITEMAP_INDEX_URL = 'https://jobs.infineon.com/careers/sitemap_index.xml?domain=infineon.com';
 const ALLOWED_HOSTS = ['jobs.infineon.com'];
@@ -96,7 +112,9 @@ export function parseLocs(xml) {
  * URL that isn't a /careers/job/{id}-{slug} posting (category pages, the bare
  * /careers landing page, or anything off-shape).
  *
- * See the module comment above for why `location` is never derived here.
+ * See the module comment above for why `location` is never derived by
+ * splitting or guessing a position — only ever by the `--` delimiter or an
+ * explicit recognizePlace match.
  * @param {string} url
  */
 export function parseJobUrl(url) {
@@ -130,14 +148,24 @@ export function parseJobUrl(url) {
   // ended in "(f/m/div)", which is a German-market convention, so roughly half
   // of these are DACH postings — the ones this search actually cares about.
   //
-  // Everything else keeps the empty location. Splitting on a single hyphen
-  // would be guessing, and a wrongly-attributed location silently mis-filters
-  // a posting, which is the failure this file exists to avoid.
+  // Everything else used to keep the empty location outright; it now falls
+  // through to recognizePlace below instead. Splitting on a single hyphen is
+  // still off the table — that would be guessing, and a wrongly-attributed
+  // location silently mis-filters a posting, which is the failure this file
+  // exists to avoid.
   const sep = slug.indexOf('--');
   const titleSlug = sep === -1 ? slug : slug.slice(0, sep);
   const locationSlug = sep === -1 ? '' : slug.slice(sep + 2);
   const title = titleSlug.replace(/-+/g, ' ').trim();
-  const location = locationSlug.replace(/-+/g, ' ').trim();
+  let location = locationSlug.replace(/-+/g, ' ').trim();
+  // The `--` split above already yielded a location for the ~11% of slugs
+  // that carry the delimiter; nothing here overrides that. For the other 89%
+  // (sep === -1, the whole de-slugged text sits in `title`), this is NOT a
+  // second attempt at guessing a split point — recognizePlace never infers a
+  // location from position. It only checks whether any word in the text is
+  // an explicitly-known place name (see providers/_place-from-slug.mjs), so
+  // a miss still leaves `location` empty exactly as before.
+  if (sep === -1) location = recognizePlace(title);
   if (!title) return null;
   return { id, title, location, url: u.href };
 }

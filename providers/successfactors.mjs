@@ -1,6 +1,7 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 import { decodeEntities } from './_html-entities.mjs';
+import { recognizePlace } from './_place-from-slug.mjs';
 
 // SAP SuccessFactors provider — Recruiting Marketing (RMK, ex-jobs2web) career
 // sites (Career Site Builder's branded job boards). These are the portals big
@@ -27,6 +28,23 @@ import { decodeEntities } from './_html-entities.mjs';
 //
 // RMK carries no posting date in the list fragment, so postedAt is always
 // omitted (consumers treat an absent date as "unknown", never as stale).
+//
+// ── Location fallback chain (added after a 2026-09 measurement) ────────────
+// portals.yml's location_filter cannot penalize an empty location (by
+// design), so every posting whose city never got recovered sailed straight
+// into LLM triage. Measured against data/scan-history.tsv on 2026-09-14: 20
+// of 25 successfactors-api postings since 2026-09-01 — mostly Fraunhofer
+// (jobs.fraunhofer.de) — carried an empty location, because cityFromSlug's
+// title-word anchor systematically misses Fraunhofer's Werkstudent*in
+// postings (the slug fuses "*in" onto the preceding word with no separator,
+// so the title's own two-word anchor never re-matches). parseTiles now tries,
+// in order: the tenant's structured city field, cityFromSlug, then
+// fraunhoferCityPlz (a structural check on the slug's own shape — a leading
+// city segment confirmed by a trailing German 5-digit PLZ, not a title
+// match), then recognizePlace (providers/_place-from-slug.mjs) over the
+// de-slugged path as a last resort. Each step only runs when every earlier
+// one found nothing, and a miss all the way down still leaves `location`
+// empty — nothing here is ever guessed or fabricated.
 //
 // ── CSB (Career Site Builder) variant ────────────────────────────────────────
 // Newer SF tenants run the Career Site Builder "unified" search (jobs2web's
@@ -152,6 +170,42 @@ export function cityFromSlug(dataUrl, title) {
     .join(' ');
 }
 
+// jobs.fraunhofer.de (and other RMK tenants that address German institutes
+// the same way) slug their job path as `/job/{City}-{rest-of-slug}-{PLZ}/{id}/`
+// — the FIRST hyphen-separated slug segment is the city, and a bare 5-digit
+// run trailing the slug (right before the `/{id}/` segment) is the German
+// postcode. Verified 2026-09-14 against real jobs.fraunhofer.de URLs:
+//   /job/Freiburg-Master's-Thesis-...-79110/1421368533/       -> Freiburg 79110
+//   /job/Kaiserslautern-Master's-Thesis-...-67663/1420710633/ -> Kaiserslautern 67663
+//   /job/Aachen-Master's-Thesis-...-52074/1398055233/         -> Aachen 52074
+//   /job/Karlsruhe-Werkstudent*in-...-76131/1397704833/       -> Karlsruhe 76131
+//
+// This exists because cityFromSlug (below) systematically misses Fraunhofer's
+// Werkstudent*in postings: it anchors on the title's own first two words
+// re-appearing in the slug, but "Werkstudent*in" slugifies to the single
+// token "Werkstudentin" (the asterisk and the following word fuse with no
+// separator), so "werkstudent" + "in" as two words never matches. That is
+// most of what Fraunhofer posts. The fix here is not a better title anchor —
+// it is a completely different, structural signal: trust the leading slug
+// segment as a city ONLY when the slug's own shape confirms it via a trailing
+// PLZ, never by matching it against the title at all.
+//
+// A slug with no trailing 5-digit run (jobs.zf.com's "Smart-Factory-Intern",
+// or "Hyderabad-AIML-Specialist-...-TG-500032" whose trailing run is a
+// 6-digit Indian PIN code, not a German PLZ) does not match — the caller
+// falls back to recognizePlace instead of trusting an unverified leading word.
+/** @param {string} pathDecoded  entity- and percent-decoded URL pathname */
+export function fraunhoferCityPlz(pathDecoded) {
+  const m = typeof pathDecoded === 'string' ? pathDecoded.match(/\/job\/([^/]+)\//) : null;
+  if (!m) return '';
+  const slug = m[1];
+  const plzM = slug.match(/-(\d{5})$/);
+  if (!plzM) return '';
+  const cityM = slug.match(/^(\p{L}[\p{L}\p{N}]*)-/u);
+  if (!cityM) return '';
+  return `${cityM[1]} ${plzM[1]}`;
+}
+
 // Parse one page fragment into raw {id, title, url, city} records.
 // Each posting renders three responsive copies (desktop/tablet/mobile) inside
 // one <li>; a single <li> per id means the top-level dedup already collapses
@@ -178,7 +232,18 @@ export function parseTiles(htmlText, jobBase) {
     // span references the same id via aria-describedby, so a looser match would
     // swallow the "City" label text too.
     const cityM = block.match(/id="[^"]*-section-city-value">([\s\S]*?)<\/div>/);
-    const city = cityM ? clean(cityM[1]) : cityFromSlug(path, title);
+    // Fallback chain, cheapest/most-specific first, each one only tried when
+    // the previous yielded nothing: the tenant's own structured city field,
+    // then cityFromSlug's title-anchored recovery, then the PLZ-verified
+    // Fraunhofer slug shape (fraunhoferCityPlz — see its comment for why
+    // cityFromSlug alone misses most Werkstudent*in postings), then a plain
+    // recognizePlace scan of the de-slugged text. Never fabricated — any
+    // link in this chain that finds nothing leaves `location` empty, exactly
+    // as it always has.
+    const city = clean(cityM ? cityM[1] : '')
+      || cityFromSlug(path, title)
+      || fraunhoferCityPlz(path)
+      || recognizePlace(path.replace(/[/_]+/g, ' ').replace(/-+/g, ' '));
     const url = /^https?:\/\//i.test(path) ? path : jobBase + (path.startsWith('/') ? path : '/' + path);
     out.push({ id, title, url, location: city });
   }

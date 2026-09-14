@@ -174,8 +174,19 @@ try {
     const jobs = await provider.fetch({ name: 'Infineon', careers_url: 'https://jobs.infineon.com/careers' }, ctx);
     if (jobs.length === 3) pass('infineon.fetch() returns only the /careers/job/ URLs, across both child sitemaps');
     else fail(`infineon.fetch() should return 3 jobs, got ${jobs.length}: ${JSON.stringify(jobs.map((j) => j.url))}`);
-    if (jobs.every((j) => j.location === '')) pass('infineon.fetch() leaves location empty rather than guessing it from the slug');
-    else fail(`infineon.fetch() should never invent a location, got ${JSON.stringify(jobs.map((j) => j.location))}`);
+    // recognizePlace now fills `location` for the two of these three fixtures
+    // that name a recognized place (bangalore/india, munich) — never guessed
+    // from position, only matched against the explicit place list. The third
+    // (xi'an) names no place recognizePlace knows, so it correctly stays empty.
+    const byTitle = Object.fromEntries(jobs.map((j) => [j.title, j.location]));
+    const bangaloreLoc = byTitle['staff specialist marketing bangalore india'];
+    const munichLoc = byTitle['senior staff engineer soc implementation munich'];
+    const xianLoc = byTitle['staff engineer field application engineering xi an 西安'];
+    if (bangaloreLoc === 'Bangalore, India' && munichLoc === 'Munich' && xianLoc === '') {
+      pass('infineon.fetch() recognizes a place in the de-slugged text when the `--` delimiter is absent, and leaves it empty when nothing is recognized');
+    } else {
+      fail(`infineon.fetch() recognizePlace fallback wrong: ${JSON.stringify(byUrl)}`);
+    }
     if (jobs.every((j) => j.company === 'Infineon')) pass('infineon.fetch() stamps company from entry.name');
     else fail(`infineon.fetch() company wrong: ${JSON.stringify(jobs.map((j) => j.company))}`);
     if (jobs.every((j) => j.postedAt === undefined)) pass('infineon.fetch() never emits postedAt (lastmod is not a publication date)');
@@ -323,15 +334,28 @@ try {
     fail(`double-hyphen split wrong: ${JSON.stringify(withSep)}`);
   }
 
-  // No delimiter — the conservative path. The location is genuinely
-  // unrecoverable here ("...-marketing-bangalore-india-" could split before
-  // "bangalore" or before "india"), so it stays empty and the whole readable
-  // string stays in the title where location_filter can still read it.
+  // No delimiter — position-guessing is still off the table ("...-marketing-
+  // bangalore-india-" could split before "bangalore" or before "india", and
+  // parseJobUrl never picks one), but recognizePlace now recognizes both
+  // "bangalore" and "india" as whole words anywhere in the text, so the
+  // location is recovered without ever choosing a split point. The whole
+  // readable string still stays in the title too, where title_filter can
+  // read it exactly as before.
   const noSep = parseJobUrl('https://jobs.infineon.com/careers/job/563808969260056-staff-specialist-marketing-bangalore-india-');
-  if (noSep && noSep.location === '' && noSep.title === 'staff specialist marketing bangalore india') {
-    pass('parseJobUrl leaves location empty when the slug has no delimiter');
+  if (noSep && noSep.location === 'Bangalore, India' && noSep.title === 'staff specialist marketing bangalore india') {
+    pass('parseJobUrl recognizes a place in the de-slugged text when the slug has no delimiter');
   } else {
     fail(`no-delimiter case wrong: ${JSON.stringify(noSep)}`);
+  }
+
+  // Genuinely no recognizable place (a real Infineon posting title, verified
+  // against data/scan-history.tsv 2026-09-14) — recognizePlace must not
+  // invent one, so location stays empty exactly as it always has.
+  const noPlace = parseJobUrl('https://jobs.infineon.com/careers/job/563808971899999-internship-environmental-health-and-safety');
+  if (noPlace && noPlace.location === '' && noPlace.title === 'internship environmental health and safety') {
+    pass('parseJobUrl leaves location empty when no delimiter AND no recognized place exist');
+  } else {
+    fail(`no-place case wrong: ${JSON.stringify(noPlace)}`);
   }
 
   // A city with no country still counts — 17 postings end at "--munich".
@@ -365,10 +389,52 @@ try {
   // leading-noise rule the real board does exercise. Keeping the posting with
   // whatever readable text exists is the conservative behaviour: it can be
   // filtered, whereas a dropped posting cannot be recovered.
+  //
+  // location is no longer '' here: with no `--` delimiter recognized (the
+  // leading one is consumed as id-slug noise, same as before), recognizePlace
+  // runs over the surviving text "munich" and recognizes it.
   const noTitle = parseJobUrl('https://jobs.infineon.com/careers/job/123--munich');
-  if (noTitle && noTitle.title === 'munich' && noTitle.location === '') {
-    pass('parseJobUrl treats a double-dash right after the id as noise, not a delimiter');
+  if (noTitle && noTitle.title === 'munich' && noTitle.location === 'Munich') {
+    pass('parseJobUrl treats a double-dash right after the id as noise, not a delimiter, and still recognizes the surviving text as a place');
   } else {
     fail(`leading-double-dash case wrong: ${JSON.stringify(noTitle)}`);
   }
+}
+
+// ── recognizePlace fallback — real de-slugged titles from data/scan-
+// history.tsv (rows since 2026-09-01 with an empty `location`, verified
+// 2026-09-14). None of these carry a `--` delimiter in the live sitemap —
+// they are exactly the 89% that used to always stay location-less. Mix of
+// foreign cities/countries, German cities, and genuinely no-place titles.
+{
+  const { parseJobUrl } = await import(pathToFileURL(join(ROOT, 'providers/infineon.mjs')).href);
+  let nextId = 900000000000100;
+  const slugUrl = (title) => `https://jobs.infineon.com/careers/job/${nextId++}-${title.replace(/\s+/g, '-')}`;
+
+  const cases = [
+    ['ai ml specialist munich', 'Munich'],
+    ['industrial trainee maintenance 2 kulim', 'Kulim'],
+    ['industrial trainee unit process engineering preassembly kulim malaysia', 'Kulim, Malaysia'],
+    ['internship application engineering singapore', 'Singapore'],
+    ['internship customer logistics management penang', 'Penang'],
+    ['internship memory controller verification hanoi vietnam', 'Hanoi, Vietnam'],
+    ['industriepraktikum operational technology und cyber security villach', 'Villach'],
+    ['bachelor thesis artificial intelligence in microcontroller villach austria', 'Villach, Austria'],
+    ['werkstudent in opc site planning regensburg', 'Regensburg'],
+    ['duales studium kuenstliche intelligenz data science 2027 regensburg germany', 'Regensburg, Germany'],
+    ['internship facility management mechanical engineer samut prakan thailand', 'Samut Prakan, Thailand'],
+    ['master thesis in test engineering padua padova', 'Padua'],
+    // No recognizable place at all — must stay empty, never guessed.
+    ['internship environmental health and safety', ''],
+    ['pool position praktika werkstudententaetigkeiten und abschlussarbeiten am standort warstein warstein germany', 'Warstein, Germany'],
+  ];
+  let allOk = true;
+  for (const [title, expected] of cases) {
+    const parsed = parseJobUrl(slugUrl(title));
+    if (!parsed || parsed.location !== expected) {
+      allOk = false;
+      fail(`recognizePlace fallback wrong for ${JSON.stringify(title)}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(parsed && parsed.location)}`);
+    }
+  }
+  if (allOk) pass(`infineon.parseJobUrl() recognizePlace fallback correct across ${cases.length} real de-slugged titles (foreign, German, and no-place)`);
 }

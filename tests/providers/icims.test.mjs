@@ -333,3 +333,23 @@ No remote/telework allowed</span>
   if (job.location === '') pass('enrichDate leaves location empty when jobLocation is absent');
   else fail(`location: ${job.location}`);
 }
+
+// ── recognizePlace title fallback — last resort after JSON-LD carries no
+// jobLocation. Real icims-full titles (data/scan-history.tsv, verified
+// 2026-09-14) never name a place — iCIMS titles are job titles, not slugs —
+// so the fallback should almost always stay silent. One synthetic case
+// proves it does fire when a title genuinely names a recognized place.
+{
+  const detail = `<script type="application/ld+json">{"@type":"JobPosting","datePosted":"2026-07-17"}</script>`;
+  for (const title of ['Collections Data Scientist', 'Mechanical Engineering Intern - Nuclear (Summer 2027)', 'Security Engineer, AI']) {
+    const job = { title, url: `${ORIGIN}/jobs/1234/x/job`, company: 'acmefreight', location: '' };
+    await icims.enrichDate(job, { fetchText: async () => detail });
+    if (job.location === '') pass(`enrichDate leaves location empty for real no-place iCIMS title ${JSON.stringify(title)}`);
+    else fail(`enrichDate should not invent a location for ${JSON.stringify(title)}, got ${JSON.stringify(job.location)}`);
+  }
+
+  const munichJob = { title: 'Software Engineer - Munich', url: `${ORIGIN}/jobs/1234/x/job`, company: 'acmefreight', location: '' };
+  await icims.enrichDate(munichJob, { fetchText: async () => detail });
+  if (munichJob.location === 'Munich') pass('enrichDate recognizes a place named in the title when JSON-LD carries no jobLocation');
+  else fail(`enrichDate title fallback wrong: ${JSON.stringify(munichJob.location)}`);
+}

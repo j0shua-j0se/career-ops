@@ -9,7 +9,7 @@ console.log('\nProvider — successfactors (SAP RMK tile parser)');
 try {
   const successfactorsModule = await import(pathToFileURL(join(ROOT, 'providers/successfactors.mjs')).href);
   const sf = successfactorsModule.default;
-  const { parseTiles, cityFromSlug, resolveConfig } = successfactorsModule;
+  const { parseTiles, cityFromSlug, resolveConfig, fraunhoferCityPlz } = successfactorsModule;
 
   if (sf.id === 'successfactors') pass('successfactors.id is "successfactors"');
   else fail(`successfactors.id is ${JSON.stringify(sf.id)}`);
@@ -112,6 +112,70 @@ try {
     pass('cityFromSlug handles accented (unicode) titles');
   } else {
     fail(`cityFromSlug accented wrong: ${cityFromSlug('/job/Massy-Ing%C3%A9nieur-Commercial-91743/1351400755/', 'Ingénieur Commercial')}`);
+  }
+
+  // fraunhoferCityPlz — real jobs.fraunhofer.de / jobs.zf.com URLs (from
+  // data/scan-history.tsv, verified 2026-09-14). cityFromSlug misses all of
+  // these: their titles carry a Werkstudent*in-style gendered suffix that
+  // slugifies onto the preceding word with no separator ("Werkstudent*in" ->
+  // "Werkstudentin"), so the title's own two-word anchor never re-matches.
+  const fraunhoferCases = [
+    ["/job/Freiburg-Master's-Thesis-Bimetallic-Catalysts-for-Hydrogen-Production-from-Ammonia-79110/1421368533/", 'Freiburg 79110'],
+    ["/job/Kaiserslautern-Master's-Thesis-Valuation-methods-for-pension-products-during-the-retirement-phase-67663/1420710633/", 'Kaiserslautern 67663'],
+    ['/job/Aachen-Werkstudentin-Ethical-Hacking-52074/1398055233/', 'Aachen 52074'],
+    ['/job/Karlsruhe-Werkstudentin-im-Bereich-Ethical-Hacking-mit-Python-Feature-Entwicklung-76131/1397704833/', 'Karlsruhe 76131'],
+  ];
+  let fraunhoferOk = true;
+  for (const [path, expected] of fraunhoferCases) {
+    const got = fraunhoferCityPlz(path);
+    if (got !== expected) {
+      fraunhoferOk = false;
+      fail(`fraunhoferCityPlz wrong for ${path}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(got)}`);
+    }
+  }
+  if (fraunhoferOk) pass('fraunhoferCityPlz derives "{City} {PLZ}" from real Fraunhofer URLs (leading slug segment + trailing German 5-digit postcode)');
+
+  // No trailing 5-digit run -> must not guess a city from the leading word.
+  if (fraunhoferCityPlz('/job/Smart-Factory-Intern/1413949633/') === '') {
+    pass('fraunhoferCityPlz returns empty when the slug carries no trailing PLZ (jobs.zf.com, genuinely no location)');
+  } else {
+    fail(`fraunhoferCityPlz should be empty for a PLZ-less slug, got ${JSON.stringify(fraunhoferCityPlz('/job/Smart-Factory-Intern/1413949633/'))}`);
+  }
+  // A trailing 6-digit run (an Indian PIN code, not a German postcode) must
+  // not be mistaken for a 5-digit PLZ — real ZF Hyderabad posting.
+  if (fraunhoferCityPlz('/job/Hyderabad-AIML-Specialist-Agentic-AI-&-Generative-AI-TG-500032/1418952533/') === '') {
+    pass('fraunhoferCityPlz rejects a 6-digit trailing run (Indian PIN code, not a German PLZ)');
+  } else {
+    fail('fraunhoferCityPlz should reject a 6-digit trailing run');
+  }
+
+  // parseTiles end-to-end: Fraunhofer-shaped tile with NO city div (real
+  // markup — Fraunhofer's tiles render no section-city-value field at all)
+  // and a Werkstudent*in title that defeats cityFromSlug, falls through to
+  // fraunhoferCityPlz; a ZF tile with neither a city div, a PLZ, nor a
+  // recognizable slug city falls through every tier and stays empty.
+  {
+    const ffJobBase = 'https://jobs.fraunhofer.de';
+    const ffFragment = `
+      <ul>
+        <li class="job-tile job-id-444" data-url="/job/Karlsruhe-Werkstudentin-im-Bereich-Ethical-Hacking-76131/444/">
+          <a class="jobTitle-link" href="/x">Werkstudent*in im Bereich Ethical Hacking</a>
+        </li>
+        <li class="job-tile job-id-555" data-url="/job/Hyderabad-AIML-Specialist-TG-500032/555/">
+          <a class="jobTitle-link" href="/x">AI/ML Specialist</a>
+        </li>
+        <li class="job-tile job-id-666" data-url="/job/Smart-Factory-Intern/666/">
+          <a class="jobTitle-link" href="/x">Smart Factory Intern</a>
+        </li>
+      </ul>`;
+    const ffParsed = parseTiles(ffFragment, ffJobBase);
+    const byId = Object.fromEntries(ffParsed.map((j) => [j.id, j.location]));
+    if (byId['444'] === 'Karlsruhe 76131') pass('parseTiles falls back to fraunhoferCityPlz when cityFromSlug misses a Werkstudent*in title');
+    else fail(`parseTiles fraunhoferCityPlz fallback wrong: ${JSON.stringify(byId['444'])}`);
+    if (byId['555'] === 'Hyderabad') pass('parseTiles falls back to recognizePlace when neither a city div, cityFromSlug, nor a PLZ is available');
+    else fail(`parseTiles recognizePlace fallback wrong: ${JSON.stringify(byId['555'])}`);
+    if (byId['666'] === '') pass('parseTiles leaves location empty when nothing in the whole fallback chain recognizes a place');
+    else fail(`parseTiles should stay empty for a genuinely place-less tile, got ${JSON.stringify(byId['666'])}`);
   }
 
   // parseTiles — a compact fragment covering the three things that bit during

@@ -14,6 +14,7 @@
 
 import { BROWSER_LIKE_USER_AGENT } from './_http.mjs';
 import { decodeEntities } from './_html-entities.mjs';
+import { recognizePlace } from './_place-from-slug.mjs';
 
 // ~20 postings/page → 30 pages covers 600 postings; tenants bigger than that
 // are rare on iCIMS and a reverse scan only needs the fresh slice anyway.
@@ -191,7 +192,24 @@ export default {
     if (!Number.isNaN(ts)) job.postedAt = ts;
     if (!String(job.location || '').trim() || /^n\/?a$/i.test(String(job.location).trim())) {
       const loc = pickLocation(nodes);
-      if (loc) job.location = loc;
+      if (loc) {
+        job.location = loc;
+      } else {
+        // The detail page's own JSON-LD carries no jobLocation either (some
+        // tenants — peraton, dewberry, sargentlundy, confirmed 2026-09-01 —
+        // publish no location field anywhere on the posting). Last resort:
+        // check whether the TITLE itself names a recognized place. Measured
+        // against 711 real empty-location icims-full rows on 2026-09-14, this
+        // almost never fires — iCIMS titles are job titles, not slugs, and
+        // essentially none of them carry a location word (see
+        // providers/_place-from-slug.mjs's module comment for the shared
+        // "never guess, only recognize" contract this follows). It is wired
+        // in anyway for the rare tenant that does title a role "Software
+        // Engineer - Munich", and for consistency with infineon.mjs/
+        // successfactors.mjs, which lean on the same fallback far more often.
+        const guess = recognizePlace(job.title);
+        if (guess) job.location = guess;
+      }
     }
   },
 };
