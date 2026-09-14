@@ -30,9 +30,12 @@ import { existsSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { parseArgs } from 'util';
+import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const TRACKER = join(ROOT, 'data', 'applications.md');
+const CAREER_OPS = getCareerOpsRoot();
+const TRACKER = resolveTrackerPath(CAREER_OPS);
 
 const PEOPLE_SEARCH = 'https://www.linkedin.com/search/results/people/?keywords=';
 
@@ -204,4 +207,4 @@ function main() {
   console.log('nothing here invents a contact, and no result page is ever fetched or scraped.');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainModule(import.meta.url)) main();

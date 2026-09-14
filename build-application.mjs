@@ -64,10 +64,13 @@ import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
 import { resolveCoverOutputPath } from './generate-cover-letter.mjs';
 import { classifyLanguage } from './language-loss.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const REPORTS_DIR = join(ROOT, 'reports');
-const LIVENESS_LOG = join(ROOT, 'data', 'liveness-log.tsv');
+const CAREER_OPS = getCareerOpsRoot();
+const REPORTS_DIR = join(CAREER_OPS, 'reports');
+const LIVENESS_LOG = join(CAREER_OPS, 'data', 'liveness-log.tsv');
 const LIVENESS_LOG_HEADER = 'checked_on\treport\tstatus\turl\n';
 export const STAGES = ['to-apply', 'applied', 'archive-closed', 'general'];
 
@@ -76,10 +79,11 @@ export const STAGES = ['to-apply', 'applied', 'archive-closed', 'general'];
  *
  * Delegated to that script's own resolver rather than reimplemented, so the
  * scrub step cannot end up pointed at a path the renderer never wrote. Pinned
- * to ROOT/output because the resolver's default is relative to the working
- * directory, and this script may be invoked from anywhere.
+ * to the career-ops data root's output/ because the resolver's default is
+ * relative to the working directory, and this script may be invoked from
+ * anywhere.
  */
-export function resolveCoverPdfPath(coverPayloadPath, outOverride = '', root = ROOT) {
+export function resolveCoverPdfPath(coverPayloadPath, outOverride = '', root = CAREER_OPS) {
   try {
     const payload = JSON.parse(readFileSync(coverPayloadPath, 'utf-8'));
     return resolveCoverOutputPath(payload, outOverride ? resolve(outOverride) : '', join(root, 'output'));
@@ -98,7 +102,7 @@ export function resolveCoverPdfPath(coverPayloadPath, outOverride = '', root = R
  * naming stays whatever generate-cover-letter.mjs would have chosen; only the
  * directory moves.
  */
-export function resolveStagedCoverPdfPath(coverPayloadPath, outOverride = '', stage = '', root = ROOT) {
+export function resolveStagedCoverPdfPath(coverPayloadPath, outOverride = '', stage = '', root = CAREER_OPS) {
   if (outOverride) return resolveCoverPdfPath(coverPayloadPath, outOverride, root);
   const unstaged = resolveCoverPdfPath(coverPayloadPath, '', root);
   if (!unstaged || !stage) return unstaged;
@@ -221,7 +225,7 @@ async function main() {
   }
 
   const stem = basename(cvPayload).replace(/\.json$/i, '');
-  const outputDir = values.stage ? join(ROOT, 'output', values.stage) : join(ROOT, 'output');
+  const outputDir = values.stage ? join(CAREER_OPS, 'output', values.stage) : join(CAREER_OPS, 'output');
   const htmlPath = join(outputDir, `${stem}.html`);
   const cvPdfPath = values['out-cv'] ? resolve(values['out-cv']) : join(outputDir, `${stem}.pdf`);
 
@@ -383,7 +387,7 @@ async function main() {
   console.log('\nReview both PDFs before sending. Nothing here submits anything.');
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(`build-application: ${error.message}`);
     process.exitCode = 1;

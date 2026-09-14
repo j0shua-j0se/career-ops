@@ -367,3 +367,26 @@ console.log('\nliveness-core — an aggregator delisting its own mirror is uncer
     ? pass('a stated employer-side expiry still outranks the aggregator banner')
     : fail(`real expiry under a delisting banner classified ${r.result}/${r.code}`);
 }
+console.log('\nliveness-core — Chinese application controls classify active postings');
+
+const chineseApply = classifyLiveness({
+  status: 200,
+  requestedUrl: 'https://careers.example.com/job/1234567',
+  finalUrl: 'https://careers.example.com/job/1234567',
+  bodyText: '岗位职责：负责模型研发、系统优化和跨团队协作。'.repeat(20),
+  applyControls: ['申请职位'],
+});
+chineseApply.result === 'active' && chineseApply.code === 'apply_control_visible'
+  ? pass('“申请职位” marks an otherwise valid Chinese posting active')
+  : fail(`“申请职位” classified ${chineseApply.result}/${chineseApply.code}, expected active/apply_control_visible`);
+
+const chineseSubmit = classifyLiveness({
+  status: 200,
+  requestedUrl: 'https://careers.example.com/job/7657115156241418501',
+  finalUrl: 'https://careers.example.com/job/7657115156241418501',
+  bodyText: '职位描述：负责安全系统、检测算法和工程平台建设。'.repeat(20),
+  applyControls: ['投递'],
+});
+chineseSubmit.result === 'active' && chineseSubmit.code === 'apply_control_visible'
+  ? pass('exact “投递” button marks a Feishu posting active')
+  : fail(`exact “投递” button classified ${chineseSubmit.result}/${chineseSubmit.code}, expected active/apply_control_visible`);

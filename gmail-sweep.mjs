@@ -37,12 +37,15 @@ import { matchCandidates, classifyReply } from './reply-matcher.mjs';
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 import { resolveTrackerPath } from './tracker-utils.mjs';
 import { appendCandidate } from './paste-reply.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const APPS_FILE = resolveTrackerPath(ROOT);
-const FOLLOWUPS_FILE = join(ROOT, 'data', 'follow-ups.md');
+const CAREER_OPS = getCareerOpsRoot();
+const APPS_FILE = resolveTrackerPath(CAREER_OPS);
+const FOLLOWUPS_FILE = join(CAREER_OPS, 'data', 'follow-ups.md');
 const SWEEP_STATE_PATH = process.env.CAREER_OPS_GMAIL_SWEEP_STATE
-  || join(ROOT, 'data', 'gmail-sweep-state.json');
+  || join(CAREER_OPS, 'data', 'gmail-sweep-state.json');
 
 // ── Transition guards ───────────────────────────────────────────────────────
 
@@ -618,4 +621,4 @@ function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainModule(import.meta.url)) main();

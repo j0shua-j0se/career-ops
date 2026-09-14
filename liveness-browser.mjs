@@ -201,7 +201,13 @@ async function resolveDnsCached(hostname) {
   try {
     const addresses = await hostResolver(hostname);
     if (addresses.length === 0) {
-      throw new Error(`DNS resolution returned no addresses for ${hostname}`);
+      // Tagged so the route guard can tell "this host does not exist" apart from
+      // "this host resolves into private space". The first is a dead third-party
+      // script, the second is an egress-guard hit. Only the second says anything
+      // about the page being checked.
+      const missing = new Error(`DNS resolution returned no addresses for ${hostname}`);
+      missing.livenessCode = 'dns_no_addresses';
+      throw missing;
     }
     dnsCache.set(hostname, addresses);
     return addresses;
@@ -344,8 +350,28 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
         return route.continue();
       } catch (err) {
         console.warn(`Blocked request to restricted destination (DNS): ${requestUrl} - ${err.message}`);
-        if (isMainDocument) page._blockedByGuard = { code: 'blocked_host', reason: err.message };
-        else page._blockedSubresources = (page._blockedSubresources ?? 0) + 1;
+        // A host that resolves to nothing is a DEAD THIRD-PARTY SCRIPT, not a
+        // statement about the posting. Measured 2026-08-14 over a 217-URL
+        // recheck: 78 live postings were returned as `uncertain` because an
+        // analytics or ad host on the page no longer exists — 53 on
+        // personalisation.visitorqueue.com, 17 on s7.addthis.com (AddThis was
+        // shut down in 2023), the rest on fluidads and cloudfront. One was
+        // opened by hand to confirm: 11,178 characters of live posting and a
+        // working apply control, called uncertain because of a dead tracker.
+        //
+        // The request is still aborted either way, so the egress guard loses
+        // nothing. Only the VERDICT stops being poisoned, and only for a
+        // subresource whose failure was "host does not exist" (dns_no_addresses).
+        // A subresource that instead RESOLVED into private space is a genuine
+        // SSRF signal, not a dead tracker, and still poisons the verdict — same
+        // as the guardError branch above — regardless of main-document status.
+        // isMainDocument (above) already handles the "can't tell" case by
+        // defaulting to true, which keeps poisoning the verdict when unsure.
+        if (err?.livenessCode !== 'dns_no_addresses' || isMainDocument) {
+          page._blockedByGuard = { code: 'blocked_host', reason: err.message };
+        } else {
+          page._blockedSubresources = (page._blockedSubresources ?? 0) + 1;
+        }
         return route.abort('blockedbyclient');
       }
     });

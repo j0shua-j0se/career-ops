@@ -41,6 +41,7 @@
 
 import { pathToFileURL } from 'url';
 import { DEFAULT_USER_AGENT, BROWSER_LIKE_USER_AGENT } from './user-agent.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 /** Our own robots token. Matched case-insensitively against User-agent lines. */
 export const OWN_AGENT_TOKEN = 'career-ops';
@@ -222,7 +223,7 @@ async function main() {
   process.exitCode = verdict.retry ? 0 : 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   main().catch((error) => {
     console.error(`robots-gate: ${error.message}`);
     process.exitCode = 1;

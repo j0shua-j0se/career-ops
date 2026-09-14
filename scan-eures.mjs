@@ -50,6 +50,8 @@ import {
   CRAWL_DELAY_MS,
   DEFAULT_RESULTS_PER_PAGE,
 } from './eures-core.mjs';
+import { localToday } from './lib/local-today.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 // ── Config ───────────────────────────────────────────────────────────
 
@@ -236,7 +238,7 @@ async function main() {
   }
 
   const { seen } = loadSeenUrls();
-  const date = new Date().toISOString().slice(0, 10);
+  const date = localToday();
 
   const lastScanDate = NO_DATE_FILTER ? null : loadLastScanDate();
   if (NO_DATE_FILTER) {
@@ -332,7 +334,7 @@ async function main() {
 }
 
 // Import-safety guard: a test that imports this module must not run the scan.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   main().catch((err) => {
     console.error('Fatal:', err.message);
     process.exit(1);

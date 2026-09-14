@@ -38,6 +38,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { parseArgs } from 'util';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 /**
  * Count concrete page objects in a PDF buffer.
@@ -252,7 +253,7 @@ async function main() {
   process.exitCode = result.ok ? 0 : 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   main().catch((error) => {
     console.error(`verify-pdf-ats: ${error.message}`);
     process.exitCode = 1;

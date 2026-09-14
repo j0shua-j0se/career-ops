@@ -29,6 +29,7 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { extname, basename, resolve, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Layer A: text hygiene — invisible Unicode / format controls / space homoglyphs
@@ -657,7 +658,7 @@ async function main() {
   process.exitCode = hadError ? 1 : 0;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch((error) => {
     console.error(`clean-artifacts: ${error.message}`);
     process.exitCode = 1;

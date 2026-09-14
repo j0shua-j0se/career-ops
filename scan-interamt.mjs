@@ -19,20 +19,31 @@
 
 import { chromium } from 'playwright';
 import { readFileSync, existsSync, mkdirSync } from 'fs';
+import { join } from 'path';
 import * as yaml from 'js-yaml';
-import { pathToFileURL } from 'url';
 import {
   appendToPipeline,
   appendToScanHistory,
   loadSeenUrls,
   buildTitleFilter,
   buildLocationFilter,
+  PORTALS_PATH,
+  SCAN_HISTORY_PATH,
 } from './scan.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { localToday } from './lib/local-today.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 // ── Config ───────────────────────────────────────────────────────────
 
-const PORTALS_PATH    = 'portals.yml';
-const SCAN_HISTORY    = 'data/scan-history.tsv';
+// Both imported from scan.mjs (#3510). This scanner appends through
+// scan.mjs's appendToScanHistory — anchored to the data root — while reading its
+// own bare-relative copy to work out the last scan date, so within a single run
+// it could write one history file and read another. Its portals copy also
+// ignored CAREER_OPS_PORTALS, which #2271 added so a second search lane does not
+// poison the first one's dedup history.
+const SCAN_HISTORY    = SCAN_HISTORY_PATH;
+const DATA_ROOT       = getCareerOpsRoot();
 const INTERAMT_HOME   = 'https://interamt.de/koop/app/';
 // Direct offer URL — constructed from StellenangebotId.
 // Wicket adds a session version number (?28&id=...) during live navigation,
@@ -207,12 +218,17 @@ async function searchInteramt(page, keyword, isFirst) {
   ]).catch(() => null);
 
   if (DEBUG) {
-    mkdirSync('output', { recursive: true });
-    await page.screenshot({ path: 'output/debug-interamt.png', fullPage: true });
+    // output/ is User Layer, so the debug dump follows the data root rather than
+    // appearing in whatever directory the scan was launched from (#3510).
+    const debugDir = join(DATA_ROOT, 'output');
+    const debugPng = join(debugDir, 'debug-interamt.png');
+    const debugHtml = join(debugDir, 'debug-interamt.html');
+    mkdirSync(debugDir, { recursive: true });
+    await page.screenshot({ path: debugPng, fullPage: true });
     const { writeFileSync: wf } = await import('fs');
-    wf('output/debug-interamt.html', await page.content());
-    console.log('  [debug] screenshot → output/debug-interamt.png');
-    console.log('  [debug] html       → output/debug-interamt.html');
+    wf(debugHtml, await page.content());
+    console.log(`  [debug] screenshot → ${debugPng}`);
+    console.log(`  [debug] html       → ${debugHtml}`);
     console.log('  [debug] url:', page.url());
     const rowCount = await page.$$eval('tr', rows => rows.length);
     console.log(`  [debug] total <tr> on page: ${rowCount}`);
@@ -258,10 +274,10 @@ async function searchInteramt(page, keyword, isFirst) {
 // ── Main ─────────────────────────────────────────────────────────────
 
 async function main() {
-  mkdirSync('data', { recursive: true });
+  mkdirSync(join(DATA_ROOT, 'data'), { recursive: true });
 
   const { seen } = loadSeenUrls();
-  const date = new Date().toISOString().slice(0, 10);
+  const date = localToday();
 
   const lastScanDate = NO_DATE_FILTER ? null : loadLastScanDate();
   if (NO_DATE_FILTER) {
@@ -364,10 +380,15 @@ async function main() {
   console.log('\n→ Run /career-ops pipeline to evaluate new offers.');
 }
 
-// Import-safety guard: a test that imports this module must not run the scan.
-// An unguarded main() calling process.exit() on import is what silently hid 21
-// failing tests behind doctor.mjs.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Guarded like every sibling scanner (scan-hn.mjs:122, scan-ats-full.mjs:1115).
+// Unguarded, merely IMPORTING this module drove a live browser scan of
+// interamt.de and appended its results to the user's pipeline and scan history —
+// so the file could not be imported by a test, or by anything else, without
+// doing that (a test that imports this module must not run the scan — an
+// unguarded main() calling process.exit() on import is what silently hid 21
+// failing tests behind doctor.mjs). A module should not scan the internet as a
+// side effect of being loaded (#3510).
+if (isMainModule(import.meta.url)) {
   main().catch(err => {
     console.error('Fatal:', err.message);
     process.exit(1);

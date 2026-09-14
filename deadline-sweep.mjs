@@ -38,10 +38,13 @@ import { existsSync, readFileSync, readdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { parseArgs } from 'util';
+import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const REPORTS_DIR = join(ROOT, 'reports');
-const TRACKER = join(ROOT, 'data', 'applications.md');
+const CAREER_OPS = getCareerOpsRoot();
+const REPORTS_DIR = join(CAREER_OPS, 'reports');
+const TRACKER = resolveTrackerPath(CAREER_OPS);
 
 /** Statuses a deadline can still act on. A closed row is nobody's business. */
 const OPEN_STATES = new Set(['Evaluated', 'Applied', 'Responded']);
@@ -221,4 +224,4 @@ function main() {
   if (!values.apply && (result.expired.length || result.soon.length)) process.exitCode = 10;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainModule(import.meta.url)) main();

@@ -40,7 +40,15 @@ if (!/const\s+locAllow\s*=/.test(src) && !/const\s+positiveKw\s*=/.test(src)) {
 }
 // An unguarded main() that calls process.exit() on import is what hid 21
 // failing tests behind doctor.mjs.
-if (src.includes('import.meta.url === pathToFileURL(process.argv[1]).href')) {
+//
+// [CALL] The literal string this checked for was the old, six-times-hand-
+// rolled "am I main?" comparison (`import.meta.url === pathToFileURL(...)`).
+// scan-interamt.mjs migrated to lib/is-main-module.mjs's isMainModule() —
+// the convention tests/main-guard-convention.test.mjs (#3170) now enforces
+// repo-wide — so this check just needs to look for the current guard instead
+// of the retired one; the property being pinned (an entry guard exists at
+// all) is unchanged.
+if (src.includes('isMainModule(import.meta.url)')) {
   pass('scan-interamt guards its entry point against import');
 } else {
   fail('scan-interamt runs main() at module scope — importing it would run a scan');

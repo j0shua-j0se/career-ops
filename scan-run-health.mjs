@@ -34,9 +34,12 @@ import { existsSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { parseArgs } from 'util';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const RUNS = join(ROOT, 'data', 'scan-runs.tsv');
+const CAREER_OPS = getCareerOpsRoot();
+const RUNS = join(CAREER_OPS, 'data', 'scan-runs.tsv');
 
 /** Runs needed before a baseline means anything. */
 export const MIN_HISTORY = 3;
@@ -163,4 +166,4 @@ function main() {
   if (values.strict && result.verdict === 'degraded') process.exitCode = 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainModule(import.meta.url)) main();

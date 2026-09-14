@@ -9,43 +9,86 @@
  * Fills templates/cover-letter-template.html with the payload, then renders
  * it to PDF via the same Playwright pipeline used for CVs (generate-pdf.mjs).
  *
- * `buildHtml` is exported as a pure function so the template can be tested
- * without loading Playwright (renderHtmlToPdf is imported lazily inside main).
+ * `buildHtml` and `safeOutputPath` are exported as pure functions so the
+ * template and --out path guard can be tested without loading Playwright
+ * (renderHtmlToPdf is imported lazily inside main).
  */
 
 import { readFileSync, existsSync, mkdirSync } from "fs";
 import { dirname, resolve, basename, join, relative, isAbsolute } from "path";
-import { fileURLToPath, pathToFileURL } from "url";
+import { fileURLToPath } from "url";
 import { parseArgs } from "util";
 import { assertFacts } from "./verify-cv-facts.mjs";
 import { resolveTemplate } from "./cv-templates.mjs";
+import { isMainModule } from "./lib/is-main-module.mjs";
 
-const OUTPUT_ROOT = resolve("output");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const OUTPUT_ROOT = resolve(__dirname, "output");
 
 /** Sanitize a requested output filename and keep it under the output directory. */
 function sanitizeSegment(seg) {
   return seg.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/\.{2,}/g, "-");
 }
 
-// Confine an output path to OUTPUT_ROOT without flattening it.
-//
-// This used to take only the basename, so every path landed directly in
-// output/. That is a correct traversal guard and a wrong path policy: once
-// output/ grew subfolders (applied/, to-apply/ — see output/README.md) and
-// build-application.mjs gained --stage, a staged cover letter was rendered to
-// output/<name>.pdf while the caller went looking in output/<stage>/<name>.pdf.
-// The render reported success and the next step failed with "file not found".
-//
-// Subdirectories inside OUTPUT_ROOT are now preserved, each segment sanitized.
-// Anything resolving outside OUTPUT_ROOT still collapses to its basename in the
-// root — the guard is unchanged for the case it was written for.
-function safeOutputPath(raw) {
-  const rel = relative(OUTPUT_ROOT, resolve(raw));
-  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
-    return join(OUTPUT_ROOT, sanitizeSegment(basename(raw)));
+/**
+ * Resolve a requested cover-letter output path.
+ *
+ * Paths that stay inside `output/` keep their relative subdirectory (the
+ * application-bundle layout `generate-pdf.mjs` already supports — see
+ * resolveCoverOutputPath() below). Paths that would escape `output/` — `..`
+ * traversal or an absolute path outside it — are REJECTED instead of being
+ * silently flattened to `output/<basename>`.
+ *
+ * [CALL] This used to confine an escaping path to output/<basename> rather
+ * than throw (the traversal guard was correct, but a silent rewrite to a
+ * same-named-but-wrong file in output/ is its own hazard once callers stage
+ * a build from a report/payload path they did not fully control). Every
+ * caller of resolveCoverOutputPath() already wraps it in try/catch and
+ * degrades gracefully on failure (build-application.mjs's
+ * resolveCoverPdfPath() returns '', main() below exits 1 with the message),
+ * so refusing outright is safe end to end.
+ *
+ * @param {string} raw - Caller-supplied --out / payload.output_path value.
+ * @returns {string} Absolute path inside OUTPUT_ROOT.
+ */
+export function safeOutputPath(raw) {
+  if (raw == null || String(raw).trim() === "") {
+    throw new Error("Refusing to write the cover letter outside output/: (empty path)");
   }
-  const parts = rel.split(/[/\\]+/).filter(Boolean).map(sanitizeSegment);
-  return join(OUTPUT_ROOT, ...parts);
+  const trimmed = String(raw).trim();
+
+  const asWritten = resolve(trimmed);
+  if (containedInOutput(asWritten)) {
+    const rel = relative(OUTPUT_ROOT, asWritten);
+    const parts = rel.split(/[/\\]+/).filter(Boolean).map(sanitizeSegment);
+    return join(OUTPUT_ROOT, ...parts);
+  }
+
+  // Absolute paths and any `..` segment already chose a location; if that
+  // location is not inside output/, refuse instead of rewriting to a basename.
+  if (isAbsolute(trimmed) || /(^|[\\/])\.\.([\\/]|$)/.test(trimmed)) {
+    throw new Error(`Refusing to write the cover letter outside output/: ${raw}`);
+  }
+
+  // Bare filename or a relative path that is not already under output/
+  // (e.g. --out cover.pdf, or --out output/foo/bar.pdf from another cwd).
+  const posix = trimmed.replace(/\\/g, "/").replace(/^\.\//, "");
+  const relativeToRoot = posix === "output" || posix === "output/"
+    ? ""
+    : posix.startsWith("output/")
+      ? posix.slice("output/".length)
+      : posix;
+  const parts = relativeToRoot.split("/").filter(Boolean).map(sanitizeSegment);
+  const candidate = join(OUTPUT_ROOT, ...parts);
+  if (containedInOutput(candidate)) return candidate;
+
+  throw new Error(`Refusing to write the cover letter outside output/: ${raw}`);
+}
+
+/** True when absPath is a file (not output/ itself) still inside OUTPUT_ROOT. */
+function containedInOutput(absPath) {
+  const rel = relative(OUTPUT_ROOT, absPath);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 /** Assert that a payload object contains the required keys. */
@@ -297,10 +340,21 @@ Usage:
 
   const payload = JSON.parse(readFileSync(payloadPath, "utf-8"));
 
-  payload.output_path = resolveCoverOutputPath(payload, args.out);
+  // [CALL] safeOutputPath() (called via resolveCoverOutputPath) now REFUSES
+  // an --out/output_path that would escape output/, rather than silently
+  // rewriting it to a same-named file inside output/ — so this must be
+  // guarded like any other user-input path error.
+  try {
+    payload.output_path = resolveCoverOutputPath(payload, args.out);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
 
   // Create the payload's own directory, not just output/ — a staged path
   // (output/to-apply/...) needs its subfolder to exist before the render.
+  // resolveCoverOutputPath() above already ran the escape guard and the
+  // company/role slug fallback, so there is nothing left to redo here.
   mkdirSync(dirname(payload.output_path), { recursive: true });
 
   try {
@@ -332,5 +386,5 @@ Usage:
   }
 }
 
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMain = isMainModule(import.meta.url);
 if (isMain) main();

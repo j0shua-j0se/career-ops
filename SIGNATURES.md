@@ -130,3 +130,29 @@ public commit with a stated reason.
 - @prajwalyb | 2026-08-18 | id:32199473 | src:https://github.com/santifer/career-ops/discussions/3012 | n:82
 - @hiteshjha24 | Hitesh Jha | 2026-08-18 | "Its a must have if u are in job search!!!!!" | id:143171761 | src:https://github.com/santifer/career-ops/discussions/3015 | n:83
 - @Ahmedmhassany | Ahmed Mohamed Hassany | 2026-08-18 | id:149591909 | src:https://github.com/santifer/career-ops/discussions/3041 | n:84
+- @katkurigopi05 | Gopi Krishna Reddy Katkuri | 2026-08-19 | "i have tried to build my own job hunter but i didn't go well so i am trying to use this awesome repo to fix mine" | id:231100182 | src:https://github.com/santifer/career-ops/discussions/3063 | n:85
+- @TMFNK | TMFNK | 2026-08-19 | id:235670256 | src:https://github.com/santifer/career-ops/discussions/3068 | n:86
+- @etugrand | Etugrand | 2026-08-19 | id:44446037 | src:https://github.com/santifer/career-ops/discussions/3069 | n:87
+- @kaarthiiik | Karthik Taduvai | 2026-08-19 | id:3398790 | src:https://github.com/santifer/career-ops/discussions/3074 | n:88
+- @MuhammadAliAsgher | Muhammad | 2026-08-19 | id:109615982 | src:https://github.com/santifer/career-ops/discussions/3078 | n:89
+- @bluezeb12 | Joseph Landry | 2026-08-20 | id:3913655 | src:https://github.com/santifer/career-ops/discussions/3108 | n:90
+- @kps2120 | 2026-08-20 | "Career change is hard enough already, trying to match past experiences to many new possibilities and areas of interest. Just leveling it up." | id:166546704 | src:https://github.com/santifer/career-ops/discussions/3121 | n:91
+- @rodolrojas | Rodolfo Rojas Giménez | 2026-08-20 | id:6399387 | src:https://github.com/santifer/career-ops/discussions/3133 | n:92
+- @CodePlato3721 | Alex | 2026-08-21 | id:2314106 | src:https://github.com/santifer/career-ops/discussions/3148 | n:93
+- @gunjanjaswal | Gunjan Jaswal | 2026-08-21 | id:400143 | src:https://github.com/santifer/career-ops/discussions/3151 | n:94
+- @miguel-fg | Miguel Fierro | 2026-08-21 | "one shouldn't need to apply hundreds of times to get one interview" | id:72409412 | src:https://github.com/santifer/career-ops/discussions/3187 | n:95
+- @elefino | 2026-08-22 | "This is a good thing. I'm going to boost this signal." | id:319961379 | src:https://github.com/santifer/career-ops/discussions/3206 | n:96
+- @chorrell | Christopher Horrell | 2026-08-24 | id:2781 | src:https://github.com/santifer/career-ops/discussions/3275 | n:97
+- @qoodboop | qoodboop | 2026-08-25 | "really good we can focus on something else than doomscrolling hiring contracts" | id:23255979 | src:https://github.com/santifer/career-ops/discussions/3313 | n:98
+- @Nardohsu | 2026-08-25 | "Let's get into the AI world!" | id:25312922 | src:https://github.com/santifer/career-ops/discussions/3336 | n:99
+- @prateeksingh1092 | 2026-08-26 | "A non-bloat, grounded in truth, a true example of leveraging AI as a human counterpart." | id:269049851 | src:https://github.com/santifer/career-ops/discussions/3389 | n:100
+- @nourischw | Nouris Wong | 2026-08-28 | "if you can't beat them join them" | id:8112770 | src:https://github.com/santifer/career-ops/discussions/3490 | n:101
+- @akhil451 | akhil | 2026-08-29 | "akhil451" | id:16731293 | src:https://github.com/santifer/career-ops/discussions/3512 | n:102
+- @jaishankarsurya | 2026-08-31 | "Let’s hope this works" | id:58153836 | src:https://github.com/santifer/career-ops/discussions/3555 | n:103
+- @fabdull1 | 2026-09-02 | "No time to waste" | id:250269279 | src:https://github.com/career-ops-hq/career-ops/discussions/3630 | n:104
+- @zyxc2024 | 2026-09-02 | id:194247172 | src:https://github.com/career-ops-hq/career-ops/discussions/3625 | n:105
+- @9jaswag | Chuks Opia | 2026-09-02 | id:8125356 | src:https://github.com/career-ops-hq/career-ops/discussions/3663 | n:106
+- @violetsea555 | violet | 2026-08-08 | "If a system rejects you, you have the right to know it was a system." | id:88992496 | src:https://github.com/career-ops-hq/career-ops/pull/2634 | n:107
+- @PKDT-93 | Peter Tran | 2026-09-02 | "A first step to landing on my feet after being laid off" | id:75346912 | src:https://github.com/career-ops-hq/career-ops/discussions/3694 | n:108
+- @brianmgray | Brian Gray | 2026-09-03 | "People-first" | id:638937 | src:https://github.com/career-ops-hq/career-ops/discussions/3730 | n:109
+- @ivan1velasquez | ivan1velasquezzz | 2026-09-03 | "La definición de IA como herramienta" | id:147756951 | src:https://github.com/career-ops-hq/career-ops/discussions/3746 | n:110

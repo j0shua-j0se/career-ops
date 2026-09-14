@@ -35,9 +35,12 @@ import { spawnSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const OUT_DIR = join(ROOT, 'output', 'follow-ups');
+const CAREER_OPS = getCareerOpsRoot();
+const OUT_DIR = join(CAREER_OPS, 'output', 'follow-ups');
 const DUE = new Set(['overdue', 'urgent', 'cold']);
 
 /** Openers modes/followup.md forbids outright. */
@@ -269,7 +272,7 @@ function main() {
 
   for (const e of entries) {
     let strengths = [];
-    const rp = e.reportPath ? join(ROOT, e.reportPath) : null;
+    const rp = e.reportPath ? join(CAREER_OPS, e.reportPath) : null;
     if (rp && existsSync(rp)) {
       try {
         strengths = extractStrengths(readFileSync(rp, 'utf-8'));
@@ -338,4 +341,4 @@ function main() {
   process.exit(10);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainModule(import.meta.url)) main();

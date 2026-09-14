@@ -45,11 +45,14 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const PIPELINE_PATH = join(ROOT, 'data', 'pipeline.md');
-const SHORTLIST_PATH = join(ROOT, 'data', 'shortlist.md');
-const DISCARD_LOG_PATH = join(ROOT, 'data', 'discard.log');
+const CAREER_OPS = getCareerOpsRoot();
+const PIPELINE_PATH = join(CAREER_OPS, 'data', 'pipeline.md');
+const SHORTLIST_PATH = join(CAREER_OPS, 'data', 'shortlist.md');
+const DISCARD_LOG_PATH = join(CAREER_OPS, 'data', 'discard.log');
 
 // ── Pipeline parsing ────────────────────────────────────────────────────────
 // Line shape written by scan.mjs:
@@ -1366,7 +1369,7 @@ function main() {
 
   // --mark-evaluated: tick inbox rows that already have a report.
   if (argv.includes('--mark-evaluated')) {
-    const reportsDir = join(ROOT, 'reports');
+    const reportsDir = join(CAREER_OPS, 'reports');
     const byUrl = new Map();
     if (existsSync(reportsDir)) {
       for (const f of readdirSync(reportsDir).filter((n) => /^\d{3}-.*\.md$/.test(n))) {
@@ -1430,4 +1433,4 @@ function main() {
   console.log(JSON.stringify(report, null, 2));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainModule(import.meta.url)) main();

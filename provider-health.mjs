@@ -40,9 +40,12 @@ import { existsSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { parseArgs } from 'util';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const HISTORY = join(ROOT, 'data', 'scan-history.tsv');
+const CAREER_OPS = getCareerOpsRoot();
+const HISTORY = join(CAREER_OPS, 'data', 'scan-history.tsv');
 
 /**
  * Fields a provider structurally CANNOT supply, and why.
@@ -224,4 +227,4 @@ function main() {
   if (values.strict && results.some((r) => r.verdict === 'degraded')) process.exitCode = 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainModule(import.meta.url)) main();

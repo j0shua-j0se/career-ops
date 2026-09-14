@@ -16,6 +16,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const out = process.platform === 'win32' ? 'career-dashboard.exe' : 'career-dashboard';
@@ -42,6 +43,6 @@ if (result.status !== 0) {
 console.log(`Built dashboard/${out} — run it with: npm run serve:dashboard (or dashboard/${out} --path .)`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main();
 }

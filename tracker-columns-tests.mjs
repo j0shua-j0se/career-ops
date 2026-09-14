@@ -604,14 +604,26 @@ const HEADER_VIA = `# Applications Tracker
 // The guard above must not stop a genuine re-listing from merging. The titles
 // differ only by the gender marker, which roleTokens() strips, so the two are
 // the same posting and belong in one row.
+//
+// [CALL] Both sides now carry the SAME via= tag. Upstream #3410/#3466
+// (tests/merge-tracker-confidential-via.test.mjs, "two `?` rows with no Via
+// stay distinct instead of merging") deliberately tightened the bothUnknown
+// tier: two `?` rows with NO Via on either side no longer auto-merge on title
+// alone, because that is the exact shape of the silent-overwrite bug #3410
+// reported (two DIFFERENT postings whose titles also happened to fuzzy/token
+// match). Role-token identity is still necessary here (that's what this test
+// exercises — the gender-marker stripping), but on a tracker with a Via
+// column it is no longer sufficient without a matching via to corroborate
+// "same channel, same posting". A matching via is the least invasive way to
+// keep testing the roleTokens() equivalence this test is actually about.
 {
   const SAME_ROLE_TRACKER = `# Applications Tracker
 
 | # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |
 |---|------|---------|-----|------|-------|--------|-----|--------|-------|
-| 1 | 2026-01-05 | ? | — | Werkstudent Data Engineering (m/w/d) | 3.9/5 | Evaluated | ❌ | — | triage-only |
+| 1 | 2026-01-05 | ? | Randstad | Werkstudent Data Engineering (m/w/d) | 3.9/5 | Evaluated | ❌ | — | triage-only |
 `;
-  const SAME_ROLE = '2\t2026-01-05\t?\tWerkstudent Data Engineering\tEvaluated\t4.0/5\t❌\t—\tre-listed\n';
+  const SAME_ROLE = '2\t2026-01-05\t?\tWerkstudent Data Engineering\tEvaluated\t4.0/5\t❌\t—\tre-listed\tvia=Randstad\n';
   const sb = makeSandbox(SAME_ROLE_TRACKER, { '2-unknown.tsv': SAME_ROLE });
   runScript('merge-tracker.mjs', [], sb);
   const rows = dataRows(sb.tracker);

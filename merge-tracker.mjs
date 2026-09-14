@@ -19,15 +19,20 @@ import { join, basename, dirname, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 import { roleFuzzyMatch, roleTokens } from './role-matcher.mjs';
 import { parsePdfIndex } from './find.mjs';
-import { LEGACY_COLMAP, detectColumns, isHeaderRow, resolveScoreStatus, normalizeVia, SEPARATOR_ROW_RE, stripCrossReferences, REQ_NUMBER_RE, extractReqNumber , resolveUpdatedStatus } from './tracker-parse.mjs';
+import { LEGACY_COLMAP, detectColumns, isHeaderRow, resolveScoreStatus, normalizeVia, normalizeTextKey, SEPARATOR_ROW_RE, stripCrossReferences, REQ_NUMBER_RE, extractReqNumber, resolveUpdatedStatus } from './tracker-parse.mjs';
+// Corporate-form vocabulary, shared with invite-match.mjs rather than copied,
+// for the same reason normalizeCompany lives in tracker-utils: a second private
+// list is how company identity drifts between scripts (#2445, #3665).
+import { LEGAL_SUFFIXES, GENERIC_DESCRIPTORS } from './invite-match.mjs';
 import { resolveTrackerPath, resolveWorkspaceRoot, resolvePdfIndexPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, cell } from './tracker-utils.mjs';
 // Canonical posting-URL key. Kept in its own module so scan.mjs / scan-history
 // can adopt the same key later without the definitions drifting.
 import { normalizeUrl } from './url-key.mjs';
 
-const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
+const CAREER_OPS = getCareerOpsRoot();
 // Support both layouts: data/applications.md (boilerplate) and applications.md
 // (original). CAREER_OPS_TRACKER overrides the path (used by tests and
 // non-standard layouts). Resolution lives in tracker-utils.mjs so every tracker
@@ -305,6 +310,65 @@ function companiesMatch(a, b) {
   return key !== '' || String(a).trim() === String(b).trim();
 }
 
+// Words that name a legal form or a generic business descriptor rather than the
+// employer. Both lists come from invite-match.mjs; the union is safe here in a
+// way chaining them there is not, because the prefix rule below never lets two
+// names disagree on a substantive token.
+const CORPORATE_FORM_WORDS = new Set([...LEGAL_SUFFIXES, ...GENERIC_DESCRIPTORS]);
+
+// A one-token stem carries almost no identity, and a two-letter one is usually
+// an initialism that several unrelated employers share. Refusing them costs the
+// duplicate row that exists today; accepting them risks deleting a real one.
+const MIN_STEM_CHARS = 3;
+
+/**
+ * True when two company cells are the same employer written with a different
+ * corporate suffix ("Acme" vs "Acme Technologies Inc.").
+ *
+ * normalizeCompany() folds case, punctuation and width but not corporate
+ * forms, so a suffix variant of one employer never reaches the fuzzy
+ * company+role tier and the same opening is written twice (#3665). This is the
+ * narrow second tier that closes that, used ONLY where the role title already
+ * fuzzy-matches and neither a req-number nor an employer-board URL has proved
+ * the rows distinct. The exact tier above is untouched.
+ *
+ * The rule is a token PREFIX plus a corporate-form tail, not a stripped key.
+ * Stripping suffixes before comparing looks equivalent and is not: it maps
+ * "Acme Solutions" and "Acme Technologies" to the same "acme", which folds two
+ * genuinely different employers and deletes one row. Requiring the shorter name
+ * to be a prefix of the longer makes that structurally impossible, since
+ * neither of those is a prefix of the other. It also means an extra token that
+ * is NOT a corporate form ("Acme Robotics") still reads as a different
+ * employer, which is the conservative direction: over-merging is unrecoverable
+ * here (dedup-tracker.mjs drops the losing line, and applications.md is
+ * gitignored with no backup), while under-merging leaves a duplicate row the
+ * user can already see.
+ *
+ * Tokens come from normalizeTextKey(name, ' ') so this shares the Unicode,
+ * NFKC and Turkish dotted-I handling every other identity key uses (#2445,
+ * #2736) instead of a private strip. Scripts written without spaces produce a
+ * single token and never match here, so CJK corporate forms are unaffected and
+ * remain #2570's subject.
+ *
+ * @param {string} a - Company cell from one side of the comparison.
+ * @param {string} b - Company cell from the other side.
+ * @returns {boolean} True when the two cells name the same employer under a
+ *   different corporate form.
+ */
+function companiesMatchIgnoringCorporateForm(a, b) {
+  const ta = normalizeTextKey(a, ' ').split(' ').filter(Boolean);
+  const tb = normalizeTextKey(b, ' ').split(' ').filter(Boolean);
+  const [stem, full] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+  // Equal lengths are either the exact tier's business or a genuine
+  // disagreement on a substantive token. An empty stem is the blind-employer
+  // `?` marker and every other punctuation-only cell, which must never match a
+  // named employer.
+  if (stem.length === 0 || stem.length === full.length) return false;
+  if (stem.join('').length < MIN_STEM_CHARS) return false;
+  if (stem.some((token, i) => token !== full[i])) return false;
+  return full.slice(stem.length).every(token => CORPORATE_FORM_WORDS.has(token));
+}
+
 /**
  * Combine an existing row's Notes with a re-evaluation's Notes.
  *
@@ -397,6 +461,22 @@ function mergeNotes(existingNotes, addition, oldScore, newScore, extraMarker = '
 function parseScore(s) {
   const m = s.replace(/\*\*/g, '').match(/([\d.]+)/);
   return m ? parseFloat(m[1]) : 0;
+}
+
+/**
+ * True when a Score cell is a documented "no score" sentinel rather than a
+ * number. AGENTS.md names `N/A`, `—` and `-` as the values a row carries when it
+ * was added without an evaluation, or when a re-eval could not be scored (#1799).
+ *
+ * parseScore() maps all of these to 0, so the merge path cannot tell them apart
+ * from a genuine zero on its own — callers that must not treat "no score" as
+ * "scored zero" ask here first (#2803).
+ *
+ * @param {string} s - Raw score cell.
+ * @returns {boolean}
+ */
+function isUnscoreable(s) {
+  return ['—', '-', 'N/A'].includes(String(s).replace(/\*\*/g, '').trim());
 }
 
 /**
@@ -796,6 +876,68 @@ if (MIGRATE_VIA) {
   process.exit(0);
 }
 
+// #3515: keep the tracker table ordered by `#` ascending on every write.
+//
+// Rows used to be spliced in immediately after the separator row and never
+// reordered, so the table ended up ordered by *when a batch was merged*: each
+// merge froze its own internal order in place and landed on top of the previous
+// one. Finding row #42 meant reading the whole table — the one thing an ordered
+// `#` column should make unnecessary.
+//
+// Sorting happens at write time over the whole data block, so an existing
+// tracker is repaired in place on the next merge with no separate migration.
+// Ascending matches how rows are referred to ("row 42") and how reports/ is
+// numbered on disk.
+//
+// Rows whose `#` cell is non-numeric — the backfilled `N/A` / `—` / `-`
+// sentinels described in AGENTS.md, or a row too malformed to parse — keep a
+// defined position at the END of the table, in their existing relative order.
+// They are never dropped and never throw the comparator.
+//
+// Only the contiguous run of table rows directly after the separator is
+// touched; any prose or second table further down the file is left alone.
+// Returns the number of rows whose position changed.
+function sortTrackerRowsInPlace(lines) {
+  let sepIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (SEPARATOR_ROW_RE.test(lines[i])) { sepIdx = i; break; }
+  }
+  if (sepIdx < 0) return 0;
+  let end = sepIdx + 1;
+  while (end < lines.length && lines[end].startsWith('|')) end++;
+  const block = lines.slice(sepIdx + 1, end);
+  if (block.length < 2) return 0;
+  // Bare parseInt, deliberately — the same reading of the `#` cell that
+  // parseAppLine and the usedNumbers pass use. It accepts a numeric prefix, so
+  // a malformed `12draft` cell reads as 12 here exactly as it does there: that
+  // row is #12 to dedup, to number allocation and to maxNum, so sorting it into
+  // position 12 is what keeps the table consistent with the rest of the script.
+  // A stricter full-cell test would park a row at the bottom that every other
+  // code path still calls #12 — a row you cannot find by its number, which is
+  // the problem this sort exists to solve. The sentinels that matter (`N/A`,
+  // `—`, `-`) are NaN under both readings and land at the end either way.
+  const numOf = (line) => {
+    const parts = line.split('|').map(s => s.trim());
+    const n = parseInt(parts[COLMAP.num], 10);
+    return Number.isNaN(n) ? null : n;
+  };
+  const decorated = block.map((line, i) => ({ line, i, num: numOf(line) }));
+  decorated.sort((a, b) => {
+    // Sentinel-numbered rows sink to the bottom; ties (and sentinel-vs-sentinel)
+    // fall back to the original index so the sort is fully deterministic.
+    if (a.num === null || b.num === null) {
+      if (a.num === b.num) return a.i - b.i;
+      return a.num === null ? 1 : -1;
+    }
+    return a.num === b.num ? a.i - b.i : a.num - b.num;
+  });
+  const sorted = decorated.map(d => d.line);
+  let moved = 0;
+  for (let i = 0; i < sorted.length; i++) if (sorted[i] !== block[i]) moved++;
+  lines.splice(sepIdx + 1, block.length, ...sorted);
+  return moved;
+}
+
 const appLines = appContent.split('\n');
 // Detect the tracker's column layout via header names so parsing and writing
 // both work whether the table uses the original 9-column layout or a customized
@@ -861,13 +1003,33 @@ if (BACKFILL_URLS) {
     if (!line.startsWith('|')) return line;
     const app = parseAppLine(line);
     if (!app) return line;
-    if ((app.url || '').trim()) { already++; return line; }
+    // Rebuilt, not returned verbatim — a row can carry a URL and STILL be short
+    // of the header on a layout with user-owned columns after `URL`. Returning
+    // `line` there leaves the same unreadable row this fix exists to prevent.
+    if ((app.url || '').trim()) { already++; return buildRow({ ...app }); }
     // Shared derivation with the merge loop — one place that knows how to turn a
     // report link into the posting URL. Tracker links may be root-relative
     // (`reports/...`) or data-relative (`../reports/...`); both resolve.
     const resolved = resolveReportUrl(app.report);
-    if (resolved.reason === 'no-report') { noReport++; return line; }
-    if (resolved.reason === 'no-url') { noUrl++; return line; }
+    // A row we cannot fill is still rebuilt, with an empty URL cell.
+    //
+    // Returning the original line leaves a pre-URL-column row one cell short of
+    // the header, and #3016 established that a short row is exactly what
+    // parseTrackerRow must reject: "a row must span the full header width,
+    // otherwise a missing interior cell would silently shift every later column
+    // one position left". That guard is correct; this writer was producing rows
+    // it correctly refuses. Every reader built on tracker-parse.mjs then skips
+    // the row for good — set-status.mjs reports "No tracker row with #N".
+    //
+    // parseAppLine's guard is `parts.length <= maxIdx`, one cell looser than
+    // parseTrackerRow's `parts.length < width`, which is why the backfill can
+    // still see and repair precisely the rows the readers cannot.
+    //
+    // The DELIMITER is added, never a value: buildRow writes `put('url', '')`,
+    // and an empty URL falls back to the report-number and fuzzy company+role
+    // dedup tiers exactly as it does today. Nothing is fabricated.
+    if (resolved.reason === 'no-report') { noReport++; return buildRow({ ...app, url: '' }); }
+    if (resolved.reason === 'no-url') { noUrl++; return buildRow({ ...app, url: '' }); }
     filled++;
     return buildRow({ ...app, url: resolved.url });
   });
@@ -912,7 +1074,12 @@ updated += pdfSynced;
 // Read tracker additions
 if (!existsSync(ADDITIONS_DIR)) {
   console.log('No tracker-additions directory found.');
-  if (pdfSynced > 0 && !DRY_RUN) writeFileAtomic(APPS_FILE, appLines.join('\n'));
+  // Nothing to merge, but an existing tracker left unsorted by earlier versions
+  // is still repaired here (#3515) — that is the whole point of sorting at write
+  // time rather than at insert time.
+  const moved = DRY_RUN ? 0 : sortTrackerRowsInPlace(appLines);
+  if (moved > 0) console.log(`🔢 Sorted tracker by # ascending (${moved} row(s) repositioned).`);
+  if ((pdfSynced > 0 || moved > 0) && !DRY_RUN) writeFileAtomic(APPS_FILE, appLines.join('\n'));
   if (DRY_RUN) console.log('(dry-run — no changes written)');
   trackerLock.release();
   process.exit(0);
@@ -921,7 +1088,12 @@ if (!existsSync(ADDITIONS_DIR)) {
 const tsvFiles = readdirSync(ADDITIONS_DIR).filter(f => f.endsWith('.tsv'));
 if (tsvFiles.length === 0) {
   console.log('✅ No pending additions to merge.');
-  if (pdfSynced > 0 && !DRY_RUN) writeFileAtomic(APPS_FILE, appLines.join('\n'));
+  // Nothing to merge, but an existing tracker left unsorted by earlier versions
+  // is still repaired here (#3515) — that is the whole point of sorting at write
+  // time rather than at insert time.
+  const moved = DRY_RUN ? 0 : sortTrackerRowsInPlace(appLines);
+  if (moved > 0) console.log(`🔢 Sorted tracker by # ascending (${moved} row(s) repositioned).`);
+  if ((pdfSynced > 0 || moved > 0) && !DRY_RUN) writeFileAtomic(APPS_FILE, appLines.join('\n'));
   if (DRY_RUN) console.log('(dry-run — no changes written)');
   trackerLock.release();
   process.exit(0);
@@ -1115,7 +1287,14 @@ for (const file of tsvFiles) {
       // the #1524 req-number guard, and the tier where an unkeyed addition is
       // also held back from claiming a row whose posting is known.
       if (urlBlocksHeuristic(app)) return false;
-      if (!companiesMatch(app.company, addition.company)) return false;
+      // Corporate-form variants of one employer are accepted HERE and nowhere
+      // else (#3665). The tiers above match on a report or entry number, which
+      // is an identity claim on its own, so a wider company match there would
+      // let sequence drift across two employers write to the wrong row. This
+      // tier already requires a fuzzy role match, and the req-number and URL
+      // guards below and above still get to prove the rows distinct.
+      if (!companiesMatch(app.company, addition.company)
+          && !companiesMatchIgnoringCorporateForm(app.company, addition.company)) return false;
       if (!roleFuzzyMatch(addition.role, app.role)) return false;
       // Cross-channel guard (#1596): unknown-employer rows (`?`) all normalize
       // to the same empty company key, but the same role via two DIFFERENT
@@ -1124,7 +1303,44 @@ for (const file of tsvFiles) {
       // the same channel (the agency re-blasting one listing) is a duplicate.
       // Via comparison is Unicode-aware (#1603): normalizeCompany() would
       // collapse distinct non-Latin agency names to the same empty key.
-      if ((String(addition.company).trim() === '?' || String(app.company).trim() === '?')
+      //
+      // ON A TRACKER THAT HAS A VIA COLUMN, both vias must be PRESENT and equal,
+      // not merely equal (#3410). Rejecting only on a difference let two empty
+      // ones compare equal, so two unrelated `?` rows with no Via fell through
+      // to the fuzzy title match and merged. Measured: an existing
+      // `? / Program Manager` (4.2, Applied, report [1]) and an unrelated
+      // `? / Senior Program Manager` became ONE row carrying the addition's
+      // date, score, PDF flag and report link, with the surviving note calling
+      // report [1] "Superseded" — which it was not. The tracker is gitignored
+      // and no .bak is written, so nothing recovers it.
+      //
+      // This is the same three-valued logic Pass 0 states above — an absent key
+      // is UNKNOWN, never "equal" — landing the other way here, on purpose.
+      // There, company and role still carry identity, so an unknown URL must not
+      // block a tier that has other evidence. Here the company key is empty BY
+      // CONSTRUCTION: `?` means "employer not disclosed", so a fuzzy role match
+      // is all that is left, and it is not identity. With nothing to tell the
+      // channels apart, not merging is the recoverable answer — a visible
+      // duplicate row the user can fix, rather than a silent overwrite of a row
+      // whose report link now points at a different job.
+      //
+      // GATED ON THE COLUMN EXISTING, because without it every row parses with
+      // via='' and the addition's own tag is cleared on purpose (see the
+      // --migrate-via warning above): empty-vs-empty is then the NORMAL state
+      // for a genuine same-agency re-blast, not a missing signal, and requiring
+      // a value would turn every legacy re-blast into a duplicate row. On that
+      // layout there is nothing to compare, so the pre-existing behaviour
+      // stands and `--migrate-via` is the way to get the guard.
+      if (COLMAP.via != null
+          && (String(addition.company).trim() === '?' || String(app.company).trim() === '?')) {
+        const additionVia = normalizeVia(addition.via || '');
+        const appVia = normalizeVia(app.via || '');
+        if (!additionVia || !appVia || additionVia !== appVia) return false;
+      }
+      // Legacy layout (no Via column): the original difference-only guard, which
+      // is all the information available there.
+      if (COLMAP.via == null
+          && (String(addition.company).trim() === '?' || String(app.company).trim() === '?')
           && normalizeVia(addition.via || '') !== normalizeVia(app.via || '')) return false;
       // Both employers unknown AND no URL on either side: the title is the only
       // evidence left, and a FUZZY title match is too weak to justify
@@ -1164,6 +1380,22 @@ for (const file of tsvFiles) {
   }
 
   if (duplicate) {
+    // An unscoreable re-eval (N/A/—/-) carries no score to write through. Its
+    // score parses to 0, so the downgrade path below would read it as a genuine
+    // zero and overwrite a real score with the sentinel — unrecoverably, since
+    // the tracker is gitignored and no .bak is written (#2803). A failed fetch is
+    // "no new score", not "scored zero": leave the row's score, report and PDF as
+    // they stand. When the row itself is not yet scored there is nothing to lose,
+    // so let the normal path refresh its date/notes/report from the re-eval.
+    if (isUnscoreable(addition.score) && !isUnscoreable(duplicate.score)) {
+      console.log(
+        `⏭️  Skipping ${file}: re-eval of #${duplicate.num} ${addition.company} — `
+        + `${addition.role} produced no score (${String(addition.score).trim()}); `
+        + `keeping ${duplicate.score}`,
+      );
+      skipped++;
+      continue;
+    }
     const newScore = parseScore(addition.score);
     const oldScore = parseScore(duplicate.score);
 
@@ -1351,6 +1583,8 @@ if (newLines.length > 0) {
 
 // Write back
 if (!DRY_RUN) {
+  const moved = sortTrackerRowsInPlace(appLines);
+  if (moved > 0) console.log(`\n🔢 Sorted tracker by # ascending (${moved} row(s) repositioned).`);
   writeFileAtomic(APPS_FILE, appLines.join('\n'));
 
   // Move processed files to merged/ — but only the ones actually applied.

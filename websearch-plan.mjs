@@ -39,10 +39,13 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as yaml from 'js-yaml';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const PORTALS_PATH = join(ROOT, 'portals.yml');
-const STATE_PATH = join(ROOT, 'data/websearch-state.json');
+const CAREER_OPS = getCareerOpsRoot();
+const PORTALS_PATH = join(CAREER_OPS, 'portals.yml');
+const STATE_PATH = join(CAREER_OPS, 'data/websearch-state.json');
 
 // Enough to make real progress in one pass without turning the scan stage into
 // half an hour of searching. At 10 a pass, 32 queries cycle in ~3 passes.
@@ -238,6 +241,6 @@ function main(argv) {
   }, null, 2));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }

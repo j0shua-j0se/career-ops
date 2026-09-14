@@ -23,6 +23,7 @@ import { spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
 import { isUnreplyable, isOwnAddress } from './followup-draft.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DUE = new Set(['overdue', 'urgent', 'cold']);
@@ -100,4 +101,4 @@ function main() {
   process.exit(10);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainModule(import.meta.url)) main();

@@ -449,8 +449,19 @@ try {
 // which is a correct traversal guard and a wrong path policy: a --stage build
 // rendered the cover to output/<name>.pdf while build-application looked for
 // output/<stage>/<name>.pdf. The render reported success and the scrub failed
-// with "file not found". Subfolders inside output/ are now preserved; anything
-// escaping output/ still collapses to its basename there.
+// with "file not found". Subfolders inside output/ are now preserved.
+//
+// [CALL] The two escape cases below were updated from "still confined to
+// output/<basename>" to "throws". Upstream's #2940 fix (tests/cover-letter-
+// output-path.test.mjs, merged from career-ops v1.32.0) redesigned
+// safeOutputPath() to REFUSE an escaping path outright instead of silently
+// rewriting it into output/ under its basename — the merge kept an older
+// local safeOutputPath() body that still did the silent rewrite, which is
+// what this file originally pinned. generate-cover-letter.mjs now uses
+// upstream's throwing implementation (cited in its own file history), and
+// every caller of resolveCoverOutputPath() already tolerates the throw:
+// build-application.mjs's resolveCoverPdfPath() catches it and returns '',
+// and generate-cover-letter.mjs's own main() catches it and exits 1.
 {
   const { resolveCoverOutputPath } = await import('../generate-cover-letter.mjs');
   const root = join(ROOT, 'output');
@@ -458,17 +469,19 @@ try {
   if (staged.includes('to-apply')) pass('a staged cover path keeps its subfolder');
   else fail(`staged cover path was flattened: ${staged}`);
 
-  const escaped = resolveCoverOutputPath({}, '../../etc/passwd', root);
-  if (escaped.startsWith(root) && !escaped.includes('..')) {
-    pass('a traversal attempt is still confined to output/');
-  } else {
-    fail(`traversal escaped: ${escaped}`);
+  try {
+    const escaped = resolveCoverOutputPath({}, '../../etc/passwd', root);
+    fail(`traversal was not refused, resolved to: ${escaped}`);
+  } catch (err) {
+    if (/refus/i.test(err.message)) pass('a traversal attempt is refused, not silently confined');
+    else fail(`traversal threw the wrong error: ${err.message}`);
   }
 
-  const inner = resolveCoverOutputPath({}, join(root, 'to-apply', '..', '..', '..', 'evil.pdf'), root);
-  if (inner.startsWith(root) && !inner.includes('..')) {
-    pass('a traversal nested inside output/ is still confined');
-  } else {
-    fail(`nested traversal escaped: ${inner}`);
+  try {
+    const inner = resolveCoverOutputPath({}, join(root, 'to-apply', '..', '..', '..', 'evil.pdf'), root);
+    fail(`nested traversal was not refused, resolved to: ${inner}`);
+  } catch (err) {
+    if (/refus/i.test(err.message)) pass('a traversal nested inside output/ is refused, not silently confined');
+    else fail(`nested traversal threw the wrong error: ${err.message}`);
   }
 }

@@ -47,6 +47,8 @@ import {
 import { parsePipeline, rankEntry } from './triage-prefilter.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
 import { loadCheckpoint, checkpointCompatible } from './scan-ats-full.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 // Every artifact the driver writes is redirectable, following the one-env-var-
 // per-artifact convention the rest of the repo uses (CAREER_OPS_TRACKER,
@@ -58,12 +60,13 @@ import { loadCheckpoint, checkpointCompatible } from './scan-ats-full.mjs';
 // promotes candidates. CAREER_OPS_ADDITIONS is deliberately the same variable
 // merge-tracker.mjs reads, so redirecting it moves both ends of the handoff.
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const STATE_PATH = process.env.CAREER_OPS_LOOP_STATE || join(ROOT, 'data', 'loop-state.json');
-const SHORTLIST_PATH = process.env.CAREER_OPS_LOOP_SHORTLIST || join(ROOT, 'data', 'loop-shortlist.md');
-const RUN_LOG_PATH = process.env.CAREER_OPS_LOOP_RUN_LOG || join(ROOT, 'data', 'loop-run-log.md');
-const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(ROOT, 'data', 'pipeline.md');
-const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || join(ROOT, 'config', 'profile.yml');
-const TSV_DIR = process.env.CAREER_OPS_ADDITIONS || join(ROOT, 'batch', 'tracker-additions');
+const CAREER_OPS = getCareerOpsRoot();
+const STATE_PATH = process.env.CAREER_OPS_LOOP_STATE || join(CAREER_OPS, 'data', 'loop-state.json');
+const SHORTLIST_PATH = process.env.CAREER_OPS_LOOP_SHORTLIST || join(CAREER_OPS, 'data', 'loop-shortlist.md');
+const RUN_LOG_PATH = process.env.CAREER_OPS_LOOP_RUN_LOG || join(CAREER_OPS, 'data', 'loop-run-log.md');
+const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(CAREER_OPS, 'data', 'pipeline.md');
+const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || join(CAREER_OPS, 'config', 'profile.yml');
+const TSV_DIR = process.env.CAREER_OPS_ADDITIONS || join(CAREER_OPS, 'batch', 'tracker-additions');
 
 // ── State I/O ───────────────────────────────────────────────────────────────
 
@@ -645,4 +648,4 @@ function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (isMainModule(import.meta.url)) main();

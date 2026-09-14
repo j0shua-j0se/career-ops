@@ -6,16 +6,19 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as yaml from 'js-yaml';
 import dotenv from 'dotenv';
 import { discoverPlugins, pluginRoots, pluginStatus } from './plugins/_engine.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 import { resolveExtractorMode } from './browser-extract.mjs';
 import { parseConfigByExtension } from './jsonc-parse.mjs';
 import { validateFlags } from './lib/cli-flags.mjs';
 import { geminiNodeFloor } from './lib/gemini-node-floor.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -35,7 +38,7 @@ const VALUE_FLAGS = ['--target', '--cli'];
 const USAGE = `Usage:
   node doctor.mjs                    # run the setup diagnostic
   node doctor.mjs --json             # machine-readable onboarding state
-  node doctor.mjs --strict           # also probe portals.yml ATS slugs (network)
+  node doctor.mjs --strict           # also probe portals.yml entries (network)
   node doctor.mjs --target <path>    # diagnose another career-ops checkout
   node doctor.mjs --cli <name>       # check a specific CLI's integration
   node doctor.mjs --help             # show this message
@@ -151,6 +154,42 @@ function checkDependencies() {
   };
 }
 
+// update-system.mjs versions before #2857 could commit cascading .bak backups
+// when a checkout write failed. #2857 stops that for NEW installs, but an
+// install that already `git add`ed one is stuck: nothing in the update path
+// untracks a path git already has, so the .bak files persist forever and the
+// next update looks like it silently did nothing (career-ops#2881) — nothing
+// points at .bak unless something checks for it. Kept to a single cheap
+// `git ls-files` call so it costs nothing on the common case of zero matches.
+function checkTrackedBakFiles(root) {
+  let raw;
+  try {
+    raw = execFileSync('git', ['ls-files', '-z', '--', '*.bak*'], {
+      cwd: root, encoding: 'utf-8', timeout: 5000,
+    });
+  } catch {
+    // Not a git checkout (or git unavailable) — nothing to check.
+    return { pass: true, label: 'Tracked .bak files: skipped (not a git checkout)' };
+  }
+  const paths = raw.split('\0').filter(Boolean);
+  if (paths.length === 0) {
+    return { pass: true, label: 'No tracked .bak backup files' };
+  }
+  const preview = paths.slice(0, 8);
+  const rest = paths.length - preview.length;
+  return {
+    warn: true,
+    label: `${paths.length} tracked .bak backup file${paths.length === 1 ? '' : 's'} found — an old update-system.mjs bug committed these, and no update untracks them on its own`,
+    fix: [
+      ...preview,
+      ...(rest > 0 ? [`...and ${rest} more`] : []),
+      "git ls-files '*.bak*'            # find them",
+      'git rm --cached <each path>      # untrack, leaving the file on disk',
+      'git commit -m "chore: untrack .bak backups"',
+    ],
+  };
+}
+
 async function checkPlaywright() {
   let chromium;
   try {
@@ -249,7 +288,15 @@ function isPlaywrightMcpFromPlugin() {
   return Object.entries(enabled).some(([key, on]) => {
     if (on !== true) return false;
     const entries = Array.isArray(installed[key]) ? installed[key] : [];
-    return entries.some(({ installPath } = {}) => {
+    // Read installPath off the entry rather than destructuring it: the `= {}`
+    // default only covers `undefined`, so a manifest carrying a literal `null`
+    // entry - valid JSON, and what a half-written install leaves behind - threw
+    // a TypeError here. That is worse than the miss this function was added to
+    // fix (#2752): doctor dies before printing, so every other check vanishes
+    // with it and the output looks like a broken install rather than one
+    // unconfigured plugin.
+    return entries.some((entry) => {
+      const installPath = entry?.installPath;
       if (typeof installPath !== 'string' || !installPath) return false;
       return hasPlaywrightIn(readConfigIfPresent(join(installPath, '.mcp.json')), { bare: true });
     });
@@ -449,7 +496,7 @@ function confirmFieldsFor(root) {
 }
 
 function checkFonts() {
-  const fontsDir = join(projectRoot, 'fonts');
+  const fontsDir = join(__dirname, 'fonts');
   if (!existsSync(fontsDir)) {
     return {
       pass: false,
@@ -493,28 +540,45 @@ function checkAutoDir(name) {
   }
 }
 
-// --strict only: probe the ATS slug of every tracked company in portals.yml so
-// a typo'd slug (which 404s silently on scans) surfaces here. Skipped gracefully
-// when portals.yml is absent. Delegates to verify-portals.mjs so there is one
-// slug-probing implementation. Network-bound, hence opt-in.
+// --strict only: probe every portals.yml entry (tracked_companies and job_boards)
+// so a typo'd slug or a dead board — either of which 404s silently on scans —
+// surfaces here. Skipped gracefully when portals.yml is absent. Delegates to
+// verify-portals.mjs so there is one probing implementation. Network-bound,
+// hence opt-in.
 async function checkPortalSlugs(root) {
   const portalsPath = join(root, 'portals.yml');
   if (!existsSync(portalsPath)) {
-    return { pass: true, label: 'ATS slugs: no portals.yml yet (skipped)' };
+    return { pass: true, label: 'Portal entries: no portals.yml yet (skipped)' };
   }
   try {
     const { verifyPortalsFile } = await import('./verify-portals.mjs');
-    const { results } = await verifyPortalsFile(portalsPath);
+    const { loadProviders } = await import('./providers/_registry.mjs');
+    const { makeHttpCtx } = await import('./providers/_http.mjs');
+    // Load the same provider plugins the scanner uses so tier 2 runs: without
+    // them every non-ATS entry (all job_boards, plus any Workday/Avature/…
+    // tracked_companies) resolves to an un-actionable "skipped" and a broken
+    // one would never reach "missing" — a false pass.
+    const providers = await loadProviders(join(__dirname, 'providers'));
+    const { results } = await verifyPortalsFile(portalsPath, {
+      providers,
+      httpCtx: makeHttpCtx(),
+    });
+    // Only 'missing' is a failure — a live probe that 404'd. 'skipped' (no
+    // provider claimed the entry) is left informational here, matching
+    // `verify-portals --strict`, which also fails only on 'missing'; an entry
+    // that resolves solely through a local parser is skipped by this path by
+    // design and must not fail the check.
     const unresolved = results.filter((r) => r.status === 'missing');
     if (unresolved.length === 0) {
-      return { pass: true, label: 'All ATS slugs in portals.yml resolve' };
+      return { pass: true, label: 'All portals.yml entries resolve' };
     }
     return {
       pass: false,
-      label: `${unresolved.length} ATS slug(s) in portals.yml do not resolve`,
+      label: `${unresolved.length} portals.yml entr${unresolved.length === 1 ? 'y' : 'ies'} do not resolve`,
       fix: [
         ...unresolved.map((r) => {
-          let line = `${r.name}: ${r.ats || '?'}/${r.slug || '?'} — ${r.reason || 'unresolved'}`;
+          const src = r.ats ? `${r.ats}/${r.slug}` : (r.provider || '?');
+          let line = `${r.name}: ${src} — ${r.reason || 'unresolved'}`;
           if (r.suggested) line += ` → try ${r.suggested.ats}/${r.suggested.slug}`;
           return line;
         }),
@@ -522,7 +586,7 @@ async function checkPortalSlugs(root) {
       ],
     };
   } catch (err) {
-    return { warn: true, label: `ATS slug check skipped: ${err.message}` };
+    return { warn: true, label: `Portal entry check skipped: ${err.message}` };
   }
 }
 
@@ -554,10 +618,20 @@ function checkPipelineFile() {
 
 // Discover plugins + their non-secret config block, synchronously. Used by both
 // the human check and the --json onboarding state.
+// A parse failure is REPORTED, not folded into {}. An unreadable config and a
+// config with nothing enabled produced the same empty object, so doctor — the
+// one tool whose job is to say what is wrong — answered "off" for every plugin
+// the user had actually switched on, and said nothing about why.
+//
+// Returns the config plus the parse error, so callers can tell the two apart.
 function readPluginConfigSync(root) {
   const cfgPath = join(root, 'config', 'plugins.yml');
-  if (!existsSync(cfgPath)) return {};
-  try { return yaml.load(readFileSync(cfgPath, 'utf8')) || {}; } catch { return {}; }
+  if (!existsSync(cfgPath)) return { cfg: {}, error: null };
+  try {
+    return { cfg: yaml.load(readFileSync(cfgPath, 'utf8')) || {}, error: null };
+  } catch (err) {
+    return { cfg: {}, error: String(err.message).split('\n')[0] };
+  }
 }
 
 // Plugin layer health: list discovered plugins + whether each enabled one's keys
@@ -566,7 +640,17 @@ function checkPlugins(root) {
   let manifests;
   try { manifests = discoverPlugins(pluginRoots(root)); } catch { return { pass: true, label: 'Plugins: none' }; }
   if (manifests.length === 0) return { pass: true, label: 'Plugins: none installed' };
-  const cfg = readPluginConfigSync(root);
+  const { cfg, error: cfgError } = readPluginConfigSync(root);
+  // Reported before the per-plugin lines, because when the config did not parse
+  // every one of those lines is derived from an empty object and says "off"
+  // regardless of what the user configured.
+  if (cfgError) {
+    return {
+      warn: true,
+      label: `Plugins: config/plugins.yml did not parse (${cfgError}) — every plugin below reads as off`,
+      fix: ['Fix the YAML in config/plugins.yml. Until then `plugins.mjs enable/disable` will refuse to write to it.'],
+    };
+  }
   const lines = [];
   const fixes = [];
   for (const m of manifests) {
@@ -591,11 +675,13 @@ async function main() {
     geminiNodeFloor(activeCli, process.versions.node),
     checkBillingSource(),
     checkDependencies(),
+    checkTrackedBakFiles(projectRoot),
     await checkPlaywright(),
     checkPlaywrightMcp(projectRoot, activeCli),
     checkScanExtractor(projectRoot),
     ...USER_LAYER_PREREQS.map(checkPrereq),
     checkFonts(),
+    checkPersonalization(projectRoot),
     checkAutoDir('data'),
     checkPipelineFile(),
     checkAutoDir('output'),
@@ -603,7 +689,7 @@ async function main() {
     checkPlugins(projectRoot),
   ].filter(Boolean);
 
-  // Network-bound ATS slug probe — only under --strict.
+  // Network-bound portals.yml reachability probe — only under --strict.
   if (STRICT) {
     checks.push(await checkPortalSlugs(projectRoot));
   }
@@ -649,6 +735,80 @@ async function main() {
   }
 }
 
+// Personalization files that silently degrade output while still passing the
+// existence check. `modes/_custom.md` is deliberately absent: it holds optional
+// procedural house rules, so shipping it unedited is a valid end state. These
+// two are not —
+//   _profile.md unedited feeds the TEMPLATE AUTHOR's archetypes and North Star
+//     into every A-F evaluation, so offers are scored against a stranger.
+//   _brief.md unedited hands the triage first pass literal `{placeholders}`
+//     instead of the candidate's archetypes, comp floor and hard DQ criteria.
+// doctor auto-copies both from their templates on first run, so "the file
+// exists" is guaranteed and tells us nothing — only its CONTENT does.
+const PERSONALIZATION_FILES = [
+  {
+    path: 'modes/_profile.md',
+    template: 'modes/_profile.template.md',
+    impact: 'evaluations score against the template author\'s targeting, not yours',
+  },
+  {
+    path: 'modes/_brief.md',
+    template: 'modes/_brief.template.md',
+    impact: 'triage reads literal {placeholders} instead of your archetypes',
+  },
+];
+
+// Placeholder tokens the template itself ships, e.g. `{Your Name}`. Comparing
+// against the template's own set (rather than any `{...}` run) keeps braces the
+// user legitimately wrote — a code snippet, a JSON example — from false-firing.
+function templatePlaceholders(text) {
+  return new Set(text.match(/\{[^{}\n]{2,60}\}/g) || []);
+}
+
+// Returns [{ path, reason }] for personalization files still carrying template
+// content. Missing files are NOT reported here — that is `missing`'s job.
+function unpersonalizedFiles(root) {
+  const out = [];
+  for (const { path, template, impact } of PERSONALIZATION_FILES) {
+    const targetPath = join(root, ...path.split('/'));
+    const templatePath = join(root, ...template.split('/'));
+    if (!existsSync(targetPath) || !existsSync(templatePath)) continue;
+    let target, tpl;
+    try {
+      target = readFileSync(targetPath, 'utf-8');
+      tpl = readFileSync(templatePath, 'utf-8');
+    } catch {
+      continue; // unreadable → let the existence checks speak
+    }
+    if (target === tpl) {
+      out.push({ path, reason: 'still identical to the shipped template', impact });
+      continue;
+    }
+    const left = [...templatePlaceholders(tpl)].filter((p) => target.includes(p));
+    if (left.length > 0) {
+      out.push({
+        path,
+        reason: `still has ${left.length} unfilled placeholder${left.length === 1 ? '' : 's'} (e.g. ${left[0]})`,
+        impact,
+      });
+    }
+  }
+  return out;
+}
+
+function checkPersonalization(root) {
+  const stale = unpersonalizedFiles(root);
+  if (stale.length === 0) {
+    return { label: 'Personalization files customized', pass: true };
+  }
+  return {
+    label: `Personalization incomplete: ${stale.map((s) => s.path).join(', ')}`,
+    warn: true,
+    fix: stale.flatMap((s) => [`${s.path} — ${s.reason}; ${s.impact}`,
+      `  ask your agent: "personalize ${s.path} from my CV"`]),
+  };
+}
+
 // Single source of truth for the cold-start state: the same four user-layer
 // prerequisites that AGENTS.md "First Run" lists. `--json` turns the trigger into
 // a deterministic mechanism the agent runs (instead of re-deriving it from prose),
@@ -663,7 +823,8 @@ function onboardingState(root) {
   ];
   for (const { target, template } of templates) {
     const targetPath = join(root, ...target.split('/'));
-    const templatePath = join(root, ...template.split('/'));
+    const rootTemplatePath = join(root, ...template.split('/'));
+    const templatePath = existsSync(rootTemplatePath) ? rootTemplatePath : join(__dirname, ...template.split('/'));
     if (!existsSync(targetPath) && existsSync(templatePath)) {
       try {
         copyFileSync(templatePath, targetPath);
@@ -681,9 +842,13 @@ function onboardingState(root) {
   const { cli: activeCli, source: cliSource, warning: cliWarning } = resolveActiveCli();
 
   const mcpCheck = checkPlaywrightMcp(root, activeCli);
+  const unpersonalized = unpersonalizedFiles(root);
+  const bakCheck = checkTrackedBakFiles(root);
   const warnings = [
     ...(cliWarning ? [cliWarning] : []),
     ...(mcpCheck?.warn ? [`${mcpCheck.label}\n→ ${[].concat(mcpCheck.fix || []).join('\n  ')}`] : []),
+    ...(bakCheck.warn ? [`${bakCheck.label}\n→ ${[].concat(bakCheck.fix || []).join('\n  ')}`] : []),
+    ...unpersonalized.map((u) => `${u.path} ${u.reason} — ${u.impact}\n→ Personalize it from cv.md before running evaluations.`),
   ];
 
   const playwrightMcp = activeCli !== 'unknown' && MCP_CONFIGS.find((c) => c.cli === activeCli)
@@ -691,8 +856,12 @@ function onboardingState(root) {
     : {};
 
   let plugins = [];
+  let pluginConfigError = null;
   try {
-    const cfg = readPluginConfigSync(root);
+    const { cfg, error } = readPluginConfigSync(root);
+    // Travels in the JSON so a consumer can tell "nothing enabled" from "the
+    // config did not parse" — the two used to be the same empty list.
+    pluginConfigError = error;
     plugins = discoverPlugins(pluginRoots(root)).map((m) => {
       const s = pluginStatus(m, cfg);
       return { id: m.id, hooks: m.hooks, enabled: s.enabled, missingEnv: s.missingEnv };
@@ -701,6 +870,11 @@ function onboardingState(root) {
   return {
     onboardingNeeded: missing.length > 0,
     missing,
+    // Non-blocking by design: career-ops is meant to work out of the box, so an
+    // unedited personalization file must not gate the whole system. It DOES have
+    // to be visible — surfaced as its own field the agent can branch on rather
+    // than a string it has to pattern-match out of `warnings`.
+    unpersonalized,
     warnings,
     autoCopied,
     // `config/profile.yml` ships placeholders annotated `# CONFIRM:`. An
@@ -709,6 +883,9 @@ function onboardingState(root) {
     // these to be surfaced — and explicitly NOT as an onboarding blocker.
     confirmFields: confirmFieldsFor(root),
     plugins,
+    // Only present when it happened, so existing consumers see no new key on a
+    // healthy run and a broken config is impossible to read as "none enabled".
+    ...(pluginConfigError ? { pluginConfigError } : {}),
     playwright_mcp: playwrightMcp,
     active_cli: activeCli,
     cli_source: cliSource,
@@ -722,12 +899,19 @@ function onboardingState(root) {
 // doctor's human banner into the middle of the test output — and the JSON branch's
 // process.exit(0) terminated test-all before finish() could print its summary, so
 // the suite reported nothing at all and still exited 0.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   argv = process.argv.slice(2);
-  validateFlags(argv, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS });
+  // requireOperand: without it, `--target --json` reads --json as the target
+  // path (targetIdx below has no adjacency check of its own), and the doctor
+  // silently diagnoses a directory literally named "--json" at exit 0
+  // (#3087) — this is the onboarding entrypoint, so that's a user told to
+  // create files that already exist. Nothing more specific to say than the
+  // shared message.
+  validateFlags(argv, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS, requireOperand: true });
 
   const targetIdx = argv.indexOf('--target');
-  projectRoot = targetIdx !== -1 && argv[targetIdx + 1] ? argv[targetIdx + 1] : __dirname;
+  projectRoot =
+    targetIdx !== -1 && argv[targetIdx + 1] ? argv[targetIdx + 1] : getCareerOpsRoot();
   JSON_OUT = argv.includes('--json');
   STRICT = argv.includes('--strict');
 

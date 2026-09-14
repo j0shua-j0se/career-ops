@@ -36,10 +36,13 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, ren
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(ROOT, 'data', 'pipeline.md');
-const HISTORY_PATH = process.env.CAREER_OPS_SCAN_HISTORY || join(ROOT, 'data', 'scan-history.tsv');
+const CAREER_OPS = getCareerOpsRoot();
+const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(CAREER_OPS, 'data', 'pipeline.md');
+const HISTORY_PATH = process.env.CAREER_OPS_SCAN_HISTORY || join(CAREER_OPS, 'data', 'scan-history.tsv');
 
 /** Strip tracking noise so the same posting is not queued under two URLs. */
 export function canonicalUrl(raw) {
@@ -509,8 +512,6 @@ silently. Queues only; never evaluates or submits.`);
   console.log('\nQueued only — nothing evaluated, nothing submitted. Next: /career-ops pipeline');
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).href.replace(/file:\/\/([A-Za-z]:)/, 'file:///$1')) {
-  main();
-} else if (process.argv[1] && process.argv[1].endsWith('ingest-jobs.mjs')) {
+if (isMainModule(import.meta.url)) {
   main();
 }

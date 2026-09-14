@@ -50,16 +50,19 @@ import {
 import { parsePipeline } from './triage-prefilter.mjs';
 import { HALT_ABORTED, classifyHaltReason } from './loop-core.mjs';
 import { parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
+import { getCareerOpsRoot, resolveTrackerPathForWrite } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 // Every artifact is redirectable through the one-env-var-per-artifact
 // convention the rest of the repo uses, so the suite can exercise the real
 // write paths without touching the user's own run state or tracker.
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const STATE_PATH = process.env.CAREER_OPS_RUN_STATE || join(ROOT, 'data', 'run-state.json');
-const RUN_LOG_PATH = process.env.CAREER_OPS_RUN_LOG || join(ROOT, 'data', 'run-log.md');
-const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(ROOT, 'data', 'pipeline.md');
-const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || join(ROOT, 'config', 'profile.yml');
-const TRACKER_PATH = process.env.CAREER_OPS_TRACKER || join(ROOT, 'data', 'applications.md');
+const CAREER_OPS = getCareerOpsRoot();
+const STATE_PATH = process.env.CAREER_OPS_RUN_STATE || join(CAREER_OPS, 'data', 'run-state.json');
+const RUN_LOG_PATH = process.env.CAREER_OPS_RUN_LOG || join(CAREER_OPS, 'data', 'run-log.md');
+const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(CAREER_OPS, 'data', 'pipeline.md');
+const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || join(CAREER_OPS, 'config', 'profile.yml');
+const TRACKER_PATH = resolveTrackerPathForWrite(CAREER_OPS);
 
 // ── State I/O ───────────────────────────────────────────────────────────────
 
@@ -502,6 +505,6 @@ function main() {
 // `run-all: unknown command "--quick".`, and process.exit(1) — killing
 // test-all mid-run before finish() could print its summary. Same bug class
 // and same fix as doctor.mjs (see its matching guard).
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   main();
 }
