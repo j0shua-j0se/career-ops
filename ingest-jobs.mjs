@@ -36,13 +36,20 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, ren
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
-import { getCareerOpsRoot } from './path-resolver.mjs';
+import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
+import { resolveColumns, parseTrackerRow, extractReqNumber, REQ_NUMBER_RE } from './tracker-parse.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CAREER_OPS = getCareerOpsRoot();
 const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(CAREER_OPS, 'data', 'pipeline.md');
 const HISTORY_PATH = process.env.CAREER_OPS_SCAN_HISTORY || join(CAREER_OPS, 'data', 'scan-history.tsv');
+// Same resolver verify-pipeline.mjs/merge-tracker.mjs use, so CAREER_OPS_TRACKER
+// and the data/applications.md-vs-applications.md fallback behave identically here.
+const APPLICATIONS_PATH = resolveTrackerPath(CAREER_OPS);
+// A scan-history sighting older than this is stale enough that a repost is a
+// legitimate new listing, not evidence of the same still-open requisition.
+const TITLE_DUP_HISTORY_MAX_AGE_DAYS = 90;
 
 /** Strip tracking noise so the same posting is not queued under two URLs. */
 export function canonicalUrl(raw) {
@@ -200,6 +207,237 @@ export function extractPostingId(url) {
   }
 }
 
+// ── Company + title duplicate guard ──────────────────────────────────────
+//
+// The opaque-redirect collapse above only catches a repost that ALSO landed
+// behind an opaque token last time. On 2026-09-14 three already-decided roles
+// came back through Indeed anyway: Primetals "Werkstudent (m/w/d) im Bereich
+// Künstliche Intelligenz" (tracker #5, Rejected), SUXXEED "Werkstudent (m/w/d)
+// AI Engineering" (triaged FAIL the day before) and CHECK24 "(Junior) Data
+// Scientist (m/f/d) Search / AI Forge" (triaged FAIL two days before) — none
+// of their EXISTING rows were themselves behind an opaque redirect, so
+// knownRedirectIdentities() never indexed them and a fresh Indeed token read
+// as new. Two gaps, not one: applications.md (the actual decision record) was
+// never consulted at all, and the identity index required BOTH sides to be
+// opaque.
+//
+// This is a second, independent guard: company+title match against
+// applications.md (every row, pending AND decided), pipeline.md (pending AND
+// processed) and scan-history.tsv (sightings within the last
+// TITLE_DUP_HISTORY_MAX_AGE_DAYS days), gated to avoid the false positive
+// AGENTS.md itself warns about — two genuinely different requisitions at one
+// employer sharing a title (see the Primetals #5/#16 KI vs DevOps-MLOps
+// pair). A req/job ID recognized by REQ_NUMBER_RE (tracker-parse.mjs) on BOTH
+// sides that disagrees is proof the rows are distinct and always wins.
+
+// Legal-entity suffixes stripped from a company name before duplicate
+// comparison, longest-first so a compound form is consumed whole. Mirrors
+// verify-pipeline.mjs's own LEGAL_FORMS list (kept local rather than
+// imported: verify-pipeline.mjs runs its health-check scan as an import-time
+// side effect, which would make every ingest run re-scan the reports
+// directory). "Group"/"Gruppe" are included per this guard's own spec, not
+// because they are a legal form.
+const COMPANY_DUP_LEGAL_FORMS = [
+  'GmbH & Co\\.? KG', 'GmbH', 'mbH', 'AG', 'SE', 'KGaA', 'KG',
+  'e\\.V\\.', 'eG', 'Gruppe', 'Group',
+  'Ltd\\.', 'Ltd', 'Limited', 'Inc\\.', 'Inc',
+].sort((a, b) => b.length - a.length);
+const COMPANY_DUP_LEGAL_FORM_RE = new RegExp(`,?\\s*(?:${COMPANY_DUP_LEGAL_FORMS.join('|')})\\.?\\s*$`, 'i');
+
+function stripCompanyDupLegalForm(s) {
+  let out = s;
+  for (let i = 0; i < 4; i++) {
+    const next = out.replace(COMPANY_DUP_LEGAL_FORM_RE, '');
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/** ä/ö/ü/ß -> ae/oe/ue/ss — the transliteration verify-pipeline.mjs's
+ * roleTokenSet() already uses so "Künstliche" and "Kuenstliche" (one from a
+ * board that serves umlauts, one deslugged from a URL that can't) key alike. */
+function foldGermanDiacritics(s) {
+  return String(s ?? '')
+    .replace(/ä/g, 'ae').replace(/Ä/g, 'Ae')
+    .replace(/ö/g, 'oe').replace(/Ö/g, 'Oe')
+    .replace(/ü/g, 'ue').replace(/Ü/g, 'Ue')
+    .replace(/ß/g, 'ss');
+}
+
+/** Company name -> normalised space-joined token string for duplicate matching. */
+export function normalizeCompanyForDup(raw) {
+  let s = String(raw ?? '').replace(/\([^)]*\)/g, ' '); // drop parentheticals
+  s = stripCompanyDupLegalForm(s);
+  s = foldGermanDiacritics(s);
+  s = s.normalize('NFKC').toLowerCase();
+  s = s.replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ');
+  return s;
+}
+
+/**
+ * Same-employer test for the duplicate guard: equal normalised keys always
+ * match; otherwise one side's tokens must be a whole-token prefix of the
+ * other's (min 3 characters), so "CHECK24" matches "CHECK24 Services
+ * Personal GmbH" and "SUXXEED" matches "SUXXEED Sales for your Success
+ * GmbH" without a bare "Co" or "AI" matching everything. Same convention as
+ * verify-pipeline.mjs's companyKeysMatch (Check 15) — kept local for the same
+ * import-time-side-effect reason as the legal-forms list above.
+ */
+export function companyDupMatch(a, b) {
+  const ta = normalizeCompanyForDup(a).split(' ').filter(Boolean);
+  const tb = normalizeCompanyForDup(b).split(' ').filter(Boolean);
+  const ka = ta.join('');
+  const kb = tb.join('');
+  if (!ka || !kb) return false;
+  if (ka === kb) return true;
+  if (ka.length < 3 || kb.length < 3) return false;
+  const isPrefix = (short, long) =>
+    short.length > 0 && short.length <= long.length && short.every((t, i) => t === long[i]);
+  return isPrefix(ta, tb) || isPrefix(tb, ta);
+}
+
+const GENDER_MARKER_RE = /\(\s*[mwfdxsg](?:\s*[/,]\s*[mwfdxsg]){1,}\s*\)/gi;
+const GENDER_PHRASE_RE = /\((?:all genders?|any gender|divers)\)/gi;
+// Matched globally so an inline req/job ID (a title occasionally carries one
+// straight from the board, e.g. "Senior Engineer (Job ID 44444)") does not
+// make two otherwise-identical titles key differently — the ID is compared
+// separately (findTitleDuplicate reads it via extractReqNumber on the RAW
+// title, before this strip runs) and is exactly what should decide same vs.
+// different, not an accident of whether the digits happen to differ.
+const TITLE_REQ_ID_RE = new RegExp(REQ_NUMBER_RE.source, 'gi');
+
+/** Title -> normalised string for duplicate matching: gender markers in every
+ * order/letter-set the market uses gone, an inline req/job ID gone, umlauts
+ * folded, punctuation and case folded, whitespace collapsed. */
+export function normalizeTitleForDup(raw) {
+  let s = String(raw ?? '').replace(GENDER_MARKER_RE, ' ').replace(GENDER_PHRASE_RE, ' ').replace(TITLE_REQ_ID_RE, ' ');
+  s = foldGermanDiacritics(s);
+  s = s.normalize('NFKC').toLowerCase();
+  s = s.replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ');
+  return s;
+}
+
+/**
+ * Whether `url` is the kind of aggregator/tracking link that mints a fresh
+ * URL for the same posting on every search — Indeed's `to.indeed.com` token
+ * and `indeed.com/viewjob` results page, or a LinkedIn/XING/wellfound listing
+ * (reuses OPAQUE_REDIRECT_HOSTS and LISTING_HOSTS above rather than a new
+ * list). A direct employer career-site URL never counts, even when it also
+ * happens to duplicate a title — that is the false-positive AGENTS.md warns
+ * about, and the req-ID veto below is what actually settles those.
+ */
+export function isAggregatorTrackingUrl(url) {
+  if (isOpaqueRedirect(url)) return true;
+  try {
+    const u = new URL(url);
+    if (hostMatches(u.hostname, 'indeed.com') && /^\/viewjob\/?$/i.test(u.pathname)) return true;
+    if (isListingHost(u.hostname)) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Build the company+title duplicate index from every source AGENTS.md treats
+ * as a record of a posting already seen: applications.md (the tracker — full
+ * table, pending AND decided rows), pipeline.md (pending AND processed inbox
+ * rows) and scan-history.tsv (scanner sightings within the last
+ * TITLE_DUP_HISTORY_MAX_AGE_DAYS days). Ordered tracker-first: it is the most
+ * authoritative source (an actual decision, not just a sighting), so it wins
+ * the reported reference when a row appears in more than one place.
+ *
+ * @param {string} historyText
+ * @param {string} pipelineText
+ * @param {string} applicationsText
+ * @param {{today?: string|Date}} [opts]
+ * @returns {Array<{company: string, title: string, reqId: string|null, reference: string}>}
+ */
+export function buildTitleDupIndex(historyText = '', pipelineText = '', applicationsText = '', opts = {}) {
+  const entries = [];
+
+  const appLines = String(applicationsText).split(/\r?\n/);
+  const colmap = resolveColumns(appLines);
+  for (const line of appLines) {
+    const row = parseTrackerRow(line, colmap);
+    if (!row || !row.company?.trim() || !row.role?.trim()) continue;
+    const status = String(row.status ?? '').replace(/\*\*/g, '').trim();
+    entries.push({
+      company: row.company,
+      title: row.role,
+      reqId: extractReqNumber(row.notes),
+      reference: `tracker #${row.num}${status ? ` (${status})` : ''}`,
+    });
+  }
+
+  // Inbox rows: `- [ ]`/`- [x]`/`- [!]` {url} | {company} | {title} | ...
+  for (const line of String(pipelineText).split(/\r?\n/)) {
+    const m = line.match(/^-\s*\[([ x!])\]\s+(\S+)\s*\|\s*([^|]*)\|\s*([^|]*)\|?(.*)$/);
+    if (!m) continue;
+    const [, box, , company, title, rest] = m;
+    if (!company.trim() || !title.trim()) continue;
+    entries.push({
+      company: company.trim(),
+      title: title.trim(),
+      reqId: extractReqNumber(`${title} ${rest}`),
+      reference: box === ' ' ? 'pipeline pending row' : 'pipeline processed row',
+    });
+  }
+
+  const today = opts.today ? new Date(opts.today) : new Date();
+  const cutoff = new Date(today.getTime() - TITLE_DUP_HISTORY_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
+  for (const line of String(historyText).split(/\r?\n/)) {
+    const col = line.split('\t');
+    // url, first_seen, portal, title, company, ...
+    if (col.length < 5) continue;
+    const [, firstSeen, , title, company] = col;
+    if (!company?.trim() || !title?.trim()) continue;
+    const seenDate = new Date(firstSeen);
+    if (isNaN(seenDate.getTime()) || seenDate < cutoff) continue;
+    entries.push({
+      company: company.trim(),
+      title: title.trim(),
+      reqId: extractReqNumber(title),
+      reference: `scan-history ${firstSeen}`,
+    });
+  }
+
+  return entries;
+}
+
+/**
+ * Check one offer against the duplicate index built by buildTitleDupIndex().
+ * Pure. Returns the first confident match, or null.
+ *
+ * @param {object} offer - reads `company`, `title`, `url`
+ * @param {Array<{company:string, title:string, reqId:string|null, reference:string}>} entries
+ * @returns {{entry: object, reason: string}|null}
+ */
+export function findTitleDuplicate(offer, entries) {
+  const titleKey = normalizeTitleForDup(offer.title);
+  if (!titleKey) return null;
+  const reqIncoming = extractReqNumber(offer.title);
+  const aggregator = isAggregatorTrackingUrl(offer.url);
+  for (const entry of entries) {
+    if (!companyDupMatch(offer.company, entry.company)) continue;
+    if (normalizeTitleForDup(entry.title) !== titleKey) continue;
+    // Both sides carry a recognizable req/job ID and they disagree: proof of
+    // two distinct requisitions (the Primetals #5/#16 case) — never a dup.
+    if (reqIncoming && entry.reqId && reqIncoming !== entry.reqId) continue;
+    if (aggregator) {
+      return { entry, reason: `same company and title as ${entry.reference} behind an aggregator/tracking URL` };
+    }
+    if (!entry.reqId) {
+      return { entry, reason: `same company and title as ${entry.reference} (no distinguishing req/job ID on the existing row)` };
+    }
+    // Existing row DOES carry a req ID and the incoming offer names none, and
+    // the URL is a direct employer link — not confident enough to collapse;
+    // keep looking in case a later entry is.
+  }
+  return null;
+}
+
 /**
  * Decide whether a single offer's URL is a real posting worth queuing, or a
  * listing/search/aggregator page that merely looks like one. Pure — does not
@@ -277,16 +515,18 @@ export function classifyIngestUrl(url, offer = {}, opts = {}) {
  *
  * @param {object[]} offers
  * @param {Set<string>} seen
- * @param {{allowListing?: boolean}} [opts]
- * @returns {{queued: object[], duplicates: object[], invalid: object[], rejected: object[], duplicateIds: object[]}}
+ * @param {{allowListing?: boolean, titleDupIndex?: object[], allowTitleDups?: boolean}} [opts]
+ * @returns {{queued: object[], duplicates: object[], invalid: object[], rejected: object[], duplicateIds: object[], duplicateTitle: object[]}}
  */
 export function planIngest(offers, seen, opts = {}) {
   const allowListing = Boolean(opts.allowListing);
+  const allowTitleDups = Boolean(opts.allowTitleDups);
   const queued = [];
   const duplicates = [];
   const invalid = [];
   const rejected = [];
   const duplicateIds = [];
+  const duplicateTitle = [];
   const batch = new Set();
   const candidates = [];
 
@@ -342,6 +582,23 @@ export function planIngest(offers, seen, opts = {}) {
   candidates.length = 0;
   candidates.push(...afterCollapse);
 
+  // Company+title duplicate guard: catches a repost the opaque-redirect
+  // collapse above cannot, because the EXISTING sighting was never itself
+  // behind an opaque token (a tracker row, or a plain-URL scan/pipeline row).
+  // See findTitleDuplicate()'s header for the exact matching rule and the
+  // false positive it is built to avoid. `--allow-title-dups` bypasses this
+  // guard entirely; everything else in planIngest is unaffected by it.
+  if (!allowTitleDups && Array.isArray(opts.titleDupIndex) && opts.titleDupIndex.length) {
+    const survivors = [];
+    for (const o of candidates) {
+      const match = findTitleDuplicate(o, opts.titleDupIndex);
+      if (match) duplicateTitle.push({ ...o, reason: match.reason });
+      else survivors.push(o);
+    }
+    candidates.length = 0;
+    candidates.push(...survivors);
+  }
+
   // Duplicate-posting-ID guard: one extracted posting ID appearing under more
   // than one distinct company within this batch cannot be more than one real
   // job. Rather than guess which (if any) company is real, reject all of
@@ -373,7 +630,7 @@ export function planIngest(offers, seen, opts = {}) {
     }
   }
 
-  return { queued, duplicates, invalid, rejected, duplicateIds };
+  return { queued, duplicates, invalid, rejected, duplicateIds, duplicateTitle };
 }
 
 /** Insert rows directly under the `## Pending` heading. */
@@ -396,6 +653,7 @@ function main() {
         source: { type: 'string' },
         'dry-run': { type: 'boolean', default: false },
         'allow-listing': { type: 'boolean', default: false },
+        'allow-title-dups': { type: 'boolean', default: false },
         help: { type: 'boolean', default: false },
       },
       strict: true,
@@ -407,17 +665,23 @@ function main() {
   }
 
   if (values.help || !values.file) {
-    console.log(`Usage: node ingest-jobs.mjs --file <offers.json> --source <label> [--dry-run] [--allow-listing]
+    console.log(`Usage: node ingest-jobs.mjs --file <offers.json> --source <label> [--dry-run] [--allow-listing] [--allow-title-dups]
 
-  --file           JSON array of {url, company, title, location?, postedAt?}
-  --source         where these came from, recorded on each row (e.g. indeed-mcp)
-  --dry-run        print what would be queued, write nothing
-  --allow-listing  don't reject LinkedIn/XING/wellfound listing-page URLs
-                   (search paths, browse-jobs-near-X slugs); everything else
-                   this script rejects (placeholder company, blog/career-advice
-                   content, ambiguous duplicate posting IDs) still is
+  --file              JSON array of {url, company, title, location?, postedAt?}
+  --source            where these came from, recorded on each row (e.g. indeed-mcp)
+  --dry-run           print what would be queued, write nothing
+  --allow-listing     don't reject LinkedIn/XING/wellfound listing-page URLs
+                      (search paths, browse-jobs-near-X slugs); everything else
+                      this script rejects (placeholder company, blog/career-advice
+                      content, ambiguous duplicate posting IDs) still is
+  --allow-title-dups  don't reject rows matching an existing company+title
+                      (applications.md, pipeline.md, recent scan-history.tsv)
+                      behind an aggregator/tracking URL or with no distinguishing
+                      req ID; everything else this script rejects still is
 
-Dedups against data/scan-history.tsv and the inbox. Rejects listing/search
+Dedups against data/scan-history.tsv and the inbox by URL, PLUS company+title
+against applications.md/pipeline.md/scan-history.tsv so a fresh Indeed tracking
+token on an already-decided posting doesn't read as new. Rejects listing/search
 pages, aggregator content, placeholder companies, and same-ID-different-company
 rows so a search-results page never lands in the inbox as if it were a
 posting — every rejection is counted and reported below, never dropped
@@ -443,11 +707,18 @@ silently. Queues only; never evaluates or submits.`);
 
   const pipelineText = existsSync(PIPELINE_PATH) ? readFileSync(PIPELINE_PATH, 'utf-8') : '# Pipeline\n\n## Pending\n\n## Processed\n';
   const historyText = existsSync(HISTORY_PATH) ? readFileSync(HISTORY_PATH, 'utf-8') : '';
+  const applicationsText = existsSync(APPLICATIONS_PATH) ? readFileSync(APPLICATIONS_PATH, 'utf-8') : '';
   const allowListing = Boolean(values['allow-listing']);
-  const { queued, duplicates, invalid, rejected, duplicateIds } = planIngest(
+  const allowTitleDups = Boolean(values['allow-title-dups']);
+  const { queued, duplicates, invalid, rejected, duplicateIds, duplicateTitle } = planIngest(
     offers,
     knownUrls(historyText, pipelineText),
-    { allowListing, seenIdentities: knownRedirectIdentities(historyText, pipelineText) },
+    {
+      allowListing,
+      allowTitleDups,
+      seenIdentities: knownRedirectIdentities(historyText, pipelineText),
+      titleDupIndex: buildTitleDupIndex(historyText, pipelineText, applicationsText),
+    },
   );
 
   const today = new Date().toISOString().slice(0, 10);
@@ -491,12 +762,15 @@ silently. Queues only; never evaluates or submits.`);
     invalid: invalid.length,
     rejected: rejected.length,
     duplicateIds: duplicateIds.length,
+    duplicateTitle: duplicateTitle.length,
     allowListing,
+    allowTitleDups,
     dryRun: Boolean(values['dry-run']),
     rows: rows.slice(0, 20),
     invalidReasons: invalid.slice(0, 5).map((i) => i.reason),
     rejectedReasons: rejected.map((r) => `${r.company || '?'} — ${r.url} — ${r.reason}`),
     duplicateIdReasons: duplicateIds.map((r) => `${r.company || '?'} — ${r.url} — ${r.reason}`),
+    duplicateTitleReasons: duplicateTitle.map((r) => `${r.company || '?'} | ${r.title || '?'} — ${r.reason}`),
   }, null, 2));
 
   if (rejected.length) {
@@ -507,6 +781,11 @@ silently. Queues only; never evaluates or submits.`);
   if (duplicateIds.length) {
     console.log(`\n${duplicateIds.length} row(s) rejected as an ambiguous duplicate posting ID (same ID, different companies, unverifiable):`);
     for (const r of duplicateIds) console.log(`  - ${r.company || '?'} | ${r.url} | ${r.reason}`);
+  }
+  if (duplicateTitle.length) {
+    console.log(`\n${duplicateTitle.length} row(s) skipped as a company+title duplicate of an existing tracker/pipeline/scan-history row:`);
+    for (const r of duplicateTitle) console.log(`  - ${r.company || '?'} | ${r.title || '?'} | ${r.url} | ${r.reason}`);
+    if (!allowTitleDups) console.log('  Pass --allow-title-dups to queue these anyway.');
   }
 
   console.log('\nQueued only — nothing evaluated, nothing submitted. Next: /career-ops pipeline');

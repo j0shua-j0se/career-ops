@@ -458,3 +458,149 @@ try {
     fail('a non-redirector history row leaked into the identity index');
   }
 }
+
+// ── Company+title duplicate guard ────────────────────────────────────
+//
+// Catches a repost the opaque-redirect collapse above cannot: the EXISTING
+// sighting is a tracker row / plain-URL pipeline row / scan-history row, not
+// itself behind an opaque token, so knownRedirectIdentities() never indexed
+// it and a fresh Indeed token on the same company+title read as brand new.
+// Fixture-based: every fixture is written to a real temp dir, mirroring how
+// applications.md/pipeline.md/scan-history.tsv actually look, never the live
+// data/ files.
+{
+  const { planIngest, buildTitleDupIndex, findTitleDuplicate, companyDupMatch, normalizeTitleForDup } =
+    await import(pathToFileURL(SCRIPT).href);
+
+  const dupTmp = mkdtempSync(join(tmpdir(), 'ingest-jobs-titledup-'));
+  try {
+    // ── Company normaliser: legal-suffix + prefix matching (verified against
+    // the three real 2026-09-14 collisions this guard exists to catch) ──────
+    if (companyDupMatch('CHECK24', 'CHECK24 Services Personal GmbH')) {
+      pass('companyDupMatch folds a GmbH legal suffix and tolerates a trailing descriptor via whole-token prefix');
+    } else {
+      fail('companyDupMatch did not equate "CHECK24" with "CHECK24 Services Personal GmbH"');
+    }
+    if (companyDupMatch('SUXXEED Sales for your Success GmbH', 'SUXXEED')) {
+      pass('companyDupMatch is direction-independent');
+    } else {
+      fail('companyDupMatch failed in the reverse direction');
+    }
+    // Same accepted tradeoff verify-pipeline.mjs's companyKeysMatch documents
+    // (Check 15): a whole-token prefix match, not "strip known suffixes only" —
+    // it is what makes "CHECK24" reach "CHECK24 Services Personal GmbH" above,
+    // and it costs precision on an unrelated trailing word like "Robotics".
+    if (companyDupMatch('Acme', 'Acme Robotics')) {
+      pass('companyDupMatch is a whole-token-prefix match, so it also folds a non-legal trailing word — same tradeoff verify-pipeline.mjs accepts');
+    } else {
+      fail('companyDupMatch unexpectedly stopped being a prefix match');
+    }
+    if (companyDupMatch('SiemensEnergy', 'Siemens')) {
+      fail('companyDupMatch should NOT match a single merged token against its prefix — that is the false-collision case the prefix rule exists to avoid');
+    } else {
+      pass('companyDupMatch does not match a single compound token ("SiemensEnergy") against just "Siemens"');
+    }
+    if (normalizeTitleForDup('Werkstudent (w/m/d) AI Engineering') === normalizeTitleForDup('Werkstudent (m/w/d)  AI Engineering ')) {
+      pass('normalizeTitleForDup folds gender-marker order/spacing to the same key');
+    } else {
+      fail('normalizeTitleForDup treated two gender-marker spellings as different titles');
+    }
+
+    // ── Case 1: an Indeed token repost of a tracker row is skipped, with a
+    //    reference back to the tracker row ────────────────────────────────
+    const applicationsPath = join(dupTmp, 'applications.md');
+    writeFileSync(applicationsPath, [
+      '| 5 | 2026-08-18 | Primetals Technologies Germany GmbH | Werkstudent (m/w/d) im Bereich Kuenstliche Intelligenz | 4.4/5 | Rejected | ✅ | — | Best fit in pipeline. |',
+    ].join('\n') + '\n', 'utf-8');
+    const pipelineEmpty = '# Pipeline\n\n## Pending\n\n## Processed\n';
+
+    const trackerIndex = buildTitleDupIndex('', pipelineEmpty, readFileSync(applicationsPath, 'utf-8'));
+    const repostPlan = planIngest(
+      [{ url: 'https://to.indeed.com/aavjdrm4nd9w', company: 'Primetals Technologies', title: 'Werkstudent (m/w/d) im Bereich Künstliche Intelligenz' }],
+      new Set(),
+      { titleDupIndex: trackerIndex },
+    );
+    if (repostPlan.queued.length === 0 && repostPlan.duplicateTitle.length === 1 && /tracker #5/.test(repostPlan.duplicateTitle[0].reason)) {
+      pass('an Indeed-token repost of a tracker row is skipped and its reason references "tracker #5"');
+    } else {
+      fail(`repost of a tracker row was not caught with a tracker reference: ${JSON.stringify(repostPlan)}`);
+    }
+
+    // ── Case 2: same title, different req IDs on both sides -> NOT a
+    //    duplicate, both ingested (the false positive AGENTS.md warns about:
+    //    two genuinely distinct requisitions sharing a title) ──────────────
+    const pipelineWithReqA = [
+      '# Pipeline', '', '## Pending', '',
+      '- [ ] https://jobs.example.com/careers/aaa | Globex Industries | Senior Platform Engineer (Job ID 44444) | Berlin | posted: 2026-09-01 | via: manual',
+      '', '## Processed', '',
+    ].join('\n');
+    const reqIndex = buildTitleDupIndex('', pipelineWithReqA, '');
+    const reqPlan = planIngest(
+      [{ url: 'https://jobs.example.com/careers/bbb', company: 'Globex Industries', title: 'Senior Platform Engineer (Job ID 55555)' }],
+      new Set(),
+      { titleDupIndex: reqIndex },
+    );
+    if (reqPlan.queued.length === 1 && reqPlan.duplicateTitle.length === 0) {
+      pass('same company+title with two DIFFERENT recognizable req IDs is not treated as a duplicate — both requisitions survive');
+    } else {
+      fail(`different-req-ID rows were wrongly collapsed: ${JSON.stringify(reqPlan)}`);
+    }
+
+    // ── Case 3: same title. The EXISTING row DOES carry a distinguishing req
+    //    ID (so it isn't the ambiguous "no ID at all" case Case 1 covers);
+    //    the incoming offer names no req ID and arrives on a direct employer
+    //    URL (not an aggregator/tracking link) -> not confident enough that
+    //    this is the SAME requisition as the one the existing ID names ->
+    //    ingested, no false positive ─────────────────────────────────────
+    const pipelineWithExistingId = [
+      '# Pipeline', '', '## Pending', '',
+      '- [ ] https://jobs.example.com/careers/ccc | Initech Corp | Data Platform Engineer | Munich | posted: 2026-09-01 | via: manual | req JR-9001',
+      '', '## Processed', '',
+    ].join('\n');
+    const existingIdIndex = buildTitleDupIndex('', pipelineWithExistingId, '');
+    const directPlan = planIngest(
+      [{ url: 'https://careers.initech.com/jobs/data-platform-engineer-2026', company: 'Initech Corp', title: 'Data Platform Engineer' }],
+      new Set(),
+      { titleDupIndex: existingIdIndex },
+    );
+    if (directPlan.queued.length === 1 && directPlan.duplicateTitle.length === 0) {
+      pass('same title via a direct (non-aggregator) employer URL, with no req ID on the incoming side, is not a false-positive duplicate of an existing row that DOES carry one');
+    } else {
+      fail(`a direct employer URL was wrongly treated as a duplicate: ${JSON.stringify(directPlan)}`);
+    }
+    // The same pair DOES get caught once the incoming URL is an aggregator
+    // link instead — confirms the direct-URL case above is the discriminator,
+    // not merely "the incoming offer has no ID".
+    const viaAggregator = planIngest(
+      [{ url: 'https://to.indeed.com/zz9988', company: 'Initech Corp', title: 'Data Platform Engineer' }],
+      new Set(),
+      { titleDupIndex: existingIdIndex },
+    );
+    if (viaAggregator.queued.length === 0 && viaAggregator.duplicateTitle.length === 1) {
+      pass('the identical pair IS caught when the incoming URL is an aggregator/tracking link instead of a direct employer URL');
+    } else {
+      fail(`aggregator-sourced duplicate was not caught: ${JSON.stringify(viaAggregator)}`);
+    }
+
+    // ── Case 4: --allow-title-dups bypasses the guard entirely ────────────
+    const allowPlan = planIngest(
+      [{ url: 'https://to.indeed.com/aavjdrm4nd9w', company: 'Primetals Technologies', title: 'Werkstudent (m/w/d) im Bereich Künstliche Intelligenz' }],
+      new Set(),
+      { titleDupIndex: trackerIndex, allowTitleDups: true },
+    );
+    if (allowPlan.queued.length === 1 && allowPlan.duplicateTitle.length === 0) {
+      pass('--allow-title-dups (allowTitleDups option) bypasses the guard and queues the row anyway');
+    } else {
+      fail(`allowTitleDups did not bypass the guard: ${JSON.stringify(allowPlan)}`);
+    }
+
+    // findTitleDuplicate itself never throws on a title-less/company-less offer.
+    if (findTitleDuplicate({ url: 'https://x.example.com/1', company: '', title: '' }, trackerIndex) === null) {
+      pass('findTitleDuplicate returns null (not a crash) for an offer with no title');
+    } else {
+      fail('findTitleDuplicate should return null for an empty title');
+    }
+  } finally {
+    try { rmSync(dupTmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
