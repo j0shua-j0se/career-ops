@@ -203,6 +203,25 @@ try {
   check('record refuses a file whose keys match no candidate',
     unmatched.status === 1 && /matched a candidate/.test(unmatched.stderr), unmatched.stderr.trim());
 
+  // A score file written by PowerShell/Notepad on Windows: CRLF line endings
+  // throughout, plus the leading UTF-8 BOM PowerShell 5.1's
+  // `Set-Content -Encoding utf8` adds. Both used to break `record`: the BOM
+  // landed in the first key and the bare '\n' split left a trailing \r on
+  // every line, which defeated parseTriageLine's `$` anchor everywhere but
+  // the last line.
+  const crlfKey = keys[3];
+  const crlfFile = join(box, 'scores-crlf.txt');
+  writeFileSync(crlfFile, '﻿' + [
+    `${crlfKey}\tTRIAGE: MARGINAL | Delta | Data Engineer | 3.6/5 | crlf line one`,
+  ].join('\r\n') + '\r\n', 'utf-8');
+  const recordedCrlf = loopJson('record', '--file', crlfFile);
+  check('record parses every line of a CRLF + BOM score file, not just the last',
+    recordedCrlf.status === 0 && recordedCrlf.json?.scored === 1,
+    `${recordedCrlf.json?.scored} scored ${recordedCrlf.stderr.trim()}`);
+  check('the BOM does not leak into the first key',
+    readState().candidates[crlfKey]?.score === 3.6,
+    JSON.stringify(readState().candidates[crlfKey]));
+
   // ── status / wave guard ────────────────────────────────────────────────────
   const summary = loop('status', '--summary');
   check('status --summary prints the qualified/target line',

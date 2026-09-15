@@ -382,14 +382,18 @@ function cmdIngest(flags) {
  * TRIAGE line survive that.
  */
 function parseScoreFile(text) {
-  const trimmed = text.trim();
+  // PowerShell/Notepad on Windows write CRLF (and Set-Content -Encoding utf8
+  // in PowerShell 5.1 adds a leading UTF-8 BOM) -- strip the BOM before
+  // trimming so the first key matches, and split on /\r?\n/ below so every
+  // line, not just the last, survives.
+  const trimmed = text.replace(/^\uFEFF/, '').trim();
   if (trimmed.startsWith('[')) {
     const parsed = JSON.parse(trimmed);
     if (!Array.isArray(parsed)) throw new Error('score file JSON must be an array.');
     return parsed;
   }
   const out = [];
-  for (const line of trimmed.split('\n')) {
+  for (const line of trimmed.split(/\r?\n/)) {
     const tab = line.indexOf('\t');
     if (tab === -1) continue;
     const [verdict] = parseTriageOutput(line.slice(tab + 1));

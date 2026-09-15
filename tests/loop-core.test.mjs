@@ -164,6 +164,29 @@ eq(parseTriageLine(''), null, 'an empty line parses to null');
   eq(out[1].score, 1.5, 'the second verdict keeps its own score');
 }
 
+{
+  // A file written by PowerShell/Notepad on Windows is CRLF: every line but
+  // the last carries a trailing \r that used to defeat parseTriageLine's `$`
+  // anchor, so only the last line ever parsed.
+  const out = parseTriageOutput([
+    'TRIAGE: PASS | Acme | AI Engineer | 4.1/5 | fits',
+    'TRIAGE: MARGINAL | Beta | ML Lead | 3.5/5 | thin platform depth',
+    'TRIAGE: FAIL | BigCo | Sales | 1.5/5 | wrong archetype',
+  ].join('\r\n'));
+  eq(out.length, 3, 'all three CRLF-separated TRIAGE lines are recovered, not just the last');
+}
+
+eq(
+  parseTriageLine('TRIAGE: PASS | Acme | AI Engineer | 4.1/5 | fits\r').reason,
+  'fits',
+  'a single line carrying a trailing \\r still parses, with the \\r stripped from the reason',
+);
+eq(
+  parseTriageLine('TRIAGE: PASS | Acme | AI Engineer | 4.1/5 | fits\r').score,
+  4.1,
+  'the score parses too on a line with a trailing \\r',
+);
+
 // ── Scoring ─────────────────────────────────────────────────────────────────
 
 {

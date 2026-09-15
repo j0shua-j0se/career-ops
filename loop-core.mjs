@@ -283,7 +283,10 @@ export function ingestOffers(state, offers, wave) {
  * @returns {{verdict:string, company:string, role:string, score:number, reason:string}|null}
  */
 export function parseTriageLine(line) {
-  const m = /TRIAGE:\s*(PASS|MARGINAL|FAIL|SKIP)\s*\|(.*)$/i.exec(String(line ?? ''));
+  // Strip a trailing \r so a single CRLF line handed in directly (not just via
+  // parseTriageOutput's own split) still parses: `.` excludes \r and `$` (no
+  // `m` flag) anchors to end-of-string, so an untouched \r fails the match.
+  const m = /TRIAGE:\s*(PASS|MARGINAL|FAIL|SKIP)\s*\|(.*)$/i.exec(String(line ?? '').replace(/\r$/, ''));
   if (!m) return null;
   const cells = m[2].split('|').map((s) => s.trim());
   const scoreCell = cells[2] ?? '';
@@ -308,7 +311,10 @@ export function parseTriageLine(line) {
  */
 export function parseTriageOutput(text) {
   const out = [];
-  for (const line of String(text ?? '').split('\n')) {
+  // CRLF from a Windows editor leaves a trailing \r on every line but the
+  // last; splitting on '\n' alone fed that \r into parseTriageLine's `$`
+  // anchor and dropped all but that last line. Split on /\r?\n/ instead.
+  for (const line of String(text ?? '').split(/\r?\n/)) {
     const parsed = parseTriageLine(line);
     if (parsed) out.push(parsed);
   }
