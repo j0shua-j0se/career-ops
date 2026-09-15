@@ -46,7 +46,7 @@ import {
 } from './loop-core.mjs';
 import { parsePipeline, rankEntry } from './triage-prefilter.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
-import { loadCheckpoint, checkpointCompatible } from './scan-ats-full.mjs';
+import { loadCheckpoint, checkpointCompatible, parseArgs as parseScanAtsFullArgs } from './scan-ats-full.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
@@ -232,7 +232,7 @@ function prefilterReject(state) {
  * Only ever ADDS the flag — never removes a caller's, never resumes a
  * checkpoint the compatibility test rejects, and never touches a dry run.
  */
-function buildWaveArgs(strategy, flags) {
+export function buildWaveArgs(strategy, flags) {
   const base = flags['dry-run'] ? [...strategy.args, '--dry-run'] : [...strategy.args];
   if (flags['dry-run']) return base;
   if (!/scan-ats-full\.mjs/.test(String(strategy.args?.[0] ?? ''))) return base;
@@ -240,16 +240,40 @@ function buildWaveArgs(strategy, flags) {
   try {
     const cp = loadCheckpoint();
     if (!cp) return base;
-    const sinceIdx = base.indexOf('--since');
-    const since = sinceIdx >= 0 ? Number(base[sinceIdx + 1]) : undefined;
-    const ats = String(strategy.args.find((a, i) => strategy.args[i - 1] === '--ats') ?? '').split(',').filter(Boolean);
-    if (!checkpointCompatible(cp, { since, ats: ats.length ? ats : undefined })) return base;
+    // Derive opts with the SAME parser scan-ats-full.mjs uses on itself, so
+    // compatibility is judged against identical defaults. The old hand-rolled
+    // since/ats extraction only ever produced a partial opts object — no
+    // `limit`/`includeUndated`/`shuffle` keys at all — so checkpointCompatible
+    // compared the scanner's real defaults (limit: null, includeUndated: false)
+    // against `undefined` and never matched, even for a checkpoint written by
+    // this exact rung with no flags overridden. That's why the default
+    // ats-recent rung (`--since 7`) could never resume.
+    //
+    // parseArgs takes a process.argv-shaped array and slices off the first
+    // two elements itself, so prepend a dummy argv[0]/argv[1] pair — base[0]
+    // is already the script name scan-ats-full.mjs runs as.
+    //
+    // parseArgs calls process.exit(1) on an invalid flag or value (bad
+    // --since, unknown --ats source, ...). strategy.args comes only from the
+    // hardcoded WAVE_STRATEGIES table, never from user input, so that can't
+    // fire today — but neutralize process.exit for the call anyway, so a
+    // future rung with a typo'd flag degrades to "no --resume" instead of
+    // taking the whole loop process down.
+    const realExit = process.exit;
+    let opts;
+    try {
+      process.exit = (code) => { throw new Error(`scan-ats-full argv parse exited(${code})`); };
+      opts = parseScanAtsFullArgs(['node', ...base]);
+    } finally {
+      process.exit = realExit;
+    }
+    if (!checkpointCompatible(cp, opts)) return base;
     const held = Array.isArray(cp.offers) ? cp.offers.length : 0;
     console.error(`  resuming an interrupted sweep: ${cp.completedSources?.join(', ') || 'none'} complete, `
       + `${cp.current?.name ?? '?'} at ${cp.current?.resumeAt ?? '?'}/${cp.current?.datasetLen ?? '?'}, ${held} offer(s) held.`);
     return [...base, '--resume'];
   } catch {
-    return base;   // a checkpoint we cannot read is not a reason to skip the wave
+    return base;   // a checkpoint we cannot read, or rung args we cannot parse, is not a reason to skip the wave
   }
 }
 

@@ -276,7 +276,12 @@ const USAGE = `Usage:
   node scan-ats-full.mjs --keep-unlocated     # queue postings that report no location (unfilterable)
   node scan-ats-full.mjs --help               # print this usage block and exit`;
 
-function parseArgs(argv) {
+// Exported so scan-loop.mjs's buildWaveArgs can derive the exact same opts
+// object this script's own main() would, instead of hand-rolling a partial
+// one (see the comment at that call site). Importing this file has no side
+// effects — main() runs only under the isMainModule guard at the bottom of
+// this file — so re-using the parser here is safe.
+export function parseArgs(argv) {
   const args = argv.slice(2);
 
   // Shared with reply-watch.mjs/dedup-tracker.mjs/scan.mjs via
