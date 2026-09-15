@@ -22,7 +22,7 @@ node scan-loop.mjs next           # ask what to do; repeat until action = finish
 | Action | What you do |
 |---|---|
 | `scan` | `node scan-loop.mjs wave` — runs the next rung of the escalation ladder and ingests whatever landed in `data/pipeline.md`. If the rung is `agent-web`, it instead hands you an instruction: do Level 1 (Playwright on `tracked_companies`) and Level 3 (WebSearch) from the workflow below, collect `{url, company, title, location}`, and `node scan-loop.mjs ingest --file <offers.json>`. |
-| `score` | Triage the returned batch. **Load `modes/triage.md` and follow it exactly** — read only `modes/_brief.md`, ≤ 500 tokens per posting, emit exactly one `TRIAGE:` line per posting. Write `{key}\t{TRIAGE line}` per posting to a file and `node scan-loop.mjs record --file <scores.txt>`. `key` is the `key` field from the batch, not the URL. |
+| `score` | Triage the returned batch. First run `node fetch-jds.mjs --file <batch.json> --out <jds.json>` (batch = the `batch` array from `next`) and hand the triage worker `<jds.json>` instead of raw URLs. **Load `modes/triage.md` and follow it exactly** — read only `modes/_brief.md`, ≤ 500 tokens per posting, emit exactly one `TRIAGE:` line per posting. Write `{key}\t{TRIAGE line}` per posting to a file and `node scan-loop.mjs record --file <scores.txt>`. `key` is the `key` field from the batch, not the URL. |
 | `finish` | `node scan-loop.mjs finish` — promotes the qualified set, writes tracker rows, runs `merge-tracker.mjs`, writes `data/loop-shortlist.md`. |
 | `halt` | A budget was spent. `node scan-loop.mjs finish` anyway to keep whatever qualified, then report the `reason` to the user plainly. |
 | `done` | Nothing to do. |

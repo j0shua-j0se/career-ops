@@ -33,6 +33,15 @@ filled in, triage cannot run — fall back to full evaluation.
 Get the JD content, mirroring `pipeline.md`'s JD detection so an accessible posting
 isn't wrongly skipped just because WebFetch can't read it:
 
+- **Pre-fetched batch file**: if the orchestrator handed you a `fetch-jds.mjs` output
+  file, read this posting's `text` field from it directly — no WebFetch, no browser.
+  Only fall back to WebFetch/browser for an entry whose `status` is `error` or
+  `blocked`, or whose `text` is under ~300 chars. An entry with `status: 'expired'`
+  needs no fetch at all — return the `SKIP` line immediately (see step 5). An entry
+  with `status: 'robots-blocked'` or `status: 'unsafe-url'` must NOT fall back to
+  WebFetch/browser either — robots.txt forbids fetching it, or the egress guard
+  refused it as unsafe — so return immediately:
+  `TRIAGE: SKIP | {Company} | {Role} | 0/5 | Not fetchable (robots.txt / unsafe URL)`.
 - **PDF URL** (path ends in `.pdf`, or the page serves a PDF): read it directly with
   the **Read** tool. Do NOT WebFetch — WebFetch can't extract PDF text, which would
   wrongly mark a live PDF posting `SKIP`.
