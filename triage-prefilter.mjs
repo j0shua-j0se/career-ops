@@ -304,6 +304,20 @@ const MUNICH_PLZ_RANGES = [
   // codes, so it is recognised by name only.
 ];
 
+// Wide "possibly commutable" bands for the generic postal-code-based 'germany'
+// fallback below — deliberately much wider than HOME_PLZ_RANGES/MUNICH_PLZ_RANGES
+// so that a code inside them is EXCLUDED from that fallback and falls through to
+// the existing name-based checks instead. A commutable town whose name is not
+// (yet) in HOME_CITY_RE/MUNICH_CITY_RE — Bubenreuth 91088, Hersbruck 91217,
+// Höchstadt 91315, Roth 91154 near home; Freising 85354, Dachau 85221, Eching
+// 85386 near Munich — must stay 'unknown' so the title decides, not get hard-
+// rejected as 'germany' just because its PLZ starts with the right digits.
+const NEAR_HOME_PLZ_RANGES = [
+  [90000, 92999], // Middle/Upper Franconia + Upper Palatinate
+  [95000, 97999], // Upper/Lower Franconia
+  [80000, 86999], // wider Munich area
+];
+
 /**
  * Every standalone five-digit run in a string.
  *
@@ -392,6 +406,29 @@ export function classifyReach(location, title = '') {
   // is 'unknown', exactly like an empty cell.
   if (FOREIGN_COUNTRY_RE.test(loc) || FOREIGN_REGION_RE.test(loc)
     || FOREIGN_REMOTE_SCOPE_RE.test(loc) || FOREIGN_CITY_RE.test(loc)) return 'abroad';
+  // Public-sector boards (interamt.de) write a postal code into the location
+  // cell without ever naming a city this filter recognises — "Hybrid 65307 Bad
+  // Schwalbach (Frist: 02.10.2026)", "Hybrid 06112 Halle (Saale) (Frist:
+  // baldmöglichst)". Nothing above matched, so these used to fall all the way
+  // through to 'unknown' and cost a full LLM triage on every single one, even
+  // though a five-digit code that far from home is exactly as informative as a
+  // recognised city name like Bremen (OTHER_DE_CITY_RE, 'germany' two checks
+  // up). Same rule, cheaper signal: a code present, no foreign marker, and NOT
+  // inside NEAR_HOME_PLZ_RANGES is elsewhere in Germany.
+  //
+  // 'germany' and 'abroad' are both hard Stage-1 rejections in rankEntry
+  // (`if (reach === 'abroad') return drop(...)`; `if (reach === 'germany')
+  // return drop(...)`, both before Stage 2 fit checks run) — so misreading a
+  // foreign ZIP as a German one still only rejects the posting, never lets a
+  // distant one through. The only real risk is the opposite direction: a
+  // commutable town whose code merely starts with the right digits getting
+  // rejected before its name is ever recognised. That is exactly what
+  // NEAR_HOME_PLZ_RANGES guards against — a code inside it does not trigger
+  // this fallback and instead falls through to 'unknown', same as today.
+  const foreignSignal = FOREIGN_COUNTRY_RE.test(loc) || FOREIGN_REGION_RE.test(loc)
+    || FOREIGN_CITY_RE.test(loc);
+  if (codes.length > 0 && !foreignSignal
+    && codes.every((c) => !inRanges(c, NEAR_HOME_PLZ_RANGES))) return 'germany';
   return 'unknown';
 }
 
@@ -1028,6 +1065,26 @@ function selfTest() {
   check(classifyReach('Remote, Germany') === 'remote', 'an explicit German-scoped remote posting is still remote');
   check(classifyReach('Berlin (Hybrid)') === 'germany', 'a hybrid marker does not change Berlin out of the germany tier');
   check(classifyReach('Erlangen') === 'home', 'Erlangen is still home');
+
+  // ── NEAR_HOME_PLZ_RANGES: a postal code with no recognised city name still
+  // decides 'germany' vs 'unknown' ──
+  // interamt.de writes locations as "Hybrid {PLZ} {town} (Frist: {date})" and
+  // never names a city this filter recognises, so these used to fall all the
+  // way through to 'unknown' and cost a free LLM triage on every single one.
+  check(classifyReach('Hybrid 65307 Bad Schwalbach (Frist: 02.10.2026)') === 'germany', 'an interamt.de cell with an unrecognised town but a far-away PLZ is germany, not unknown');
+  check(classifyReach('Hybrid 65189 Wiesbaden') === 'germany', 'Wiesbaden has no city-name match, but its PLZ is far outside every near-home band');
+  check(classifyReach('Hybrid 06112 Halle (Saale) (Frist: baldmöglichst)') === 'germany', 'a non-date Frist value does not stop the postal-code fallback from firing');
+  check(classifyReach('Hybrid 46325 Borken (Frist: 11.10.2026)') === 'germany', 'Borken NRW is germany on PLZ alone');
+  check(classifyReach('Hybrid 28199 Bremen') === 'germany', 'Bremen (already recognised by OTHER_DE_CITY_RE) is unaffected by the new fallback');
+  // Towns inside NEAR_HOME_PLZ_RANGES must NOT be swept into 'germany' by PLZ
+  // prefix alone — they have to stay whatever they were before (city-recognised
+  // or 'unknown'), so the title still gets to decide.
+  check(classifyReach('91083 Baiersdorf') === 'home', 'Baiersdorf is recognised by HOME_CITY_RE and stays home, not germany');
+  check(classifyReach('91217 Hersbruck') === 'unknown', 'Hersbruck is inside the near-home PLZ band and unrecognised by name, so it stays unknown, not germany');
+  check(classifyReach('85354 Freising') === 'munich', 'Freising is recognised by MUNICH_CITY_RE and stays munich, unaffected by the new fallback');
+  check(classifyReach('80992 München') === 'munich', 'a München PLZ is still munich via HOME/MUNICH_PLZ_RANGES, checked before the new fallback');
+  check(classifyReach('Austin, TX 78701') === 'abroad', 'a foreign 5-digit ZIP is still abroad via the FOREIGN_* checks, never reaching the new fallback');
+  check(classifyReach('Remote, 65189 Wiesbaden') === 'remote', 'the remote branch still returns before the postal-code fallback is ever reached');
 
   // "Remote" scoped to a foreign country is remote WITHIN that country. These
   // were scoring 4.5 — the second-best tier — and reaching the shortlist.
