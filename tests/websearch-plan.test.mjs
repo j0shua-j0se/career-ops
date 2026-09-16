@@ -8,7 +8,10 @@
 // guesswork about WHICH to run, and the all-or-nothing cost that made the step
 // get skipped.
 import { pass, fail } from './helpers.mjs';
-import { selectQueries, isProviderCovered, groupBySite, PROVIDER_COVERED_SITES, collectRecordNames } from '../websearch-plan.mjs';
+import {
+  selectQueries, isProviderCovered, groupBySite, PROVIDER_COVERED_SITES, collectRecordNames,
+  parseYieldLog, aggregateYield, buildQueryStates, selectIndeedSearches, indeedSearchId,
+} from '../websearch-plan.mjs';
 
 console.log('\nWebSearch plan');
 
@@ -125,4 +128,138 @@ selectQueries([], { lastRun: {} }, {}).length === 0
   collectRecordNames(['--hits', '4']).length === 0
     ? pass('--record immediately followed by a flag yields no names')
     : fail('collectRecordNames read a flag as a query name');
+}
+
+// --- Yield log parsing/aggregation.
+// The measured problem this whole feature exists for: a pass can run 10+6
+// queries and collect only already-known postings, and staleness rotation
+// alone can't tell a dead query from one that just hasn't run yet.
+{
+  const text = [
+    '2026-09-01\tLinkedIn A\twebsearch\t5\t2\t3\t0',
+    '2026-09-05\tLinkedIn A\twebsearch\t4\t0\t4\t0',
+    '2026-09-01\tBMW A\twebsearch\t3\t0\t2\t1',
+    '2026-09-05\tBMW A\twebsearch\t2\t0\t2\t0',
+    '2026-09-09\tBMW A\twebsearch\t3\t0\t3\t0',
+    '', // blank line must be skipped, not crash
+    'short\trow', // malformed (< 7 cols) must be skipped, not crash
+  ].join('\n');
+  const rows = parseYieldLog(text);
+  rows.length === 5
+    ? pass('parseYieldLog reads well-formed rows and skips blank/malformed ones')
+    : fail(`expected 5 parsed rows, got ${rows.length}: ${JSON.stringify(rows)}`);
+
+  const agg = aggregateYield(rows);
+  const li = agg.get('LinkedIn A');
+  const bmw = agg.get('BMW A');
+  (li?.runs === 2 && li?.totalQueuedNew === 2)
+    ? pass('aggregateYield sums runs and queued_new for a query with a productive run')
+    : fail(`LinkedIn A aggregation wrong: ${JSON.stringify(li)}`);
+  (bmw?.runs === 3 && bmw?.totalQueuedNew === 0)
+    ? pass('aggregateYield sums runs and queued_new for a query with zero yield across all runs')
+    : fail(`BMW A aggregation wrong: ${JSON.stringify(bmw)}`);
+}
+
+// --- Ranking: never-run first, then queries with a logged productive run,
+// then plain staleness — the exact order the task specifies.
+{
+  const rankQueries = [
+    q('Never Run', 'site:example.com/a "x"'),
+    q('Productive', 'site:example.com/b "x"'),
+    q('Stale Only', 'site:example.com/c "x"'),
+  ];
+  const state = {
+    lastRun: {
+      Productive: '2026-09-10T00:00:00Z',
+      'Stale Only': '2026-01-01T00:00:00Z', // stalest by date, but NOT productive
+    },
+  };
+  const yieldMap = new Map([
+    ['Productive', { runs: 2, totalQueuedNew: 1 }],
+    ['Stale Only', { runs: 1, totalQueuedNew: 0 }],
+  ]);
+  const sel = selectQueries(rankQueries, state, { limit: 3, yieldMap });
+  const names = sel.map((s) => s.name);
+  JSON.stringify(names) === JSON.stringify(['Never Run', 'Productive', 'Stale Only'])
+    ? pass('rank order is never-run, then productive-yield, then staleness — even though "Stale Only" is chronologically stalest')
+    : fail(`expected [Never Run, Productive, Stale Only], got ${JSON.stringify(names)}`);
+}
+
+// --- Retirement: 3+ logged runs with 0 queued_new across all of them is
+// skipped by default, and listed so --summary can surface it; opt back in
+// with includeRetired. A query with NO yield log yet is "unknown", not
+// retired, even with zero runs.
+{
+  const retireQueries = [
+    q('Dead Query', 'site:example.com/dead "x"'),
+    q('Unknown Query', 'site:example.com/unknown "x"'),
+  ];
+  const state = { lastRun: { 'Dead Query': '2026-09-01T00:00:00Z', 'Unknown Query': '2026-09-01T00:00:00Z' } };
+  const yieldMap = new Map([
+    ['Dead Query', { runs: 3, totalQueuedNew: 0 }],
+  ]);
+
+  const states = buildQueryStates(retireQueries, state, yieldMap);
+  const dead = states.find((s) => s.name === 'Dead Query');
+  const unknown = states.find((s) => s.name === 'Unknown Query');
+  (dead?.retired === true && unknown?.retired === false)
+    ? pass('buildQueryStates marks >=3 runs / 0 queued_new as retired, and a never-logged query as NOT retired (unknown)')
+    : fail(`retirement flags wrong: dead=${JSON.stringify(dead)} unknown=${JSON.stringify(unknown)}`);
+
+  const defaultSel = selectQueries(retireQueries, state, { all: true, yieldMap });
+  defaultSel.every((s) => s.name !== 'Dead Query')
+    ? pass('a retired query is excluded from selection by default')
+    : fail('a retired query was selected without --include-retired');
+
+  const withRetired = selectQueries(retireQueries, state, { all: true, yieldMap, includeRetired: true });
+  withRetired.some((s) => s.name === 'Dead Query')
+    ? pass('--include-retired brings a retired query back into consideration')
+    : fail('includeRetired:true did not restore the retired query');
+
+  // Only 2 runs logged, still 0 yield: NOT yet retired (below the threshold).
+  const belowThreshold = new Map([['Dead Query', { runs: 2, totalQueuedNew: 0 }]]);
+  buildQueryStates(retireQueries, state, belowThreshold).find((s) => s.name === 'Dead Query').retired === false
+    ? pass('a query below RETIRE_AFTER_RUNS logged runs is not retired yet, regardless of yield')
+    : fail('a query with only 2 logged runs was retired early');
+}
+
+// --- Default --limit dropped from 10 to 6 (measured: the old default cost
+// ~114k tokens for mostly-duplicate results); --limit still overrides it.
+{
+  const many = Array.from({ length: 10 }, (_, i) => q(`Q${i}`, `site:example.com/${i} "x"`));
+  const def = selectQueries(many, { lastRun: {} }, {});
+  def.length === 6
+    ? pass('the default selection size is 6, not 10')
+    : fail(`expected a default of 6, got ${def.length}`);
+
+  const overridden = selectQueries(many, { lastRun: {} }, { limit: 9 });
+  overridden.length === 9
+    ? pass('--limit still overrides the new default')
+    : fail(`expected --limit to override to 9, got ${overridden.length}`);
+}
+
+// --- Indeed MCP searches: can't be driven by this script (it's an agent tool
+// call), but the same yield-based retirement applies via `indeed:<search>@
+// <location>` ids in data/websearch-yield.tsv.
+{
+  const list = [
+    { search: 'Werkstudent Data', location: 'Erlangen' },
+    { search: 'Werkstudent KI', location: 'Nürnberg' },
+  ];
+  indeedSearchId(list[0]) === 'indeed:Werkstudent Data@Erlangen'
+    ? pass('indeedSearchId builds the indeed:<search>@<location> id')
+    : fail(`unexpected indeed id: ${indeedSearchId(list[0])}`);
+
+  const yieldMap = new Map([
+    ['indeed:Werkstudent KI@Nürnberg', { runs: 3, totalQueuedNew: 0 }],
+  ]);
+  const { active, retired } = selectIndeedSearches(list, yieldMap);
+  (active.length === 1 && active[0].search === 'Werkstudent Data' && retired.length === 1 && retired[0].search === 'Werkstudent KI')
+    ? pass('selectIndeedSearches retires a dead (search, location) pair and keeps the rest active')
+    : fail(`Indeed selection wrong: active=${JSON.stringify(active)} retired=${JSON.stringify(retired)}`);
+
+  const { active: withRetired } = selectIndeedSearches(list, yieldMap, { includeRetired: true });
+  withRetired.length === 2
+    ? pass('selectIndeedSearches --include-retired brings the retired Indeed pair back')
+    : fail(`expected 2 active pairs with includeRetired, got ${withRetired.length}`);
 }

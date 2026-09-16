@@ -45,6 +45,9 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const CAREER_OPS = getCareerOpsRoot();
 const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(CAREER_OPS, 'data', 'pipeline.md');
 const HISTORY_PATH = process.env.CAREER_OPS_SCAN_HISTORY || join(CAREER_OPS, 'data', 'scan-history.tsv');
+// Per-query yield log consumed by websearch-plan.mjs's rotation/retirement.
+// Additive: an offer with no `query` field never touches this file.
+const YIELD_PATH = process.env.CAREER_OPS_WEBSEARCH_YIELD || join(CAREER_OPS, 'data', 'websearch-yield.tsv');
 // Same resolver verify-pipeline.mjs/merge-tracker.mjs use, so CAREER_OPS_TRACKER
 // and the data/applications.md-vs-applications.md fallback behave identically here.
 const APPLICATIONS_PATH = resolveTrackerPath(CAREER_OPS);
@@ -639,6 +642,61 @@ export function planIngest(offers, seen, opts = {}) {
   return { queued, duplicates, invalid, rejected, duplicateIds, duplicateTitle };
 }
 
+/**
+ * Per-query yield breakdown for a planIngest() result — the record
+ * websearch-plan.mjs needs to tell a productive `site:`/Indeed query from a
+ * dead one instead of rotating purely by staleness.
+ *
+ * Entries without a `query` field (the vast majority of historical offers,
+ * and anything from a source that doesn't tag one) are silently excluded —
+ * additive only, never a behavior change for callers that don't set it.
+ *
+ * @param {object[]} offers - the raw input array, read for `.query`
+ * @param {{queued: object[], duplicates: object[], duplicateTitle: object[]}} result
+ * @returns {Array<{query:string, leads:number, queuedNew:number, dupUrl:number, dupTitle:number}>}
+ */
+export function computeQueryYield(offers, result) {
+  const queryOf = (o) => (typeof o?.query === 'string' ? o.query.trim() : '');
+  const countBy = (arr) => {
+    const m = new Map();
+    for (const o of Array.isArray(arr) ? arr : []) {
+      const q = queryOf(o);
+      if (!q) continue;
+      m.set(q, (m.get(q) ?? 0) + 1);
+    }
+    return m;
+  };
+  const leadsByQuery = countBy(offers);
+  const queuedByQuery = countBy(result?.queued);
+  const dupUrlByQuery = countBy(result?.duplicates);
+  const dupTitleByQuery = countBy(result?.duplicateTitle);
+
+  return [...leadsByQuery.keys()].sort().map((query) => ({
+    query,
+    leads: leadsByQuery.get(query) ?? 0,
+    queuedNew: queuedByQuery.get(query) ?? 0,
+    dupUrl: dupUrlByQuery.get(query) ?? 0,
+    dupTitle: dupTitleByQuery.get(query) ?? 0,
+  }));
+}
+
+/**
+ * Append one TSV row per query to data/websearch-yield.tsv:
+ * date, query, source, leads, queued_new, dup_url, dup_title.
+ *
+ * @param {Array<{query:string, leads:number, queuedNew:number, dupUrl:number, dupTitle:number}>} rows
+ * @param {{source:string, today:string, path?:string}} opts
+ */
+export function appendYieldLog(rows, { source, today, path = YIELD_PATH } = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  const cell = (v) => String(v ?? '').replace(/[\t\r\n]+/g, ' ').trim();
+  mkdirSync(dirname(path), { recursive: true });
+  const lines = rows.map((r) => [
+    today, cell(r.query), cell(source), r.leads, r.queuedNew, r.dupUrl, r.dupTitle,
+  ].join('\t') + '\n').join('');
+  appendFileSync(path, lines, 'utf-8');
+}
+
 /** Insert rows directly under the `## Pending` heading. */
 export function insertPending(markdown, rows) {
   if (!rows.length) return markdown;
@@ -729,6 +787,11 @@ silently. Queues only; never evaluates or submits.`);
 
   const today = new Date().toISOString().slice(0, 10);
   const rows = queued.map((o) => renderRow(o, source, today));
+  const queryYield = computeQueryYield(offers, { queued, duplicates, duplicateTitle });
+
+  if (!values['dry-run'] && queryYield.length) {
+    appendYieldLog(queryYield, { source, today });
+  }
 
   if (!values['dry-run'] && rows.length) {
     mkdirSync(dirname(PIPELINE_PATH), { recursive: true });
@@ -769,6 +832,7 @@ silently. Queues only; never evaluates or submits.`);
     rejected: rejected.length,
     duplicateIds: duplicateIds.length,
     duplicateTitle: duplicateTitle.length,
+    queryYield,
     allowListing,
     allowTitleDups,
     dryRun: Boolean(values['dry-run']),

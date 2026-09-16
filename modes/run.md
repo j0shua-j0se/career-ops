@@ -75,9 +75,15 @@ node ingest-jobs.mjs --file offers.json --source <label>
 node websearch-plan.mjs --summary
 ```
 
-It selects the **stalest** `site:` queries from `portals.yml` → `search_queries`
-and rotates them, so one pass costs ~10 searches rather than 32. Run each with
-WebSearch, collect `{url, company, title, location}` per hit, then:
+It picks up to **6** `site:` queries from `portals.yml` → `search_queries`:
+never-run first, then queries that have produced a new lead before, then by
+staleness. A query with 3+ logged runs and 0 new leads is **retired** (listed,
+not run; `--include-retired` restores it). Run each with WebSearch and collect
+`{url, company, title, location, query}` per hit — `query` is the exact name
+`--summary` printed. For Indeed, run only the (search, location) pairs listed
+under "Indeed searches", tagging each offer `query: "indeed:<search>@<location>"`.
+The `query` tag is what logs yield to `data/websearch-yield.tsv`; an untagged
+offer still ingests but teaches the rotation nothing. Then:
 
 ```bash
 node ingest-jobs.mjs --file offers.json --source websearch

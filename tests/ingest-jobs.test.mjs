@@ -17,7 +17,7 @@
 // in-process and greps for it.
 import { pass, fail, ROOT, NODE } from './helpers.mjs';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
@@ -621,5 +621,114 @@ try {
     }
   } finally {
     try { rmSync(dupTmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+// ── Per-query yield log ──────────────────────────────────────────────────
+//
+// websearch-plan.mjs's rotation used to be purely staleness-based, with no
+// way to tell a productive `site:`/Indeed query from a dead one. An offer can
+// now carry an optional `query` field (the search_queries name, or an
+// `indeed:<search>@<location>` id); ingest-jobs.mjs folds those into
+// data/websearch-yield.tsv rows so websearch-plan.mjs can retire dead queries.
+// Additive only: an offer with no `query` must never touch the log, and the
+// legacy call shape (no query on any offer) must behave byte-identically to
+// before this feature existed.
+{
+  const { computeQueryYield, appendYieldLog, planIngest } = await import(pathToFileURL(SCRIPT).href);
+
+  const offers = [
+    { url: 'https://a.example.com/1', company: 'Acme', title: 'Data Scientist', query: 'LinkedIn A' },
+    { url: 'https://a.example.com/1', company: 'Acme', title: 'Data Scientist', query: 'LinkedIn A' }, // batch dup, same query
+    { url: 'https://a.example.com/2', company: 'Acme', title: 'ML Engineer', query: 'LinkedIn A' },
+    { url: 'https://b.example.com/1', company: 'Beta', title: 'AI Intern', query: 'XING A' },
+    { url: 'https://c.example.com/1', company: 'Gamma', title: 'No Query Here' }, // no query tag
+  ];
+  const result = planIngest(offers, new Set());
+  const yieldRows = computeQueryYield(offers, result);
+
+  if (yieldRows.length === 2 && yieldRows.every((r) => r.query !== '')) {
+    pass('computeQueryYield only produces rows for queries actually tagged on an offer');
+  } else {
+    fail(`computeQueryYield included an untagged/extra row: ${JSON.stringify(yieldRows)}`);
+  }
+  const linkedinRow = yieldRows.find((r) => r.query === 'LinkedIn A');
+  if (linkedinRow && linkedinRow.leads === 3 && linkedinRow.queuedNew === 2 && linkedinRow.dupUrl === 1) {
+    pass('computeQueryYield counts leads/queuedNew/dupUrl correctly per query, including an in-batch URL duplicate');
+  } else {
+    fail(`computeQueryYield miscounted the "LinkedIn A" row: ${JSON.stringify(linkedinRow)}`);
+  }
+
+  // ── appendYieldLog: TSV shape, additive (no rows -> no file write) ────────
+  const yieldTmp = mkdtempSync(join(tmpdir(), 'ingest-jobs-yield-'));
+  try {
+    const yieldPath = join(yieldTmp, 'nested', 'websearch-yield.tsv');
+    appendYieldLog(yieldRows, { source: 'websearch', today: '2026-09-16', path: yieldPath });
+    const written = readFileSync(yieldPath, 'utf-8').trim().split('\n');
+    if (written.length === 2 && written.every((l) => l.split('\t').length === 7)) {
+      pass('appendYieldLog writes one 7-column TSV row per query, creating nested dirs as needed');
+    } else {
+      fail(`appendYieldLog wrote unexpected content: ${JSON.stringify(written)}`);
+    }
+    const linkedinLine = written.find((l) => l.split('\t')[1] === 'LinkedIn A');
+    if (linkedinLine === '2026-09-16\tLinkedIn A\twebsearch\t3\t2\t1\t0') {
+      pass('appendYieldLog row order is date, query, source, leads, queued_new, dup_url, dup_title');
+    } else {
+      fail(`appendYieldLog row shape wrong: ${JSON.stringify(linkedinLine)}`);
+    }
+
+    // Additive: appending twice appends, never overwrites.
+    appendYieldLog(yieldRows, { source: 'websearch', today: '2026-09-17', path: yieldPath });
+    const after = readFileSync(yieldPath, 'utf-8').trim().split('\n');
+    if (after.length === 4) {
+      pass('appendYieldLog appends to an existing log rather than overwriting it');
+    } else {
+      fail(`expected 4 lines after a second append, got ${after.length}`);
+    }
+
+    // No query on any offer -> nothing written, matching pre-feature behavior.
+    const noQueryPath = join(yieldTmp, 'unused.tsv');
+    appendYieldLog(computeQueryYield([{ url: 'https://d.example.com/1', company: 'Delta', title: 'X' }], planIngest([{ url: 'https://d.example.com/1', company: 'Delta', title: 'X' }], new Set())), { source: 'websearch', today: '2026-09-16', path: noQueryPath });
+    if (!existsSync(noQueryPath)) {
+      pass('an ingest with no `query` field on any offer never creates websearch-yield.tsv (backward compatible)');
+    } else {
+      fail('appendYieldLog created a file even though no offer carried a query — should be a strict no-op');
+    }
+  } finally {
+    try { rmSync(yieldTmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+
+  // ── CLI wiring: --dry-run must not touch the yield log either ─────────────
+  const cliTmp = mkdtempSync(join(tmpdir(), 'ingest-jobs-yield-cli-'));
+  try {
+    const pipelinePath = join(cliTmp, 'pipeline.md');
+    const historyPath = join(cliTmp, 'scan-history.tsv');
+    const yieldPath = join(cliTmp, 'websearch-yield.tsv');
+    writeFileSync(pipelinePath, '# Pipeline\n\n## Pending\n\n## Processed\n', 'utf-8');
+    writeFileSync(historyPath, '', 'utf-8');
+    const offersPath = join(cliTmp, 'offers.json');
+    writeFileSync(offersPath, JSON.stringify([
+      { url: 'https://d.example.com/9', company: 'Delta', title: 'Data Engineer', query: 'LinkedIn A' },
+    ]), 'utf-8');
+    const env = {
+      CAREER_OPS_PIPELINE_FILE: pipelinePath,
+      CAREER_OPS_SCAN_HISTORY: historyPath,
+      CAREER_OPS_WEBSEARCH_YIELD: yieldPath,
+    };
+    cli(['--file', offersPath, '--source', 'websearch', '--dry-run'], env);
+    if (!existsSync(yieldPath)) {
+      pass('the CLI --dry-run does not write the yield log (matches its "write nothing" contract)');
+    } else {
+      fail('--dry-run wrote to the yield log');
+    }
+
+    cli(['--file', offersPath, '--source', 'websearch'], env);
+    if (existsSync(yieldPath) && readFileSync(yieldPath, 'utf-8').includes('LinkedIn A')) {
+      pass('a real (non-dry-run) CLI run with a tagged offer appends to CAREER_OPS_WEBSEARCH_YIELD');
+    } else {
+      fail('a real CLI run with a tagged offer did not append to the yield log');
+    }
+  } finally {
+    try { rmSync(cliTmp, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 }

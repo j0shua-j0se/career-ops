@@ -27,12 +27,23 @@
  * in data/websearch-state.json, so every query runs regularly without any single
  * pass being expensive.
  *
+ * YIELD
+ * Staleness alone can't tell a productive query from a dead one — rotation
+ * used to be the only signal. `ingest-jobs.mjs` now appends a row to
+ * data/websearch-yield.tsv (date, query, source, leads, queued_new, dup_url,
+ * dup_title) per `query` tag on an ingested offer. A query with 3+ logged
+ * runs and zero `queued_new` across all of them is RETIRED — skipped by
+ * default, listed under --summary, re-enabled with --include-retired. Among
+ * the rest: never-run queries lead, then queries with any logged new lead,
+ * then plain staleness.
+ *
  * Usage:
- *   node websearch-plan.mjs                 # JSON plan
- *   node websearch-plan.mjs --summary       # human-readable
- *   node websearch-plan.mjs --limit 8       # override how many to run
- *   node websearch-plan.mjs --all           # every enabled query
- *   node websearch-plan.mjs --record q1 q2  # mark queries as run (by name)
+ *   node websearch-plan.mjs                    # JSON plan
+ *   node websearch-plan.mjs --summary          # human-readable
+ *   node websearch-plan.mjs --limit 8          # override how many to run
+ *   node websearch-plan.mjs --all              # every enabled, non-retired query
+ *   node websearch-plan.mjs --include-retired  # also consider retired queries
+ *   node websearch-plan.mjs --record q1 q2     # mark queries as run (by name)
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
@@ -46,10 +57,19 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const CAREER_OPS = getCareerOpsRoot();
 const PORTALS_PATH = join(CAREER_OPS, 'portals.yml');
 const STATE_PATH = join(CAREER_OPS, 'data/websearch-state.json');
+const YIELD_PATH = process.env.CAREER_OPS_WEBSEARCH_YIELD || join(CAREER_OPS, 'data/websearch-yield.tsv');
 
-// Enough to make real progress in one pass without turning the scan stage into
-// half an hour of searching. At 10 a pass, 32 queries cycle in ~3 passes.
-const DEFAULT_LIMIT = 10;
+// A run of this size costs real tokens for something that mostly re-finds
+// already-known postings (measured: 10 queries + 6 Indeed searches ~114k
+// tokens, 55 leads, 0 new). Yield-based retirement is what makes a smaller
+// default safe — dead queries stop eating slots instead of just rotating
+// through them. At 6 a pass, 32 queries cycle in ~5-6 passes.
+const DEFAULT_LIMIT = 6;
+
+// A query that has run at least this many times and never produced a single
+// queued-new lead is retired: it keeps consuming a WebSearch slot every
+// rotation for a result that history says will not change.
+const RETIRE_AFTER_RUNS = 3;
 
 /**
  * Sites that `scan.mjs` already sweeps zero-token every pass. Their
@@ -110,40 +130,155 @@ export function saveState(state, path = STATE_PATH) {
 }
 
 /**
- * Choose which queries to run, stalest first.
+ * Parse data/websearch-yield.tsv: date, query, source, leads, queued_new,
+ * dup_url, dup_title — one row per query per ingest-jobs.mjs run that carried
+ * a `query` tag. Malformed/short lines are skipped rather than thrown on: a
+ * corrupt yield log must cost ranking quality, never the sweep.
  *
- * Never-run queries sort ahead of everything: on the first pass that is all of
- * them, which is the correct outcome for a section that has never executed.
+ * @param {string} text
+ * @returns {Array<{date:string, query:string, source:string, leads:number, queuedNew:number, dupUrl:number, dupTitle:number}>}
+ */
+export function parseYieldLog(text) {
+  const rows = [];
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const cols = line.split('\t');
+    if (cols.length < 7) continue;
+    const [date, query, source, leads, queuedNew, dupUrl, dupTitle] = cols;
+    if (!query) continue;
+    rows.push({
+      date, query, source,
+      leads: Number(leads) || 0,
+      queuedNew: Number(queuedNew) || 0,
+      dupUrl: Number(dupUrl) || 0,
+      dupTitle: Number(dupTitle) || 0,
+    });
+  }
+  return rows;
+}
+
+/** Fold parsed yield rows into per-query { runs, totalQueuedNew }. */
+export function aggregateYield(rows) {
+  const m = new Map();
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const cur = m.get(r.query) ?? { runs: 0, totalQueuedNew: 0 };
+    cur.runs += 1;
+    cur.totalQueuedNew += r.queuedNew;
+    m.set(r.query, cur);
+  }
+  return m;
+}
+
+export function loadYieldMap(path = YIELD_PATH) {
+  if (!existsSync(path)) return new Map();
+  try {
+    return aggregateYield(parseYieldLog(readFileSync(path, 'utf-8')));
+  } catch {
+    // Same posture as loadState(): a corrupt log costs ranking quality, not
+    // the sweep. Everything reads as "no yield data yet" (unknown, not retired).
+    return new Map();
+  }
+}
+
+/**
+ * Enrich each enabled query with staleness + yield state. Shared by
+ * selectQueries() (which then filters/sorts/slices it) and --summary's
+ * "retired by yield" listing, so the two can never disagree about who's retired.
+ *
+ * A query with no yield rows yet is UNKNOWN, not retired — `runs` stays 0 and
+ * `retired` stays false until it has actually been logged.
  *
  * @param {Array<{name:string, query:string, enabled?:boolean}>} queries
  * @param {{lastRun: Record<string, string>}} state
- * @param {{limit?: number, all?: boolean}} [opts]
+ * @param {Map<string, {runs:number, totalQueuedNew:number}>} [yieldMap]
  */
-export function selectQueries(queries, state, { limit = DEFAULT_LIMIT, all = false } = {}) {
+export function buildQueryStates(queries, state, yieldMap = new Map()) {
   const enabled = (Array.isArray(queries) ? queries : [])
     .filter((q) => q && q.enabled !== false && typeof q.query === 'string' && q.query.trim());
 
-  const withAge = enabled.map((q) => {
+  return enabled.map((q) => {
     const last = state?.lastRun?.[q.name];
     const ts = last ? Date.parse(last) : NaN;
+    const y = yieldMap.get(q.name);
+    const runs = y?.runs ?? 0;
+    const totalQueuedNew = y?.totalQueuedNew ?? 0;
     return {
       name: q.name,
       query: q.query.trim(),
       lastRun: last ?? null,
       ts: Number.isFinite(ts) ? ts : -Infinity,
       providerCovered: isProviderCovered(q.query),
+      runs,
+      totalQueuedNew,
+      retired: runs >= RETIRE_AFTER_RUNS && totalQueuedNew === 0,
     };
   });
+}
+
+/**
+ * Choose which queries to run.
+ *
+ * Selection order (within each providerCovered tier — see below):
+ *   1. never-run queries lead — on the first pass that is all of them, which
+ *      is the correct outcome for a section that has never executed.
+ *   2. queries whose logged runs produced at least one queued-new lead —
+ *      history says these are worth the slot.
+ *   3. plain staleness (stalest first) for everything else.
+ *
+ * Retired queries (RETIRE_AFTER_RUNS+ logged runs, zero queued_new across all
+ * of them) are excluded unless `includeRetired` is set — see buildQueryStates().
+ *
+ * @param {Array<{name:string, query:string, enabled?:boolean}>} queries
+ * @param {{lastRun: Record<string, string>}} state
+ * @param {{limit?: number, all?: boolean, yieldMap?: Map, includeRetired?: boolean}} [opts]
+ */
+export function selectQueries(queries, state, opts = {}) {
+  const { limit = DEFAULT_LIMIT, all = false, yieldMap = new Map(), includeRetired = false } = opts;
+  const withAge = buildQueryStates(queries, state, yieldMap);
+  const usable = includeRetired ? withAge : withAge.filter((q) => !q.retired);
 
   // Sites that now have a zero-token provider sort LAST. Their queries stay
   // enabled — a search engine occasionally surfaces something a board search
   // misses — but spending a WebSearch budget on StepStone and Indeed, which
   // scan.mjs already sweeps in full every pass, is the definition of wasted
   // effort. Without this, 4 of the first 10 slots went to covered sites.
-  // Within each tier: stalest first, -Infinity (never run) leading, and ties
-  // keep config order so output is stable between passes.
-  withAge.sort((a, b) => (a.providerCovered - b.providerCovered) || (a.ts - b.ts));
-  return all ? withAge : withAge.slice(0, Math.max(1, limit));
+  const tierRank = (q) => (q.ts === -Infinity ? 0 : (q.totalQueuedNew > 0 ? 1 : 2));
+  usable.sort((a, b) => (a.providerCovered - b.providerCovered) || (tierRank(a) - tierRank(b)) || (a.ts - b.ts));
+  return all ? usable : usable.slice(0, Math.max(1, limit));
+}
+
+/**
+ * Recommended Indeed MCP (search, location) pairs from portals.yml's
+ * `indeed_searches`, with the same yield-based retirement as selectQueries()
+ * — keyed by `indeed:<search>@<location>` ids in data/websearch-yield.tsv,
+ * since ingest-jobs.mjs can't tell an Indeed MCP call apart from a WebSearch
+ * one except by whatever `query` id the agent tags the offer with.
+ *
+ * @param {Array<{search:string, location:string}>} list
+ * @param {Map<string, {runs:number, totalQueuedNew:number}>} yieldMap
+ * @param {{includeRetired?: boolean}} [opts]
+ */
+export function indeedSearchId(entry) {
+  return `indeed:${String(entry?.search ?? '').trim()}@${String(entry?.location ?? '').trim()}`;
+}
+
+export function selectIndeedSearches(list, yieldMap = new Map(), { includeRetired = false } = {}) {
+  const items = (Array.isArray(list) ? list : [])
+    .filter((e) => e && e.search && e.location)
+    .map((e) => {
+      const id = indeedSearchId(e);
+      const y = yieldMap.get(id);
+      const runs = y?.runs ?? 0;
+      const totalQueuedNew = y?.totalQueuedNew ?? 0;
+      return {
+        search: e.search, location: e.location, id, runs, totalQueuedNew,
+        retired: runs >= RETIRE_AFTER_RUNS && totalQueuedNew === 0,
+      };
+    });
+  return {
+    active: items.filter((i) => includeRetired || !i.retired),
+    retired: items.filter((i) => i.retired),
+  };
 }
 
 /** Group selected queries by the site they target, purely for readable output. */
@@ -167,10 +302,20 @@ function loadPortals() {
   }
 }
 
+// Fallback when portals.yml has no indeed_searches list yet — see AGENTS.md
+// (search_queries neighbourhood) for why these three.
+const DEFAULT_INDEED_SEARCHES = [
+  { search: 'Werkstudent Data', location: 'Erlangen' },
+  { search: 'Working Student Machine Learning', location: 'München' },
+  { search: 'Werkstudent KI', location: 'Nürnberg' },
+];
+
 function main(argv) {
   const portals = loadPortals();
   const state = loadState();
+  const yieldMap = loadYieldMap();
   const all = argv.includes('--all');
+  const includeRetired = argv.includes('--include-retired');
   const limIdx = argv.indexOf('--limit');
   const limit = limIdx !== -1 ? Number(argv[limIdx + 1]) || DEFAULT_LIMIT : DEFAULT_LIMIT;
 
@@ -205,11 +350,15 @@ function main(argv) {
     return;
   }
 
-  const selected = selectQueries(portals.search_queries ?? [], state, { limit, all });
+  const selected = selectQueries(portals.search_queries ?? [], state, { limit, all, yieldMap, includeRetired });
   const total = (portals.search_queries ?? []).filter((q) => q && q.enabled !== false).length;
+  const retiredQueries = buildQueryStates(portals.search_queries ?? [], state, yieldMap).filter((q) => q.retired);
+  const indeedList = Array.isArray(portals.indeed_searches) && portals.indeed_searches.length
+    ? portals.indeed_searches : DEFAULT_INDEED_SEARCHES;
+  const indeed = selectIndeedSearches(indeedList, yieldMap, { includeRetired });
 
-  if (selected.length === 0) {
-    console.log('No enabled search_queries in portals.yml — nothing to run.');
+  if (selected.length === 0 && !argv.includes('--summary')) {
+    console.log('No enabled, non-retired search_queries in portals.yml — nothing to run.');
     return;
   }
 
@@ -219,23 +368,32 @@ function main(argv) {
       console.log(`  ── ${site}`);
       for (const q of items) {
         console.log(`     ${q.lastRun ? `last run ${q.lastRun.slice(0, 10)}` : 'never run'} · ${q.name}`);
-        console.log(`       ${q.query}`);
       }
     }
-    console.log('\n  Run each `query` with the WebSearch tool. For every job posting in the results,');
-    console.log('  collect {url, company, title, location} — the search snippet usually carries all');
-    console.log('  four. Then:\n');
+    if (retiredQueries.length) {
+      console.log(`\n  Retired by yield, re-enable with --include-retired:`);
+      for (const q of retiredQueries) console.log(`     ${q.name} (${q.runs} runs, 0 new)`);
+    }
+    console.log('\n  Run each `query` with the WebSearch tool; collect {url, company, title, location}');
+    console.log('  and tag each offer query: "<name>" so ingest-jobs.mjs logs its yield. Then:\n');
     console.log('    node ingest-jobs.mjs --file offers.json --source websearch\n');
-    console.log('  Mark them run so the next pass rotates to the others:\n');
     console.log(`    node websearch-plan.mjs --record ${selected.slice(0, 2).map((q) => JSON.stringify(q.name)).join(' ')} ...\n`);
-    console.log('  Do NOT fetch linkedin.com or xing.com directly — both Disallow it in robots.txt.');
-    console.log('  Reaching them through a search engine is the route they permit.\n');
+    console.log('  Do NOT fetch linkedin.com or xing.com directly — reach them via the search engine.');
+
+    console.log(`  Indeed searches (agent-run via MCP, not by this script):`);
+    for (const i of indeed.active) console.log(`     ${i.search} @ ${i.location}  (${i.runs} runs, ${i.totalQueuedNew} new) · tag offers query: "${i.id}"`);
+    if (indeed.retired.length) {
+      console.log(`   retired by yield, re-enable with --include-retired:`);
+      for (const i of indeed.retired) console.log(`     ${i.search} @ ${i.location}`);
+    }
     return;
   }
 
   console.log(JSON.stringify({
     total,
     selected: selected.map(({ name, query, lastRun }) => ({ name, query, lastRun })),
+    retired: retiredQueries.map((q) => q.name),
+    indeedSearches: indeed,
     ingest: 'node ingest-jobs.mjs --file offers.json --source websearch',
     record: 'node websearch-plan.mjs --record "<name>" ...',
   }, null, 2));
