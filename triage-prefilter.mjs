@@ -203,7 +203,10 @@ const FOREIGN_CITY_RE = /(?<![a-zäöüß])(london|paris|amsterdam|milano|milan|
 // "nationwide", it is a US-only idiom for "any US state"). EMEA is
 // deliberately absent from this list: it includes Europe, so "Remote · EMEA"
 // (camunda) must stay reachable rather than being read as foreign.
-const FOREIGN_REMOTE_SCOPE_RE = /(?<![a-zäöüß])(americas|north america|south america|latin america|latam|apac|amer|nationwide)(?![a-zäöüß])/i;
+// "dod" (US Department of Defense) is a title/location idiom on US defense
+// contractor postings ("Remote · DoD", paired with a clearance requirement in
+// the title) — it names no single country but is exactly as disqualifying.
+const FOREIGN_REMOTE_SCOPE_RE = /(?<![a-zäöüß])(americas|north america|south america|latin america|latam|apac|amer|nationwide|dod)(?![a-zäöüß])/i;
 
 // Sub-national markers that identify a foreign country as reliably as its name.
 //
@@ -228,6 +231,16 @@ const FOREIGN_REMOTE_SCOPE_RE = /(?<![a-zäöüß])(americas|north america|south
 // space-free "US-TX-REMOTE" form did, because there was no separator character
 // for the phantom `s?` to fail to consume. The fix is `\\s?`, a real backslash
 // followed by `s`, so the resulting pattern text carries `\s?`.
+// Non-US ISO-3166 alpha-2 codes seen in "Remote, <ISO2>" / "<ISO2> Remote"
+// cells on ATS boards ("Remote, MX" — Indeed; "IN Remote" — Porch). Deliberately
+// a SEPARATE list from the US state codes above even where a letter pair
+// happens to collide (e.g. "in" already reads as Indiana, "ca" as California) —
+// both readings are foreign anyway, so the collision is harmless. Restricted to
+// the same two anchored contexts as the US codes (after a separator, or
+// leading the cell before a remote/hybrid marker): never matched bare, which
+// matters most for "in" — also the German preposition "in".
+const FOREIGN_ISO2_CODES = 'mx|br|gb|uk|au|sg|jp|cn|ph|cl|ng|za|nz|pl|ro|ua|pt|es|tr|eg|ke|vn|my|th';
+
 const FOREIGN_REGION_RE = new RegExp(
   '(?<![a-zäöüß0-9])(' + [
     'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut',
@@ -240,16 +253,18 @@ const FOREIGN_REGION_RE = new RegExp(
     'ontario', 'quebec', 'alberta', 'british columbia',
   ].join('|') + ')(?![a-zäöüß0-9])'
   // Two-letter codes embedded after a separator: "Remote-TX", "US-TX-REMOTE",
-  // "Ashburn, VA (Hybrid)". `\\s?` (not `\s?` — see note above) so the space
-  // after a comma is actually consumed.
-  + '|(?<=[-,/])\\s?(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|md|ma|mi|mn|ms|mo|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)(?![a-z0-9])'
+  // "Ashburn, VA (Hybrid)", "Remote, MX". `\\s?` (not `\s?` — see note above) so
+  // the space after a comma is actually consumed.
+  + '|(?<=[-,/])\\s?(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|md|ma|mi|mn|ms|mo|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc|' + FOREIGN_ISO2_CODES + ')(?![a-z0-9])'
   // Two-letter codes LEADING the cell, the other shape ATS boards print:
-  // "CA-Remote", "NJ - Remote", "TX - Hybrid". Anchored to the very start of
-  // the string, then the code, then optional space, then the hyphen that
-  // separates the code from "Remote"/"Hybrid" — that hyphen is what keeps this
-  // from colliding with an ordinary word or German initialism at the front of
-  // a location string, the same way the punctuated branch above relies on its
-  // leading separator.
+  // "CA-Remote", "NJ - Remote", "TX - Hybrid", and — space-separated, no
+  // hyphen at all — "IN Remote" (Porch: the URL path "/job/IN-Remote/" renders
+  // with a space in the location field). Anchored to the very start of the
+  // string, then the code, then either the optional-space-then-hyphen this
+  // branch always required, OR whitespace directly followed by the word
+  // "remote" — that word is what keeps this from colliding with an ordinary
+  // word or German initialism (like the preposition "in") at the front of a
+  // location string, the same way the hyphen alternative always did.
   //
   // "de" is deliberately excluded from this branch only. Every other US state
   // code is safe to read leading a cell, but "DE" leading a cell is exactly as
@@ -258,7 +273,7 @@ const FOREIGN_REGION_RE = new RegExp(
   // this branch can tell the two apart. The punctuated branch above still
   // recognizes "US-DE-REMOTE" as Delaware — that context is safe because it
   // sits beside an explicit "US" marker instead of standing alone.
-  + '|^(al|ak|az|ar|ca|co|ct|fl|ga|hi|id|il|in|ia|ks|ky|la|md|ma|mi|mn|ms|mo|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)(?=\\s?-)',
+  + '|^(al|ak|az|ar|ca|co|ct|fl|ga|hi|id|il|in|ia|ks|ky|la|md|ma|mi|mn|ms|mo|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc|' + FOREIGN_ISO2_CODES + ')(?=\\s?-|\\s+remote(?![a-zäöüß]))',
   'i',
 );
 
@@ -380,8 +395,16 @@ export function classifyReach(location, title = '') {
     // names no country, region, or remote scope at all — only a US city. All
     // three used to win on the bare REMOTE_RE match below with no foreign
     // check ever firing.
-    if (!germanMarker && (FOREIGN_COUNTRY_RE.test(loc) || FOREIGN_REGION_RE.test(loc)
-      || FOREIGN_REMOTE_SCOPE_RE.test(loc) || FOREIGN_CITY_RE.test(loc))) return 'abroad';
+    //
+    // Checked against `both` (location + title), not just `loc`: some boards
+    // put the actual scope only in the title — "Remote · North Central" location
+    // plus title "... (Remote in the U.S.)" (GuidePoint) — and a location-only
+    // check let that sail through as 'remote'. `germanMarker` stays location-only
+    // on purpose: a title mentioning Germany while the location is genuinely
+    // foreign is not a case seen in practice, and widening it risks masking a
+    // real foreign location behind unrelated title text.
+    if (!germanMarker && (FOREIGN_COUNTRY_RE.test(both) || FOREIGN_REGION_RE.test(both)
+      || FOREIGN_REMOTE_SCOPE_RE.test(both) || FOREIGN_CITY_RE.test(both))) return 'abroad';
     return 'remote';
   }
   // A location that carries no information is 'unknown', not 'abroad'. Falling
@@ -507,8 +530,31 @@ export const DOMAIN_RE = new RegExp([
 export const HARD_DQ = [
   {
     id: 'seniority',
-    re: /(?<![a-zäöüß])(senior|sr\.|lead|leiter\w*|leitung|principal|staff|head of|director|chief|vp|abteilungsleit\w*|gruppenleit\w*|teamleit\w*|referatsleit\w*|professor\w*|professur|juniorprofessur|habilitation)(?![a-zäöüß])/i,
+    // `sr\.?` (was `sr\.` only): "Sr Data Engineer" (Porch) has no trailing
+    // period, and the bare abbreviation is exactly as much a seniority marker
+    // as "Sr." — the period was never the signal.
+    re: /(?<![a-zäöüß])(senior|sr\.?|lead|leiter\w*|leitung|principal|staff|head of|director|chief|vp|abteilungsleit\w*|gruppenleit\w*|teamleit\w*|referatsleit\w*|professor\w*|professur|juniorprofessur|habilitation)(?![a-zäöüß])/i,
     reason: 'seniority above entry level',
+  },
+  {
+    id: 'roman-numeral-level',
+    // A standalone roman numeral II-VII directly after a role noun is an
+    // experienced-hire level marker on US-style job ladders ("Software
+    // Engineer V", "Software Engineer III", "Data Analyst II Healthcare
+    // Analytics", "Software Engineer II"). Level I ("Engineer I") is entry
+    // level and deliberately excluded from the alternation. Restricted to a
+    // short list of role nouns immediately before the numeral so this cannot
+    // fire on "World War II" or a bare "Werkstudent II" (neither noun is in
+    // the list). Longest-alternative-first (vii before vi, iii before ii) so
+    // the engine does not stop one character short and fail the trailing
+    // lookahead.
+    re: /(?<![a-zäöüß])(engineer|developer|analyst|scientist|consultant|architect|specialist)\w*[\s-]+(vii|vi|iv|iii|ii|v)(?![a-zA-Z0-9])/i,
+    reason: 'experienced-hire level (roman numeral II or above)',
+  },
+  {
+    id: 'clearance',
+    re: /(?<![a-zäöüß])(active secret|top secret|ts\/sci|security clearance|clearance required)(?![a-zäöüß])/i,
+    reason: 'US security clearance required',
   },
   {
     id: 'doctoral',
@@ -1199,6 +1245,38 @@ function selfTest() {
   check(classifyReach('Milano') === 'abroad', 'Milano names a foreign city with no country marker at all (unaffected regression check)');
   check(classifyReach('Kleinstadt-am-See') === 'unknown', 'an unrecognised place with no foreign marker is still unknown, not abroad (unaffected regression check)');
   check(classifyReach('Erlangen') === 'home', 'Erlangen is still home (unaffected regression check)');
+
+  // ── F1: measured leaks from a 2026-09-16 ATS sweep — title+location already
+  // rule these out for a student near Erlangen, but nothing caught them. ──
+  check(classifyReach('IN Remote') === 'abroad', '"IN Remote" (Porch, space-separated leading state code) is abroad, not remote');
+  check(classifyReach('IN-Remote') === 'abroad', '"IN-Remote" (hyphenated) was already abroad — unaffected regression check');
+  check(classifyReach('Remote, MX') === 'abroad', '"Remote, MX" (Indeed — Mexico) is abroad');
+  check(classifyReach('Remote, IN') === 'abroad', '"Remote, IN" (comma-form) is abroad');
+  check(classifyReach('Remote - IN') === 'abroad', '"Remote - IN" (hyphen-form) is abroad');
+  check(classifyReach('Remote · DoD', 'AI/ML Engineer (Active Secret)') === 'abroad', '"Remote · DoD" (Rackner, US defense) is abroad');
+  check(classifyReach('Remote · North Central', 'SecOps Data & Analytics Engineer - North Central region (Remote in the U.S.)') === 'abroad',
+    'a US scope stated only in the TITLE ("Remote in the U.S.") is read as abroad even though the location cell alone carries no country marker (GuidePoint)');
+  check(classifyReach('5 Locations') === 'unknown', '"5 Locations" (Centene) carries no signal and stays unknown, not abroad');
+  // "IN" must never fire bare — only inside the explicit remote-scope forms.
+  check(classifyReach('Rolle in Teilzeit') === 'unknown', 'the German preposition "in" mid-string, with no separator or remote-adjacency, is never read as the India/Indiana code');
+  check(classifyReach('Remote · 1ININ') === 'remote', 'a bare "IN" substring with no separator or remote-adjacency is not read as a country code');
+  // Reachable remote forms must be unaffected by the new country-code branches.
+  for (const loc of ['Remote, Germany', 'Remote (EU)', 'Remote EMEA', 'Remote, Global', 'Remote / Berlin', 'Remote International']) {
+    check(classifyReach(loc) === 'remote', `"${loc}" is still remote, not swept into abroad by the new ISO2/DoD additions`);
+  }
+
+  check(rankEntry({ title: 'Sr Data Engineer', location: 'Erlangen' }).bucket === 'skip', '"Sr" without a period is a seniority marker, same as "Sr."');
+  check(rankEntry({ title: 'Sr. Data Engineer', location: 'Erlangen' }).bucket === 'skip', '"Sr." with a period still matches (unaffected regression check)');
+  check(HARD_DQ.find((r) => r.id === 'roman-numeral-level').re.test('Software Engineer V'), '"Software Engineer V" is a roman-numeral senior level');
+  check(HARD_DQ.find((r) => r.id === 'roman-numeral-level').re.test('Software Engineer III'), '"Software Engineer III" is a roman-numeral senior level');
+  check(HARD_DQ.find((r) => r.id === 'roman-numeral-level').re.test('Software Engineer II'), '"Software Engineer II" is a roman-numeral senior level');
+  check(HARD_DQ.find((r) => r.id === 'roman-numeral-level').re.test('Data Analyst II Healthcare Analytics'), 'a roman numeral followed by more title text still matches');
+  check(!HARD_DQ.find((r) => r.id === 'roman-numeral-level').re.test('Software Engineer I'), '"Engineer I" is entry level, not a senior marker');
+  check(!HARD_DQ.find((r) => r.id === 'roman-numeral-level').re.test('World War II'), '"World War II" has no preceding role noun and is not flagged');
+  check(!HARD_DQ.find((r) => r.id === 'roman-numeral-level').re.test('Werkstudent II'), '"Werkstudent II" has no preceding role noun and is not flagged');
+  check(rankEntry({ title: 'AI/ML Engineer (Active Secret) — Applied AI & Automation', location: 'Remote · DoD' }).bucket === 'skip', 'a title stating a US security clearance is a hard drop');
+  check(HARD_DQ.find((r) => r.id === 'clearance').re.test('TS/SCI required'), '"TS/SCI" is recognised as a clearance marker');
+  check(HARD_DQ.find((r) => r.id === 'clearance').re.test('Security Clearance Required'), '"Security Clearance Required" is recognised');
 
   // With no location at all, a generic technical word must not earn a shortlist
   // slot — otherwise every location-less row in a full-dataset ATS sweep does.
