@@ -39,6 +39,7 @@ import { parseArgs } from 'util';
 import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
 import { resolveColumns, parseTrackerRow, extractReqNumber, REQ_NUMBER_RE } from './tracker-parse.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { stripStepstoneInlineSuffix } from './url-key.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CAREER_OPS = getCareerOpsRoot();
@@ -61,6 +62,11 @@ export function canonicalUrl(raw) {
     return '';
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+  // A StepStone repost can arrive re-scraped under the -inline (embedded/
+  // iframe) rendering of a posting already queued or in scan-history under
+  // its plain URL — same numeric posting id, so collapse them before the
+  // dedup check runs. See url-key.mjs's stripStepstoneInlineSuffix doc.
+  stripStepstoneInlineSuffix(u);
   // Campaign/attribution parameters identify the *click*, not the posting. A
   // DLR link arrived carrying refid/eid/utm_*/fbclid and would otherwise never
   // match the same posting seen from another source.

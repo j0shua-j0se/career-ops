@@ -268,6 +268,25 @@ try {
       ], new Set());
       if (withTracking.queued.length === 1) pass('a genuine posting with tracking params is still queued after canonicalization');
       else fail(`tracking-param posting was not queued: ${JSON.stringify(withTracking)}`);
+
+      // StepStone repost guard: the same posting scraped again under its
+      // embedded/iframe (-inline) rendering must collapse to the SAME
+      // canonicalUrl as the plain posting, so a StepStone repost arriving in
+      // the other spelling is caught by the dedup check instead of queued as
+      // new (see url-key.mjs's stripStepstoneInlineSuffix).
+      const plain = 'https://www.stepstone.de/stellenangebote--Werkstudent-Generative-AI-Agentic-AI-m-w-d-Karlsruhe-Aschheim-Atruvia-AG--14484440.html';
+      const inline = 'https://www.stepstone.de/stellenangebote--Werkstudent-Generative-AI-Agentic-AI-m-w-d-Karlsruhe-Aschheim-Atruvia-AG--14484440-inline.html';
+      if (canonicalUrl(plain) === canonicalUrl(inline)) {
+        pass('canonicalUrl collapses a StepStone -inline URL onto its plain posting URL');
+      } else {
+        fail(`StepStone -inline URL did not canonicalize to the same key: ${canonicalUrl(plain)} vs ${canonicalUrl(inline)}`);
+      }
+      const nonStepstoneInline = 'https://boards.greenhouse.io/acme/jobs/apply-inline.html';
+      if (canonicalUrl(nonStepstoneInline) === nonStepstoneInline) {
+        pass('canonicalUrl leaves a non-StepStone -inline.html host unchanged');
+      } else {
+        fail(`non-StepStone host was altered by the StepStone -inline strip: ${canonicalUrl(nonStepstoneInline)}`);
+      }
     }
   }
 

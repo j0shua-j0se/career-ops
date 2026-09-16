@@ -65,6 +65,40 @@ export function promoteKnownFragmentIdentity(url) {
 }
 
 /**
+ * StepStone serves the IDENTICAL posting at two URLs that differ only by a
+ * trailing `-inline` immediately before `.html`:
+ *
+ *   .../stellenangebote--Foo-Bar-GmbH--14484440.html
+ *   .../stellenangebote--Foo-Bar-GmbH--14484440-inline.html
+ *
+ * Both carry the SAME numeric posting id (14484440 above) — the `-inline`
+ * variant is the embedded/iframe rendering StepStone serves when the listing
+ * is opened from inside a search-results page rather than as its own page.
+ * Merging the two keys is safe for exactly the reason the module header
+ * requires: the identity-bearing part of the path (the numeric posting id)
+ * never changes, only a rendering-variant suffix does.
+ *
+ * Scoped to hostnames literally named "stepstone" under a single-label ccTLD
+ * (`stepstone.de`, and by the same brand-naming convention `stepstone.at`,
+ * `stepstone.be`, `stepstone.nl` — confirmed via web search, 2026-09).
+ * Deliberately does NOT extend to other StepStone-Group-owned sites
+ * (totaljobs.com, irishjobs.ie, pnet.co.za) — they do not carry "stepstone"
+ * in the hostname and this URL shape is not confirmed for them, so including
+ * them would be guessing rather than verifying, which is exactly the
+ * over-normalization risk the module header warns against.
+ *
+ * Only a literal `-inline` directly before `.html` is stripped, so a
+ * genuinely different posting whose slug happens to end e.g. `-inline-2.html`
+ * is left untouched.
+ *
+ * @param {URL} url
+ */
+export function stripStepstoneInlineSuffix(url) {
+  if (!/^(?:.+\.)?stepstone\.[a-z]{2,}$/i.test(url.hostname)) return;
+  url.pathname = url.pathname.replace(/-inline\.html$/i, '.html');
+}
+
+/**
  * Reduce a posting URL to a stable comparison key.
  *
  * @param {string} raw - A posting URL (or any string) from a tracker row / TSV.
@@ -94,6 +128,7 @@ export function normalizeUrl(raw) {
   u.protocol = 'https:';            // http vs https is the same posting
   u.hostname = u.hostname.toLowerCase();
   promoteKnownFragmentIdentity(u);
+  stripStepstoneInlineSuffix(u);
   u.hash = '';                      // fragments never identify the posting
 
   // Drop tracking params, keep functional ones, sort for order-independence.

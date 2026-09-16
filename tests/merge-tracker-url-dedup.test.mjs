@@ -38,6 +38,24 @@ ok('idempotent', () => {
   const once = normalizeUrl('https://X.com/a/?utm_source=y');
   assert.equal(once, normalizeUrl(once));
 });
+ok('StepStone -inline duplicate: the two Atruvia URLs key identically', () => {
+  const a = normalizeUrl('https://www.stepstone.de/stellenangebote--Werkstudent-Generative-AI-Agentic-AI-m-w-d-Karlsruhe-Aschheim-Atruvia-AG--14484440.html');
+  const b = normalizeUrl('https://www.stepstone.de/stellenangebote--Werkstudent-Generative-AI-Agentic-AI-m-w-d-Karlsruhe-Aschheim-Atruvia-AG--14484440-inline.html');
+  assert.equal(a, b, 'the -inline embedded rendering must key the same as the plain posting');
+});
+ok('a non-StepStone host with -inline.html is left UNCHANGED (no cross-board over-normalization)', () => {
+  const url = 'https://boards.greenhouse.io/acme/jobs/apply-inline.html';
+  assert.equal(normalizeUrl(url), url, 'a look-alike suffix on a non-StepStone board must not be stripped');
+});
+ok('...-inline.html vs ...-inline-2.html stay different (only the literal -inline.html suffix is stripped)', () => {
+  const a = normalizeUrl('https://www.stepstone.de/stellenangebote--Foo--123456-inline.html');
+  const b = normalizeUrl('https://www.stepstone.de/stellenangebote--Foo--123456-inline-2.html');
+  assert.notEqual(a, b, 'a genuinely different suffix must not be collapsed into the -inline case');
+});
+ok('a StepStone URL without the -inline suffix is unchanged', () => {
+  const url = 'https://www.stepstone.de/stellenangebote--Foo--123456.html';
+  assert.equal(normalizeUrl(url), url);
+});
 ok('anything that is not an http(s) posting yields NO key', () => {
   assert.equal(normalizeUrl(''), '');
   assert.equal(normalizeUrl(null), '');

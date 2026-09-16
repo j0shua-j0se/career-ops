@@ -87,6 +87,34 @@ test("host+pathname-only shape must not return (regression lock on the pre-fix c
   assert.notEqual(webKey(jobB), "boards.greenhouse.io/acme/jobs/apply");
 });
 
+test("StepStone -inline duplicate: the two Atruvia URLs key identically on both sides", () => {
+  const a = "https://www.stepstone.de/stellenangebote--Werkstudent-Generative-AI-Agentic-AI-m-w-d-Karlsruhe-Aschheim-Atruvia-AG--14484440.html";
+  const b = "https://www.stepstone.de/stellenangebote--Werkstudent-Generative-AI-Agentic-AI-m-w-d-Karlsruhe-Aschheim-Atruvia-AG--14484440-inline.html";
+  assert.equal(webKey(a), webKey(b), "the -inline embedded rendering must key the same as the plain posting");
+  assert.equal(webKey(a), coreKey(a));
+  assert.equal(webKey(b), coreKey(b));
+});
+
+test("a non-StepStone host with -inline.html is unchanged (no cross-board over-normalization)", () => {
+  const url = "https://boards.greenhouse.io/acme/jobs/apply-inline.html";
+  assert.equal(webKey(url), url);
+  assert.equal(webKey(url), coreKey(url));
+});
+
+test("...-inline.html vs ...-inline-2.html stay different", () => {
+  const a = "https://www.stepstone.de/stellenangebote--Foo--123456-inline.html";
+  const b = "https://www.stepstone.de/stellenangebote--Foo--123456-inline-2.html";
+  assert.notEqual(webKey(a), webKey(b));
+  assert.equal(webKey(a), coreKey(a));
+  assert.equal(webKey(b), coreKey(b));
+});
+
+test("a StepStone URL without the -inline suffix is unchanged", () => {
+  const url = "https://www.stepstone.de/stellenangebote--Foo--123456.html";
+  assert.equal(webKey(url), url);
+  assert.equal(webKey(url), coreKey(url));
+});
+
 test("unparseable / non-http(s) input keys to '' on both sides (NO KEY IS NOT A KEY)", () => {
   for (const bad of ["not a url", "ftp://example.com/x", "", "   "]) {
     assert.equal(webKey(bad), "", `web: ${JSON.stringify(bad)}`);

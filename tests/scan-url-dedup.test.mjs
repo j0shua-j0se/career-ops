@@ -42,6 +42,33 @@ try {
   if (a === b && a === normalizeUrlForDedup(SS)) pass('rltr variants collapse onto the bare posting key');
   else fail(`rltr = ${JSON.stringify({ a, b, bare: normalizeUrlForDedup(SS) })}`);
 
+  // The Atruvia bug (#192 alongside #191): StepStone serves the SAME posting
+  // at a plain URL and an -inline (embedded/iframe) URL, same numeric posting
+  // id. merge-tracker keyed them differently and wrote a second tracker row.
+  const plainAtruvia = 'https://www.stepstone.de/stellenangebote--Werkstudent-Generative-AI-Agentic-AI-m-w-d-Karlsruhe-Aschheim-Atruvia-AG--14484440.html';
+  const inlineAtruvia = 'https://www.stepstone.de/stellenangebote--Werkstudent-Generative-AI-Agentic-AI-m-w-d-Karlsruhe-Aschheim-Atruvia-AG--14484440-inline.html';
+  if (normalizeUrlForDedup(plainAtruvia) === normalizeUrlForDedup(inlineAtruvia)) {
+    pass('THE BUG: the two Atruvia StepStone URLs now dedup to the same key');
+  } else {
+    fail(`Atruvia -inline duplicate not collapsed: ${normalizeUrlForDedup(plainAtruvia)} vs ${normalizeUrlForDedup(inlineAtruvia)}`);
+  }
+
+  // A non-StepStone host's -inline.html must not be touched — over-normalizing
+  // across boards would silently merge two unrelated postings.
+  const nonStepstoneInline = 'https://boards.greenhouse.io/acme/jobs/apply-inline.html';
+  if (normalizeUrlForDedup(nonStepstoneInline) === nonStepstoneInline) {
+    pass('a non-StepStone -inline.html host is left unchanged');
+  } else {
+    fail(`non-StepStone host altered: ${normalizeUrlForDedup(nonStepstoneInline)}`);
+  }
+
+  // Only the literal -inline.html suffix collapses; a different suffix must
+  // stay a different posting.
+  const inline2a = normalizeUrlForDedup('https://www.stepstone.de/stellenangebote--Foo--123456-inline.html');
+  const inline2b = normalizeUrlForDedup('https://www.stepstone.de/stellenangebote--Foo--123456-inline-2.html');
+  if (inline2a !== inline2b) pass('-inline.html vs -inline-2.html stay different');
+  else fail(`-inline-2 was wrongly collapsed onto -inline: ${inline2a}`);
+
   // utm_* are analytics only.
   const utm = normalizeUrlForDedup('https://jobs.example.com/j/7?utm_source=x&utm_medium=y&utm_campaign=z');
   if (utm === 'https://jobs.example.com/j/7') pass('utm_* parameters are stripped');

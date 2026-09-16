@@ -98,7 +98,7 @@ import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
-import { promoteKnownFragmentIdentity } from './url-key.mjs';
+import { promoteKnownFragmentIdentity, stripStepstoneInlineSuffix } from './url-key.mjs';
 
 try {
   const { config } = await import('dotenv');
@@ -1283,6 +1283,11 @@ export function normalizeUrlForDedup(url) {
   parsed.hash = '';
   parsed.pathname = parsed.pathname.replace(/\/+$/, '').toLowerCase() || '/';
   parsed.pathname = canonicalStellenwerkPath(parsed);
+  // StepStone -inline duplicate (see url-key.mjs's stripStepstoneInlineSuffix
+  // doc): a scanner re-hitting the same posting through its embedded/iframe
+  // rendering must dedup against the row already in scan-history, not queue
+  // a second time under the -inline spelling.
+  stripStepstoneInlineSuffix(parsed);
   return parsed.toString();
 }
 
