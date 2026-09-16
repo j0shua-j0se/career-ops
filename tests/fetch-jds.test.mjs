@@ -12,8 +12,16 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { compactJdText, gateUrl, fetchOne, pickContainerText } from '../fetch-jds.mjs';
+import { compactJdText, gateUrl, fetchOne, pickContainerText, htmlToText } from '../fetch-jds.mjs';
 import { setHostResolver } from '../liveness-browser.mjs';
+
+// Every fetchOne test below a URL is not itself exercising the API rung passes
+// this stub so the (real, network-hitting) default `checkLivenessViaApi` is
+// never reached — several of the fixture URLs (linkedin.com) ARE real ATS
+// postings per liveness-api.mjs, so without this stub these tests would fire
+// a live network request. `null` = inconclusive, matching "not an ATS URL" for
+// every fixture that isn't specifically testing the API rung.
+const apiInconclusive = async () => null;
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const rmSync = (target, opts = {}) => _rmSync(target, { maxRetries: 10, retryDelay: 100, ...opts });
@@ -210,7 +218,7 @@ for (const [url, host] of DISALLOWED_HOSTS) {
     const stubCheckRobots = async () => ({ retry: false, code: 'disallowed', reason: `robots.txt disallows this path for ${host}` });
     const newPage = () => { throw new Error(`fetchOne must not create a page for a robots-blocked URL (${host})`); };
     const entry = { key: url, url, company: 'Test', title: 'Test Role', location: 'Remote' };
-    const result = await fetchOne(entry, { newPage, checkRobotsFn: stubCheckRobots });
+    const result = await fetchOne(entry, { newPage, checkRobotsFn: stubCheckRobots, checkLivenessViaApiFn: apiInconclusive });
     assert.equal(result.status, 'robots-blocked');
     assert.equal(result.key, url);
     assert.equal(result.chars, 0);
@@ -221,7 +229,7 @@ for (const [url, host] of DISALLOWED_HOSTS) {
 test('fetchOne: never calls newPage for an unsafe (private-host) URL', async () => {
   const newPage = () => { throw new Error('fetchOne must not create a page for an unsafe URL'); };
   const entry = { key: 'k1', url: 'http://169.254.169.254/latest/meta-data/', company: 'X', title: 'Y', location: 'Z' };
-  const result = await fetchOne(entry, { newPage });
+  const result = await fetchOne(entry, { newPage, checkLivenessViaApiFn: apiInconclusive });
   assert.equal(result.status, 'unsafe-url');
   assert.equal(result.chars, 0);
 });
@@ -229,7 +237,7 @@ test('fetchOne: never calls newPage for an unsafe (private-host) URL', async () 
 test('fetchOne: preserves key/company/title/location on every branch', async () => {
   const entry = { key: 'abc-key', url: 'https://www.linkedin.com/jobs/view/1', company: 'Acme', title: 'Working Student', location: 'Munich' };
   const stubCheckRobots = async () => ({ retry: false, code: 'disallowed', reason: 'no' });
-  const result = await fetchOne(entry, { newPage: () => { throw new Error('nope'); }, checkRobotsFn: stubCheckRobots });
+  const result = await fetchOne(entry, { newPage: () => { throw new Error('nope'); }, checkRobotsFn: stubCheckRobots, checkLivenessViaApiFn: apiInconclusive });
   assert.equal(result.key, 'abc-key');
   assert.equal(result.company, 'Acme');
   assert.equal(result.title, 'Working Student');
@@ -285,6 +293,7 @@ test('fetchOne: a live page with a short body is reported ok (not re-gated to er
     const result = await fetchOne(entry, {
       newPage: async () => page,
       checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: apiInconclusive,
     });
 
     assert.equal(result.status, 'ok', `expected ok, got ${JSON.stringify(result)}`);
@@ -338,10 +347,241 @@ test('fetchOne: a dead third-party subresource does not turn an active page into
     const result = await fetchOne(entry, {
       newPage: async () => page,
       checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: apiInconclusive,
     });
 
     assert.equal(result.status, 'ok', `expected ok, got ${JSON.stringify(result)}`);
     assert.equal(abortCount, 1, 'the dead subresource must still be aborted by the egress guard');
+  } finally {
+    restoreDns();
+  }
+});
+
+// ─── htmlToText ─────────────────────────────────────────────────────────────
+// This is what turns an ATS API's HTML description field (Greenhouse `content`,
+// Workday `jobPostingInfo.jobDescription`, ...) into the plain text fetchOne
+// runs through compactJdText.
+
+test('htmlToText: empty/non-string input returns empty string', () => {
+  assert.equal(htmlToText(''), '');
+  assert.equal(htmlToText(null), '');
+  assert.equal(htmlToText(undefined), '');
+});
+
+test('htmlToText: strips tags and decodes entities', () => {
+  const html = '<p>We need someone who knows R&amp;D &mdash; C++ &amp; Go.</p>';
+  const out = htmlToText(html);
+  assert.ok(!/<[^>]+>/.test(out), `tags should be stripped: ${out}`);
+  assert.ok(out.includes('R&D'), `named entity &amp; should decode: ${out}`);
+  assert.ok(out.includes('—'), `&mdash; should decode to an em dash: ${out}`);
+});
+
+test('htmlToText: decodes numeric and hex entities', () => {
+  assert.ok(htmlToText('Caf&#233;').includes('Café'));
+  assert.ok(htmlToText('Caf&#xe9;').includes('Café'));
+});
+
+test('htmlToText: keeps line breaks at block-level elements', () => {
+  const html = '<p>First paragraph.</p><p>Second paragraph.</p><ul><li>One</li><li>Two</li></ul>';
+  const out = htmlToText(html);
+  const lines = out.split('\n').map((l) => l.trim()).filter(Boolean);
+  assert.ok(lines.includes('First paragraph.'), `lines: ${JSON.stringify(lines)}`);
+  assert.ok(lines.includes('Second paragraph.'), `lines: ${JSON.stringify(lines)}`);
+  assert.ok(lines.some((l) => l.includes('One')), `list item should survive on its own line: ${JSON.stringify(lines)}`);
+  assert.ok(lines.some((l) => l.includes('Two')), `list item should survive on its own line: ${JSON.stringify(lines)}`);
+});
+
+test('htmlToText: <br> becomes a line break', () => {
+  const out = htmlToText('Line one<br>Line two<br/>Line three');
+  assert.equal(out.split('\n').map((l) => l.trim()).filter(Boolean).join('|'), 'Line one|Line two|Line three');
+});
+
+// ─── EXPIRED_CODE_STATUS: only a strong signal is reported `expired` ───────
+// Regression coverage for the Workday false-negative in the bug report: a
+// classifyLiveness `expired` result whose code is `insufficient_content` (body
+// too short to judge — an ATS SPA that never rendered under headless
+// Playwright) must NOT become `status: 'expired'` here, because
+// modes/triage.md returns SKIP without ever fetching for `expired` — silently
+// dropping a posting that may well still be live. Only a strong signal
+// (HTTP 404/410, an explicit expired-text match, a listing-page redirect)
+// earns `expired`; everything else falls back to `error` so triage retries.
+
+function fakePage({ status = 200, bodyText = '', applyControls = [], finalUrl = 'https://careers.example.com/jobs/1' } = {}) {
+  return {
+    async goto() { return { status: () => status }; },
+    async waitForTimeout() {},
+    url() { return finalUrl; },
+    async evaluate(fn) {
+      const src = fn.toString();
+      if (src.includes('querySelectorAll')) return applyControls;
+      if (src.includes('preferredText')) return { preferredText: '', bodyText };
+      return bodyText;
+    },
+  };
+}
+
+test('fetchOne: HTTP 404 (http_gone) maps to status expired — strong signal', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    const page = fakePage({ status: 404, bodyText: 'Not Found' });
+    const entry = { key: 'k', url: 'https://careers.example.com/jobs/1', company: 'Acme', title: 'Role', location: 'Remote' };
+    const result = await fetchOne(entry, {
+      newPage: async () => page,
+      checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: apiInconclusive,
+    });
+    assert.equal(result.status, 'expired');
+    assert.equal(result.liveness, 'http_gone');
+  } finally {
+    restoreDns();
+  }
+});
+
+test('fetchOne: thin/unrendered body (insufficient_content) maps to status error, NOT expired', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    // Short body, no apply control — exactly what an ATS SPA looks like when its
+    // client-side app never mounts under a plain headless hit (the Workday case).
+    const page = fakePage({ status: 200, bodyText: 'Loading', applyControls: [] });
+    const entry = { key: 'k', url: 'https://careers.example.com/jobs/1', company: 'Acme', title: 'Role', location: 'Remote' };
+    const result = await fetchOne(entry, {
+      newPage: async () => page,
+      checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: apiInconclusive,
+    });
+    assert.equal(result.status, 'error', `insufficient_content must map to error, not expired — got ${JSON.stringify(result)}`);
+    assert.equal(result.liveness, 'insufficient_content');
+  } finally {
+    restoreDns();
+  }
+});
+
+// ─── robots-unconfirmed: 'permission unconfirmed' is not a refusal ────────
+
+test('gateUrl: a "not_robots" (soft-200) robots.txt verdict maps to robots-unconfirmed, not robots-blocked', async () => {
+  const result = await gateUrl('https://job-boards.greenhouse.io/acme/jobs/123', {
+    checkRobotsFn: async () => ({ retry: false, code: 'not_robots', reason: 'robots.txt body is not a policy file (soft-200) — permission unconfirmed' }),
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.status, 'robots-unconfirmed');
+});
+
+test('gateUrl: an "unreadable" robots.txt verdict also maps to robots-unconfirmed', async () => {
+  const result = await gateUrl('https://example.com/jobs/1', {
+    checkRobotsFn: async () => ({ retry: false, code: 'unreadable', reason: 'robots.txt returned HTTP 500 — permission unconfirmed' }),
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.status, 'robots-unconfirmed');
+});
+
+test('gateUrl: "disallowed" still maps to robots-blocked (unchanged)', async () => {
+  const result = await gateUrl('https://example.com/jobs/1', {
+    checkRobotsFn: async () => ({ retry: false, code: 'disallowed', reason: 'robots.txt disallows this path' }),
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.status, 'robots-blocked');
+});
+
+test('fetchOne: never calls newPage for a robots-unconfirmed URL either', async () => {
+  const newPage = () => { throw new Error('fetchOne must not create a page for a robots-unconfirmed URL'); };
+  const entry = { key: 'k', url: 'https://job-boards.greenhouse.io/acme/jobs/123', company: 'Acme', title: 'Role', location: 'Remote' };
+  const result = await fetchOne(entry, {
+    newPage,
+    checkRobotsFn: async () => ({ retry: false, code: 'not_robots', reason: 'soft-200 — permission unconfirmed' }),
+    checkLivenessViaApiFn: apiInconclusive,
+  });
+  assert.equal(result.status, 'robots-unconfirmed');
+  assert.equal(result.chars, 0);
+});
+
+// ─── API-first rung: a confirmed ATS API verdict is used before any gate/browser ─
+
+test('fetchOne: API confirms the posting live with description text → status ok, no browser opened', async () => {
+  const fakeApi = async () => ({
+    result: 'active',
+    code: 'workday_api_ok',
+    reason: 'ATS API returns the posting (live)',
+    description: '<p>Senior Engineer role.</p><ul><li>Own the platform</li></ul>',
+  });
+  const entry = { key: 'k', url: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Toronto-ON-CAN/Role_R1', company: 'Acme', title: 'Senior Engineer', location: 'Toronto' };
+  const result = await fetchOne(entry, {
+    newPage: () => { throw new Error('fetchOne must not open a browser when the API already confirmed live text'); },
+    checkRobotsFn: async () => { throw new Error('the API route is not subject to the job-page robots gate'); },
+    checkLivenessViaApiFn: fakeApi,
+  });
+  assert.equal(result.status, 'ok');
+  assert.equal(result.liveness, 'workday_api_ok');
+  assert.ok(result.text.includes('Senior Engineer role.'), `text: ${result.text}`);
+  assert.ok(result.text.includes('Own the platform'), `text: ${result.text}`);
+  assert.ok(result.chars > 0);
+});
+
+test('fetchOne: API confirms the posting expired → status expired, no browser opened', async () => {
+  const fakeApi = async () => ({ result: 'expired', code: 'workday_api_gone', reason: 'ATS API 404 — posting removed' });
+  const entry = { key: 'k', url: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Toronto-ON-CAN/Role_R1', company: 'Acme', title: 'Senior Engineer', location: 'Toronto' };
+  const result = await fetchOne(entry, {
+    newPage: () => { throw new Error('fetchOne must not open a browser when the API already confirmed expired'); },
+    checkRobotsFn: async () => { throw new Error('the API route is not subject to the job-page robots gate'); },
+    checkLivenessViaApiFn: fakeApi,
+  });
+  assert.equal(result.status, 'expired');
+  assert.equal(result.liveness, 'workday_api_gone');
+  assert.equal(result.chars, 0);
+});
+
+test('fetchOne: API result null (not an ATS URL / inconclusive) falls through to the gate + browser path', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    const page = fakePage({ status: 200, bodyText: 'Ich bin interessiert. '.repeat(20), applyControls: ['Ich bin interessiert'] });
+    let newPageCalled = false;
+    const entry = { key: 'k', url: 'https://careers.example.com/jobs/1', company: 'Acme', title: 'Role', location: 'Remote' };
+    const result = await fetchOne(entry, {
+      newPage: async () => { newPageCalled = true; return page; },
+      checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: apiInconclusive,
+    });
+    assert.ok(newPageCalled, 'an inconclusive API result must fall through to the browser path');
+    assert.equal(result.status, 'ok');
+  } finally {
+    restoreDns();
+  }
+});
+
+test('fetchOne: API "active" with no description falls through to the gate + browser path', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    // finalUrl matches the requested URL's host so classifyLiveness's
+    // redirected_off_posting check (job id missing from the final URL) never
+    // fires here — this test is only about the description-less API branch.
+    const finalUrl = 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Toronto-ON-CAN/Role_R1';
+    const page = fakePage({ status: 200, bodyText: 'Ich bin interessiert. '.repeat(20), applyControls: ['Ich bin interessiert'], finalUrl });
+    let newPageCalled = false;
+    const entry = { key: 'k', url: finalUrl, company: 'Acme', title: 'Role', location: 'Remote' };
+    const result = await fetchOne(entry, {
+      newPage: async () => { newPageCalled = true; return page; },
+      checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: async () => ({ result: 'active', code: 'workday_api_ok', reason: 'live' }), // no description
+    });
+    assert.ok(newPageCalled, 'active-with-no-description must fall through to the browser path');
+    assert.equal(result.status, 'ok');
+  } finally {
+    restoreDns();
+  }
+});
+
+test('fetchOne: API "uncertain" falls through to the gate + browser path', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    const page = fakePage({ status: 200, bodyText: 'Ich bin interessiert. '.repeat(20), applyControls: ['Ich bin interessiert'] });
+    let newPageCalled = false;
+    const entry = { key: 'k', url: 'https://careers.example.com/jobs/1', company: 'Acme', title: 'Role', location: 'Remote' };
+    const result = await fetchOne(entry, {
+      newPage: async () => { newPageCalled = true; return page; },
+      checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: async () => ({ result: 'uncertain', code: 'linkedin_signals_disagree', reason: 'unreadable' }),
+    });
+    assert.ok(newPageCalled, 'an uncertain API result must fall through to the browser path');
+    assert.equal(result.status, 'ok');
   } finally {
     restoreDns();
   }

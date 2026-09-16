@@ -75,6 +75,9 @@ const ATS_PROVIDERS = [
       return m ? { board: m[1], id: m[2] } : null;
     },
     api: ({ board, id }) => `https://boards-api.greenhouse.io/v1/boards/${board}/jobs/${id}`,
+    // The job endpoint's own body carries the full JD as HTML — no separate
+    // fetch needed once the API already confirmed the posting is live.
+    extractDescription: (json) => (json && typeof json.content === 'string' && json.content.trim()) ? json.content : null,
   },
   {
     id: 'lever',
@@ -86,6 +89,14 @@ const ATS_PROVIDERS = [
       return m ? { apiHost: `api.${host[1]}`, slug: m[1], id: m[2] } : null;
     },
     api: ({ apiHost, slug, id }) => `https://${apiHost}/v0/postings/${slug}/${id}`,
+    // Prefer the plain-text field (already stripped); fall back to the HTML
+    // field so a posting missing descriptionPlain still yields text.
+    extractDescription: (json) => {
+      if (!json) return null;
+      if (typeof json.descriptionPlain === 'string' && json.descriptionPlain.trim()) return json.descriptionPlain;
+      if (typeof json.description === 'string' && json.description.trim()) return json.description;
+      return null;
+    },
     // Lever's Confidential/Internal Postings feature explicitly excludes some
     // live postings from the public v0/postings API while the direct
     // jobs.lever.co page keeps serving them normally. Real-world repro
@@ -120,6 +131,16 @@ const ATS_PROVIDERS = [
       }
       return classifyAshbyBoard(json, jobId);
     },
+    // Ashby's board payload carries each listed job's own JD text, so a
+    // confirmed-listed posting (classifyAshbyBoard above) already has its
+    // description in hand — no extra fetch needed.
+    extractDescription: (json, { jobId }) => {
+      const job = findAshbyJob(json, jobId);
+      if (!job) return null;
+      if (typeof job.descriptionPlain === 'string' && job.descriptionPlain.trim()) return job.descriptionPlain;
+      if (typeof job.descriptionHtml === 'string' && job.descriptionHtml.trim()) return job.descriptionHtml;
+      return null;
+    },
   },
   {
     id: 'workday',
@@ -146,6 +167,14 @@ const ATS_PROVIDERS = [
     },
     api: ({ tenant, shard, site, jobPath }) =>
       `https://${tenant}.${shard}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/job/${jobPath}`,
+    // The CXS job payload nests the JD as HTML under jobPostingInfo — this is
+    // the real fix for the SPA-not-rendered false `expired`: the browser path
+    // never sees any of this because Workday's client-side app never mounts
+    // for a headless Playwright hit, but the API returns it directly.
+    extractDescription: (json) => {
+      const desc = json?.jobPostingInfo?.jobDescription;
+      return (typeof desc === 'string' && desc.trim()) ? desc : null;
+    },
   },
   {
     id: 'linkedin',
@@ -260,6 +289,13 @@ export async function throttleProviderRequest(providerId, intervalMs) {
   return wait;
 }
 
+/** Find one job by id in an Ashby board payload, or null (also null on an unexpected shape). */
+function findAshbyJob(json, jobId) {
+  if (!json || !Array.isArray(json.jobs)) return null;
+  const target = String(jobId).toLowerCase();
+  return json.jobs.find((j) => typeof j?.id === 'string' && j.id.toLowerCase() === target) ?? null;
+}
+
 /**
  * Decide liveness for one Ashby posting from its org's job-board API payload.
  * Pure + deterministic (no I/O), mirroring classifyLiveness in liveness-core.mjs.
@@ -276,8 +312,7 @@ export async function throttleProviderRequest(providerId, intervalMs) {
  */
 export function classifyAshbyBoard(json, jobId) {
   if (!json || !Array.isArray(json.jobs)) return null; // unexpected shape → fall back
-  const target = String(jobId).toLowerCase();
-  const job = json.jobs.find((j) => typeof j?.id === 'string' && j.id.toLowerCase() === target);
+  const job = findAshbyJob(json, jobId);
   if (job && job.isListed !== false) {
     return { result: 'active', code: 'ashby_api_ok', reason: 'Ashby posting is listed on the board (live)' };
   }
@@ -288,7 +323,7 @@ export function classifyAshbyBoard(json, jobId) {
  * Map a posting URL to its ATS API URL, or null if it isn't a known ATS posting
  * (or any extracted segment fails the strict charset). Pure + deterministic.
  * @param {string} rawUrl
- * @returns {{ ats: string, apiUrl: string, parts: Record<string, string>, timeoutMs?: number, throttleMs?: number, accept?: string, interpret?: (res: Response, parts: Record<string, string>) => Promise<{ result: 'active' | 'expired' | 'uncertain', code: string, reason: string } | null>, api404Authoritative: boolean } | null}
+ * @returns {{ ats: string, apiUrl: string, parts: Record<string, string>, timeoutMs?: number, throttleMs?: number, accept?: string, interpret?: (res: Response, parts: Record<string, string>) => Promise<{ result: 'active' | 'expired' | 'uncertain', code: string, reason: string } | null>, extractDescription?: (parsedBody: any, parts: Record<string, string>) => string | null, api404Authoritative: boolean } | null}
  */
 export function resolveAtsApi(rawUrl) {
   let u;
@@ -313,6 +348,7 @@ export function resolveAtsApi(rawUrl) {
       throttleMs: provider.throttleMs,
       accept: provider.accept,
       interpret: provider.interpret,
+      extractDescription: provider.extractDescription,
       api404Authoritative: provider.api404Authoritative !== false,
     };
   }
@@ -327,15 +363,20 @@ export function isAtsPosting(url) {
 /**
  * Zero-token liveness check via the posting's ATS API.
  * @param {string} url
- * @returns {Promise<{ result: 'active' | 'expired' | 'uncertain', code: string, reason: string } | null>}
+ * @returns {Promise<{ result: 'active' | 'expired' | 'uncertain', code: string, reason: string, description?: string } | null>}
  *   null = not a known ATS posting, or inconclusive → caller should fall back to Playwright.
  *   `uncertain` is a conclusion in its own right: the provider reached the posting
  *   and could not read it, and no other rung would do better.
+ *   `description` (only on a live/`active` result, only when the provider declares
+ *   `extractDescription`) is the JD text the API already handed back — additive,
+ *   so a caller reading only {result, code, reason} (check-liveness.mjs) is
+ *   unaffected; a caller that wants the JD text (fetch-jds.mjs) can use it
+ *   instead of re-fetching or rendering the page.
  */
 export async function checkLivenessViaApi(url) {
   const resolved = resolveAtsApi(url);
   if (!resolved) return null;
-  const { ats, apiUrl, parts, interpret, timeoutMs, throttleMs, accept, api404Authoritative } = resolved;
+  const { ats, apiUrl, parts, interpret, extractDescription, timeoutMs, throttleMs, accept, api404Authoritative } = resolved;
 
   // Wait out any provider rate limit BEFORE arming the timeout, so the spacing
   // does not eat the budget the request itself needs.
@@ -363,10 +404,32 @@ export async function checkLivenessViaApi(url) {
       return { result: 'expired', code: `${ats}_api_gone`, reason: `ATS API ${res.status} — posting removed` };
     }
     if (res.status === 200) {
+      // Read the body once as text. `interpret` (Ashby, LinkedIn) still gets a
+      // Response of its own — built from this same text — so its own
+      // res.json()/res.text() call inside `interpret` is unchanged; this just
+      // adds a second, independent read for `extractDescription` alongside it.
+      let bodyText = null;
+      try { bodyText = await res.text(); } catch { /* leave null — no description, verdict path below still runs */ }
+
       // Org-level APIs (Ashby) inspect the body to confirm THIS posting; per-job
-      // APIs (Greenhouse, Lever) treat a 200 as proof the posting is live.
-      if (interpret) return await interpret(res, parts);
-      return { result: 'active', code: `${ats}_api_ok`, reason: 'ATS API returns the posting (live)' };
+      // APIs (Greenhouse, Lever, Workday) treat a 200 as proof the posting is live.
+      let verdict;
+      if (interpret) {
+        const resForInterpret = bodyText === null ? res : new Response(bodyText, { status: 200 });
+        verdict = await interpret(resForInterpret, parts);
+      } else {
+        verdict = { result: 'active', code: `${ats}_api_ok`, reason: 'ATS API returns the posting (live)' };
+      }
+
+      if (verdict && verdict.result === 'active' && extractDescription && bodyText) {
+        try {
+          const isJsonBody = (accept || 'application/json') !== 'text/html';
+          const parsed = isJsonBody ? JSON.parse(bodyText) : bodyText;
+          const description = extractDescription(parsed, parts);
+          if (description) verdict = { ...verdict, description };
+        } catch { /* description is best-effort — never let it affect the verdict */ }
+      }
+      return verdict;
     }
     return null; // 429/5xx/other → inconclusive, fall back to the browser check
   } catch {

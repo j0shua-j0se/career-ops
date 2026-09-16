@@ -11,6 +11,14 @@
  * fetching every posting itself.
  *
  * Reuses the project's existing liveness stack rather than reinventing it:
+ *   - liveness-api.mjs: checkLivenessViaApi — the same zero-token ATS API rung
+ *     check-liveness.mjs consults FIRST, before any browser (Workday, Greenhouse,
+ *     Lever, Ashby, ...). A confirmed-live posting also hands back the API's own
+ *     description text, used directly instead of ever opening a page for it —
+ *     this is what fixes the false `expired` on ATS SPAs that don't render
+ *     under headless Playwright (Workday) and the false `robots-blocked` on a
+ *     soft-200 robots.txt (Greenhouse): the API route is a public JSON
+ *     endpoint, not the job page, so neither failure mode can reach it.
  *   - liveness-browser.mjs: newLivenessPage / checkUrlLiveness / rejectPrivateOrInvalid /
  *     validateUrlSecurity / isChallengeResult — the same egress guard, UA, and
  *     navigation pattern check-liveness.mjs uses.
@@ -31,12 +39,24 @@
  * Output (--out): a JSON array, same order, of
  *   {key, url, company, title, location, status, liveness, chars, text}
  * where status is one of:
- *   'ok'              — text is the compacted JD.
- *   'expired'         — classifyLiveness says the posting is gone.
- *   'robots-blocked'  — robots.txt disallows fetching this path; never navigated.
- *   'unsafe-url'      — egress guard refused the URL (private/invalid/loopback).
- *   'blocked'         — anti-bot/challenge page (Cloudflare, CAPTCHA, WAF denial).
- *   'error'           — navigation/timeout/other failure; retry or fall back.
+ *   'ok'                 — text is the compacted JD (from the ATS API or the page).
+ *   'expired'            — a STRONG signal the posting is gone (HTTP 404/410, an
+ *                          explicit expired/closed text match, a redirect to a
+ *                          listing/search page) — see EXPIRED_CODE_STATUS below.
+ *   'robots-blocked'     — robots.txt explicitly disallows fetching this path
+ *                          (checkRobots code 'disallowed'); never navigated.
+ *   'robots-unconfirmed' — robots.txt permission could not be confirmed (a
+ *                          soft-200 body, an unreadable policy, ...) — NOT a
+ *                          real refusal, but never navigated either; the triage
+ *                          worker falls back to WebFetch/browser for these.
+ *   'unsafe-url'         — egress guard refused the URL (private/invalid/loopback).
+ *   'blocked'            — anti-bot/challenge page (Cloudflare, CAPTCHA, WAF denial).
+ *   'error'              — navigation/timeout/other failure, OR a classifyLiveness
+ *                          `expired` code that is NOT a strong signal (e.g.
+ *                          'insufficient_content' — a page that simply didn't
+ *                          render, most often an ATS SPA under headless
+ *                          Playwright, not proof the posting is gone); retry or
+ *                          fall back.
  */
 
 import { readFile, writeFile } from 'fs/promises';
@@ -50,6 +70,7 @@ import {
   sameOrigin,
 } from './liveness-browser.mjs';
 import { checkRobots } from './robots-gate.mjs';
+import { checkLivenessViaApi } from './liveness-api.mjs';
 import { validateFlags, flagValue, safeIntFlag } from './lib/cli-flags.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
@@ -176,6 +197,49 @@ export function compactJdText(rawText, { maxChars = DEFAULT_MAX_CHARS } = {}) {
   return result;
 }
 
+// ─── htmlToText ─────────────────────────────────────────────────────────────
+
+const HTML_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', mdash: '—', ndash: '–',
+  rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', hellip: '…',
+};
+
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&([a-zA-Z]+);/g, (m, name) => (name in HTML_ENTITIES ? HTML_ENTITIES[name] : m));
+}
+
+// Block-level tags whose CLOSE (or self-close, for <br>) marks a line break in
+// plain-reading order. Deliberately conservative — this is not an HTML parser,
+// just enough structure preservation that a Workday/Greenhouse job description
+// reads as paragraphs and list items rather than one run-on line.
+const BLOCK_CLOSE_TAGS = /<\/(p|div|li|h[1-6]|tr|blockquote|section|article|ul|ol)\s*>/gi;
+const BR_TAGS = /<br\s*\/?>/gi;
+const LI_OPEN_TAG = /<li\b[^>]*>/gi;
+
+/**
+ * Convert an ATS API's HTML job-description field to plain text: strip tags,
+ * decode entities, keep line breaks at block-level elements. Not a full HTML
+ * parser — a `<script>`/`<style>` body is not stripped as a unit (ATS JD HTML
+ * doesn't carry either in practice), and malformed markup degrades to "tags
+ * removed, text kept" rather than throwing.
+ *
+ * @param {string} html
+ * @returns {string}
+ */
+export function htmlToText(html) {
+  if (!html || typeof html !== 'string') return '';
+  let text = html
+    .replace(BR_TAGS, '\n')
+    .replace(BLOCK_CLOSE_TAGS, '\n')
+    .replace(LI_OPEN_TAG, '\n- ')
+    .replace(/<[^>]+>/g, ''); // strip every remaining tag
+  text = decodeHtmlEntities(text);
+  return text;
+}
+
 // ─── pre-navigation safety gate ─────────────────────────────────────────────
 
 /**
@@ -203,7 +267,15 @@ export async function gateUrl(url, { checkRobotsFn = checkRobots } = {}) {
   }
   const verdict = await checkRobotsFn(url);
   if (!verdict.retry) {
-    return { allowed: false, status: 'robots-blocked', code: verdict.code, reason: verdict.reason };
+    // 'disallowed' is the one code that means the site actually declined (an
+    // explicit robots.txt rule). Every other non-retry code — 'not_robots'
+    // (soft-200: the body isn't a policy file), 'unreadable' (non-200 status
+    // reading the policy), 'bad_url' — is the gate saying permission could not
+    // be CONFIRMED, which is not the same thing as being refused. Treating it
+    // as a refusal (the pre-fix behavior) turned every Greenhouse posting
+    // behind a soft-200 robots.txt into a false 'robots-blocked' SKIP.
+    const status = verdict.code === 'disallowed' ? 'robots-blocked' : 'robots-unconfirmed';
+    return { allowed: false, status, code: verdict.code, reason: verdict.reason };
   }
   return { allowed: true };
 }
@@ -303,6 +375,47 @@ async function extractPageText(page) {
   return parts.join('\n');
 }
 
+// classifyLiveness (liveness-core.mjs) can produce `result: 'expired'` from
+// several codes; only some are strong enough to report `expired` here without
+// ever having navigated a real, rendered page. The rest are conservatively
+// downgraded to `error` so the triage worker falls back to WebFetch/browser
+// instead of silently SKIPping a posting that may well still be live.
+//
+// Full inventory of classifyLiveness's `expired` codes, and why each maps the
+// way it does:
+//   http_gone            expired — HTTP 404/410, unambiguous.
+//   expired_url          expired — redirected to a URL whose PATH names the
+//                                  job gone/closed (e.g. .../job-no-longer-available.html).
+//   expired_body         expired — explicit "no longer available"/"closed"/
+//                                  "filled" text match in the rendered body.
+//   not_found_body       expired — a blocking status (403/429/5xx) whose body
+//                                  STILL explicitly reads not-found; the body
+//                                  outranks the status code in both directions.
+//   listing_page         expired — the final page is a listing/search page
+//                                  ("N jobs found"), not a single posting.
+//   insufficient_content  error  — body under MIN_CONTENT_CHARS. This is the
+//                                  SPA-not-rendered case (Workday and others
+//                                  never mount their client-side app under a
+//                                  plain headless hit): thin content is NOT
+//                                  proof the posting is gone, only that this
+//                                  render attempt didn't work. A false
+//                                  `expired` here is the worst failure mode —
+//                                  triage.md SKIPs an `expired` status without
+//                                  ever fetching, silently dropping a live
+//                                  posting.
+// (Every other classifyLiveness code — bot_challenge, access_blocked,
+// server_error, site_error, redirected_off_posting, aggregator_delisted,
+// apply_control_visible, email_apply_channel, no_apply_control — is not an
+// `expired` result at all and is handled by the branches below this map.)
+const EXPIRED_CODE_STATUS = {
+  http_gone: 'expired',
+  expired_url: 'expired',
+  expired_body: 'expired',
+  not_found_body: 'expired',
+  listing_page: 'expired',
+  insufficient_content: 'error',
+};
+
 /**
  * Fetch and compact one entry's JD.
  *
@@ -312,10 +425,27 @@ async function extractPageText(page) {
  * makes this function the single seam to test "never navigated" against: pass
  * a `newPage` that throws, and a blocked URL must still resolve normally.
  *
+ * Rung 1, before any of that: `checkLivenessViaApiFn` (liveness-api.mjs's
+ * `checkLivenessViaApi`, same as check-liveness.mjs uses) — a zero-token check
+ * against the posting's ATS API (Workday, Greenhouse, Lever, Ashby, ...). This
+ * runs BEFORE the robots gate deliberately: it targets a fixed-host public
+ * JSON API, never the job page itself, so the job page's robots.txt has no
+ * say over it — matching check-liveness.mjs, which applies no robots check to
+ * this rung either. A confirmed-live result carrying `description` text is
+ * used directly as the JD (`status: 'ok'`), and a confirmed-gone result is
+ * `status: 'expired'` — no browser is ever opened for either case. Anything
+ * else (not an ATS URL, network/timeout, `uncertain`, or `active` with no
+ * usable description) falls through to the existing gate + browser path.
+ *
  * @param {{key?:string, url:string, company?:string, title?:string, location?:string}} entry
- * @param {{newPage: () => Promise<object>, checkRobotsFn?: typeof checkRobots, maxChars?: number}} deps
+ * @param {{newPage: () => Promise<object>, checkRobotsFn?: typeof checkRobots, checkLivenessViaApiFn?: typeof checkLivenessViaApi, maxChars?: number}} deps
  */
-export async function fetchOne(entry, { newPage, checkRobotsFn = checkRobots, maxChars = DEFAULT_MAX_CHARS } = {}) {
+export async function fetchOne(entry, {
+  newPage,
+  checkRobotsFn = checkRobots,
+  checkLivenessViaApiFn = checkLivenessViaApi,
+  maxChars = DEFAULT_MAX_CHARS,
+} = {}) {
   const base = {
     key: entry.key ?? entry.url,
     url: entry.url,
@@ -323,6 +453,28 @@ export async function fetchOne(entry, { newPage, checkRobotsFn = checkRobots, ma
     title: entry.title ?? '',
     location: entry.location ?? '',
   };
+
+  let api = null;
+  try {
+    api = await checkLivenessViaApiFn(entry.url);
+  } catch {
+    api = null; // API rung is best-effort; any failure here just falls through
+  }
+  if (api?.result === 'expired') {
+    return { ...base, status: 'expired', liveness: api.code, chars: 0, text: '' };
+  }
+  if (api?.result === 'active' && api.description) {
+    const compact = compactJdText(htmlToText(api.description), { maxChars });
+    if (compact) {
+      return { ...base, status: 'ok', liveness: api.code, chars: compact.length, text: compact };
+    }
+    // Confirmed live but nothing usable came out of the description field —
+    // fall through to the gate + browser path rather than reporting `ok` with
+    // no text.
+  }
+  // Every other outcome (null = not an ATS URL / inconclusive, `uncertain`, or
+  // `active` with no description) is inconclusive FOR OUR PURPOSES (we need
+  // JD text, not just a verdict) — fall through.
 
   const gate = await gateUrl(entry.url, { checkRobotsFn });
   if (!gate.allowed) {
@@ -340,7 +492,11 @@ export async function fetchOne(entry, { newPage, checkRobotsFn = checkRobots, ma
     const verdict = await checkUrlLiveness(page, entry.url);
 
     if (verdict.result === 'expired') {
-      return { ...base, status: 'expired', liveness: verdict.code, chars: 0, text: '' };
+      // See EXPIRED_CODE_STATUS above: only a strong signal is reported
+      // `expired`; an unrecognized future code defaults to `error` rather than
+      // silently trusting a new classifyLiveness code to mean "gone".
+      const status = EXPIRED_CODE_STATUS[verdict.code] ?? 'error';
+      return { ...base, status, liveness: verdict.code, chars: 0, text: '' };
     }
     if (isChallengeResult(verdict)) {
       return { ...base, status: 'blocked', liveness: verdict.code, chars: 0, text: '' };
