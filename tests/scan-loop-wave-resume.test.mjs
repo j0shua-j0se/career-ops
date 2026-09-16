@@ -44,21 +44,32 @@ const checkpointPath = join(cacheDir, 'ats-full-checkpoint.json');
 // env only), looks up the real 'ats-recent' rung from loop-core.mjs (so this
 // test tracks that rung's actual args instead of a hand-copied duplicate),
 // and prints buildWaveArgs' result as JSON.
+//
+// CO_TEST_ATS_SOURCES (optional, comma list) runs the rung through
+// loop-core.mjs's own applyAtsSources() first — the same narrowing
+// decideNextAction performs when `loop.ats_sources` is configured — so this
+// harness also covers checkpoint compatibility against a NARROWED --ats,
+// not just the unmodified default rung.
 const harnessPath = join(box, 'harness.mjs');
 writeFileSync(harnessPath, [
   "import { pathToFileURL } from 'node:url';",
   "import { join } from 'node:path';",
   'const root = process.env.CO_TEST_REPO_ROOT;',
   "const { buildWaveArgs } = await import(pathToFileURL(join(root, 'scan-loop.mjs')).href);",
-  "const { WAVE_STRATEGIES } = await import(pathToFileURL(join(root, 'loop-core.mjs')).href);",
-  "const strategy = WAVE_STRATEGIES.find((s) => s.id === 'ats-recent');",
+  "const { WAVE_STRATEGIES, applyAtsSources } = await import(pathToFileURL(join(root, 'loop-core.mjs')).href);",
+  "let strategy = WAVE_STRATEGIES.find((s) => s.id === 'ats-recent');",
+  'const atsEnv = process.env.CO_TEST_ATS_SOURCES;',
+  'if (atsEnv) strategy = applyAtsSources(strategy, { atsSources: atsEnv.split(\',\') });',
   'const args = buildWaveArgs(strategy, {});',
   'process.stdout.write(JSON.stringify(args));',
 ].join('\n'), 'utf-8');
 
-function runHarness() {
+function runHarness(atsSources = null) {
   const res = spawnSync(NODE, [harnessPath], {
-    env: { ...process.env, CAREER_OPS_ROOT: box, CO_TEST_REPO_ROOT: ROOT },
+    env: {
+      ...process.env, CAREER_OPS_ROOT: box, CO_TEST_REPO_ROOT: ROOT,
+      ...(atsSources ? { CO_TEST_ATS_SOURCES: atsSources.join(',') } : {}),
+    },
     encoding: 'utf-8',
   });
   let args = null;
@@ -128,6 +139,60 @@ function runHarness() {
   const { args, status, stderr } = runHarness();
   check('ats-list mismatch does not resume',
     status === 0 && Array.isArray(args) && !args.includes('--resume'),
+    `status=${status} args=${JSON.stringify(args)} stderr=${stderr?.trim()}`);
+}
+
+// ── loop.ats_sources narrowing: checkpoint compatibility ───────────────────
+//
+// MEASURED DECISION: restrict ats-recent to Workday + Ashby via
+// `loop.ats_sources: [workday, ashby]`. A checkpoint from before that change
+// (all 5 SOURCES) must NOT be resumed under the narrowed rung — its
+// per-source progress means something different — and a checkpoint already
+// written under the narrowed setting must resume normally, exactly like the
+// unnarrowed case above.
+
+// A checkpoint written with the FULL 5-source rung must be rejected once the
+// rung is narrowed to workday,ashby — the narrowing changes `--ats`, and
+// checkpointCompatible() must treat that as a different scan.
+{
+  const cp = {
+    version: 1,
+    cutoffMs: Date.now() - 7 * 86_400_000,
+    ats: ['greenhouse', 'lever', 'ashby', 'workday', 'icims'],
+    limit: null,
+    includeUndated: false,
+    completedSources: ['greenhouse', 'lever', 'ashby'],
+    current: { name: 'workday', resumeAt: 800, datasetLen: 5000 },
+    offers: [],
+  };
+  writeFileSync(checkpointPath, JSON.stringify(cp), 'utf-8');
+
+  const { args, status, stderr } = runHarness(['workday', 'ashby']);
+  check('a 5-source checkpoint is incompatible with the narrowed workday,ashby rung',
+    status === 0 && Array.isArray(args) && !args.includes('--resume'),
+    `status=${status} args=${JSON.stringify(args)} stderr=${stderr?.trim()}`);
+  check('the narrowed rung still carries --ats workday,ashby even when it cannot resume',
+    Array.isArray(args) && args.includes('--ats') && args[args.indexOf('--ats') + 1] === 'workday,ashby',
+    `args=${JSON.stringify(args)}`);
+}
+
+// A checkpoint written BY the narrowed workday,ashby rung resumes normally.
+{
+  const cp = {
+    version: 1,
+    cutoffMs: Date.now() - 7 * 86_400_000,
+    ats: ['workday', 'ashby'],
+    limit: null,
+    includeUndated: false,
+    completedSources: ['ashby'],
+    current: { name: 'workday', resumeAt: 1200, datasetLen: 9000 },
+    offers: new Array(3).fill({ dummy: true }),
+  };
+  writeFileSync(checkpointPath, JSON.stringify(cp), 'utf-8');
+
+  const { args, status, stderr } = runHarness(['workday', 'ashby']);
+  check('a workday,ashby checkpoint resumes under the same narrowed rung',
+    status === 0 && Array.isArray(args) && args.includes('--resume'),
     `status=${status} args=${JSON.stringify(args)} stderr=${stderr?.trim()}`);
 }
 

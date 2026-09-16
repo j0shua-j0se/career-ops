@@ -289,6 +289,67 @@ try {
     ['start', 'ingest', 'score', 'finish', 'abort'].every((e) => runLog.includes(e)),
     'missing at least one event');
 
+  // ── loop.skip_strategies / loop.ats_sources (config-driven ladder) ─────────
+  //
+  // MEASURED DECISION: skip the interamt rung (zero tracker rows across 20
+  // passes) and restrict ats-recent to workday,ashby (the only sources that
+  // produced qualifying rows). This is a per-user config override, not a code
+  // change — read from profile.yml, validated, and visible in state + the run
+  // log so a report can't mistake "skipped by config" for "ran and found
+  // nothing".
+  writeFileSync(paths.profile,
+    'loop:\n  target: 2\n  min_score: 3.8\n  score_batch: 12\n'
+    + '  skip_strategies: [interamt]\n  ats_sources: [workday, ashby]\n', 'utf-8');
+
+  const skipStarted = loopJson('start', '--reset');
+  check('start accepts valid skip_strategies/ats_sources', skipStarted.status === 0, skipStarted.stderr.trim());
+
+  const skipOffersFile = writeJson('skip-offers.json', [
+    { url: 'https://boards.greenhouse.io/skipco/jobs/1', company: 'SkipCo', title: 'Engineer', location: 'Berlin' },
+  ]);
+  loop('ingest', '--file', skipOffersFile);
+  const skipKey = Object.keys(readState().candidates)[0];
+  loop('record', '--file', writeJson('skip-scores.json', [{ key: skipKey, score: 1.0 }]));
+
+  const afterBarrenWave1 = loopJson('next');
+  check('interamt is skipped entirely — the ladder goes straight from portals to ats-recent',
+    afterBarrenWave1.json?.action === 'scan' && afterBarrenWave1.json?.strategy?.id === 'ats-recent',
+    JSON.stringify(afterBarrenWave1.json));
+  check('the skipped rung does not consume its own wave number',
+    afterBarrenWave1.json?.wave === 2, `got ${afterBarrenWave1.json?.wave}`);
+  check('ats_sources narrows the ats-recent rung to --ats workday,ashby',
+    afterBarrenWave1.json?.strategy?.args?.includes('--ats')
+    && afterBarrenWave1.json.strategy.args[afterBarrenWave1.json.strategy.args.indexOf('--ats') + 1] === 'workday,ashby',
+    JSON.stringify(afterBarrenWave1.json?.strategy?.args));
+
+  const skipStatus = loopJson('status');
+  check('status reports which rungs were skipped by config',
+    Array.isArray(skipStatus.json?.skippedStrategies) && skipStatus.json.skippedStrategies.includes('interamt'),
+    JSON.stringify(skipStatus.json?.skippedStrategies));
+
+  const runLogAfterSkip = readFileSync(paths.runLog, 'utf-8');
+  check('the run log start line records the skipped rung and narrowed ATS sources',
+    /skip=interamt/.test(runLogAfterSkip) && /ats=workday,ashby/.test(runLogAfterSkip),
+    runLogAfterSkip.slice(-400));
+
+  // ── skip_strategies / ats_sources: unknown ids are config errors ───────────
+  writeFileSync(paths.profile, 'loop:\n  target: 2\n  skip_strategies: [not-a-real-rung]\n', 'utf-8');
+  const badSkip = loop('start', '--reset');
+  check('an unknown skip_strategies id is a config error, not a silent no-op',
+    badSkip.status === 1 && /config error/.test(badSkip.stderr) && /not-a-real-rung/.test(badSkip.stderr),
+    badSkip.stderr.trim());
+
+  writeFileSync(paths.profile, 'loop:\n  target: 2\n  ats_sources: [bogus-ats]\n', 'utf-8');
+  const badAts = loop('start', '--reset');
+  check('an unknown ats_sources id is a config error, validated against scan-ats-full.mjs SOURCES',
+    badAts.status === 1 && /config error/.test(badAts.stderr) && /bogus-ats/.test(badAts.stderr),
+    badAts.stderr.trim());
+
+  // Restore a clean run so the rest of the suite (failure-mode tests below)
+  // starts from a known-good state.
+  writeFileSync(paths.profile, 'loop:\n  target: 2\n  min_score: 3.8\n  score_batch: 12\n', 'utf-8');
+  loop('start', '--reset');
+
   // ── failure modes ──────────────────────────────────────────────────────────
   writeFileSync(paths.state, '{ this is not json', 'utf-8');
   const corrupt = loop('status');

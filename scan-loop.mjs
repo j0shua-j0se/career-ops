@@ -36,17 +36,18 @@ import { spawnSync } from 'child_process';
 import * as yaml from 'js-yaml';
 
 import {
-  DEFAULT_LOOP_CONFIG, WAVE_STRATEGIES,
+  DEFAULT_LOOP_CONFIG,
   resolveLoopConfig, newState, normalizeState, ingestOffers, recordScores,
   parseTriageOutput, decideNextAction, summarize, qualifiedCandidates,
   renderShortlist, renderRunLogEntry, toHumanUrl,
+  effectiveStrategies,
   HALT_BUDGET,
   HALT_ABORTED,
   classifyHaltReason,
 } from './loop-core.mjs';
 import { parsePipeline, rankEntry } from './triage-prefilter.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
-import { loadCheckpoint, checkpointCompatible, parseArgs as parseScanAtsFullArgs } from './scan-ats-full.mjs';
+import { loadCheckpoint, checkpointCompatible, parseArgs as parseScanAtsFullArgs, SOURCES as ATS_SOURCES } from './scan-ats-full.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
@@ -68,6 +69,12 @@ const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(CAREER_OPS, '
 const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || join(CAREER_OPS, 'config', 'profile.yml');
 const TSV_DIR = process.env.CAREER_OPS_ADDITIONS || join(CAREER_OPS, 'batch', 'tracker-additions');
 
+// The authoritative ATS source ids, passed into resolveLoopConfig so
+// `loop.ats_sources` is validated against scan-ats-full.mjs's real SOURCES
+// table rather than a hand-copied duplicate (loop-core.mjs stays
+// dependency-free and falls back to its own copy when called without this).
+const KNOWN_ATS_SOURCES = Object.keys(ATS_SOURCES);
+
 // ── State I/O ───────────────────────────────────────────────────────────────
 
 function loadProfile() {
@@ -80,8 +87,15 @@ function loadProfile() {
   }
 }
 
+/** resolveLoopConfig, wired to the real SOURCES table so `loop.ats_sources` is
+ * validated against it. Throws (config error) on an unknown skip/ats id — left
+ * to propagate to main()'s catch, same as every other scan-loop error. */
+function loadLoopConfig() {
+  return resolveLoopConfig(loadProfile(), { knownAtsSources: KNOWN_ATS_SOURCES });
+}
+
 function loadState() {
-  const config = resolveLoopConfig(loadProfile());
+  const config = loadLoopConfig();
   if (!existsSync(STATE_PATH)) return null;
   try {
     return normalizeState(JSON.parse(readFileSync(STATE_PATH, 'utf-8')), config);
@@ -138,7 +152,7 @@ function diffPipeline(before) {
 // ── Commands ────────────────────────────────────────────────────────────────
 
 function cmdStart(flags) {
-  const config = resolveLoopConfig(loadProfile());
+  const config = loadLoopConfig();
   if (Number.isFinite(flags.target)) config.target = flags.target;
   if (Number.isFinite(flags['min-score'])) config.minScore = flags['min-score'];
 
@@ -151,7 +165,13 @@ function cmdStart(flags) {
 
   const state = newState(config);
   saveState(state);
-  log(state, 'start', `target=${config.target} minScore=${config.minScore}`);
+  // Recorded here too (not just in state.config), so a run's audit trail says
+  // up front what was deliberately left out of the ladder — a pass report
+  // reading only the run log must not mistake "skipped by config" for "ran
+  // and found nothing" on a rung that never appears in the wave list at all.
+  const skipNote = config.skipStrategies.length ? ` skip=${config.skipStrategies.join(',')}` : '';
+  const atsNote = config.atsSources ? ` ats=${config.atsSources.join(',')}` : '';
+  log(state, 'start', `target=${config.target} minScore=${config.minScore}${skipNote}${atsNote}`);
   return { started: true, config, next: decideNextAction(state) };
 }
 
@@ -377,7 +397,10 @@ function cmdIngest(flags) {
   if (!Array.isArray(offers)) throw new Error(`${flags.file} must contain a JSON array of offers.`);
 
   const wave = state.waves.length + 1;
-  const strategy = WAVE_STRATEGIES[state.waves.length];
+  // effectiveStrategies(), not raw WAVE_STRATEGIES: with a rung skipped by
+  // config, the strategy actually due at this wave index shifts, and this
+  // must label the ingested wave the same way decideNextAction would have.
+  const strategy = effectiveStrategies(state.config)[state.waves.length];
   const counts = ingestOffers(state, offers, wave);
   const prefiltered = prefilterReject(state);
   if (prefiltered) console.error(`  pre-triage: ${prefiltered} posting(s) rejected on title + location alone (zero tokens).`);
@@ -644,6 +667,7 @@ function printSummary(result) {
   console.log(`  triaged     ${s.scored}  (${s.unscored} pending)`);
   console.log(`  llm-scored  ${s.llmScored}  (loop.maxScored budget) · ${s.freeRejected} free — zero-token prefilter`);
   console.log(`  qualified   ${s.qualified}/${s.target} at or above ${s.minScore}`);
+  if (s.skippedStrategies?.length) console.log(`  skipped     ${s.skippedStrategies.join(', ')} (by config, not run)`);
   if (s.halted_reason) console.log(`  halted      ${s.halted_reason}`);
   if (s.next) console.log(`  next        ${s.next.action} — ${s.next.reason}`);
 }

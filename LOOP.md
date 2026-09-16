@@ -105,6 +105,35 @@ from a cheap German-market source. That is why the expensive rungs sit late and
 why `loop.target` was lowered from 10 to 5: at 10 the loop essentially never
 stopped early, so every pass escalated into the sweeps that yield least.
 
+## Narrowing the ladder for YOUR measured yield
+
+Two optional keys under `loop:` in `config/profile.yml`, layered on top of the
+measured order above. These are a personal call about *your own* measured
+yield, not a system default — the ladder's own order stays as documented
+above for everyone; these two keys only ever remove or narrow rungs for the
+user who sets them. Absent, behaviour is unchanged: nothing skipped, every
+ATS source used.
+
+| Key | Meaning |
+|---|---|
+| `skip_strategies` | a list of rung ids (e.g. `[interamt]`) to leave out of the ladder entirely — the wave numbering just skips over them, they are never picked, and they are never counted as a barren wave (they didn't run, so there's nothing to count). An unknown id is a config error, not a silent no-op. |
+| `ats_sources` | a list of ATS source ids (e.g. `[workday, ashby]`). When set, every `ats-*` rung's `scan-ats-full.mjs` call is narrowed to `--ats <sources>` instead of sweeping all five. Validated against `scan-ats-full.mjs`'s own `SOURCES` keys (`greenhouse`, `lever`, `ashby`, `workday`, `icims`), so a typo is a config error too. A checkpoint from before the narrowing (or from a different source set) is correctly treated as incompatible and is not resumed — see `checkpointCompatible()` in `scan-ats-full.mjs`. |
+
+Example, based on one user's measured 20-pass history (Interamt: 16,328
+postings scanned, zero tracker rows; ats-recent: 3 qualifying rows, all
+Workday/Ashby, none from Greenhouse/Lever/iCIMS):
+
+```yaml
+loop:
+  skip_strategies: [interamt]
+  ats_sources: [workday, ashby]
+```
+
+What was left out is never silent: `data/loop-run-log.md`'s `start` line
+records `skip=...`/`ats=...`, and `status`'s `skippedStrategies` field carries
+the same list — so a pass report can't mistake "not run by config" for "ran
+and found nothing."
+
 ## Dedup
 
 `candidateKey()` normalizes a URL before comparison: strips tracking params

@@ -130,6 +130,70 @@ export function strategyById(id) {
 /** camelCase → the snake_case spelling used everywhere else in profile.yml. */
 const snake = (key) => key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 
+const VALID_STRATEGY_IDS = WAVE_STRATEGIES.map((s) => s.id);
+
+/**
+ * `loop.skip_strategies` — rung ids to leave out of the ladder entirely. This
+ * is a USER preference about THEIR measured yield (e.g. "Interamt scanned
+ * 16,328 postings across 20 passes and produced zero tracker rows for me"),
+ * not a system default, so it lives in config/profile.yml and is read here,
+ * never hardcoded into WAVE_STRATEGIES itself.
+ *
+ * An unknown id is a config ERROR, not a silently-ignored typo: swallowing it
+ * would leave the exact rung the user meant to skip still running, which is
+ * worse than refusing to start.
+ *
+ * @param {object} raw the resolved `loop:` block (already unwrapped)
+ * @returns {string[]}
+ */
+export function resolveSkipStrategies(raw) {
+  const provided = raw?.skip_strategies !== undefined ? raw.skip_strategies : raw?.skipStrategies;
+  if (provided === undefined || provided === null) return [];
+  if (!Array.isArray(provided)) {
+    throw new Error(`config error: loop.skip_strategies must be a list of strategy ids (got ${typeof provided}).`);
+  }
+  const ids = provided.map((v) => String(v).trim()).filter(Boolean);
+  const unknown = ids.filter((id) => !VALID_STRATEGY_IDS.includes(id));
+  if (unknown.length) {
+    throw new Error(`config error: loop.skip_strategies has unknown strategy id(s): ${unknown.join(', ')}. `
+      + `Valid ids: ${VALID_STRATEGY_IDS.join(', ')}.`);
+  }
+  return ids;
+}
+
+// Mirrors scan-ats-full.mjs's `Object.keys(SOURCES)`. Duplicated here (rather
+// than imported) so this file stays dependency-free — scan-ats-full.mjs pulls
+// in js-yaml, every ATS provider module, and fs/http. scan-loop.mjs, which
+// already imports scan-ats-full.mjs for other reasons, passes the AUTHORITATIVE
+// list in as `knownAtsSources`; this is the fallback for direct/test callers,
+// and must be kept in sync with SOURCES by hand.
+const DEFAULT_KNOWN_ATS_SOURCES = ['greenhouse', 'lever', 'ashby', 'workday', 'icims'];
+
+/**
+ * `loop.ats_sources` — when set, narrows every `ats-*` rung's
+ * `scan-ats-full.mjs` invocation to `--ats <sources>`. Same "user preference,
+ * config error on a typo" doctrine as `resolveSkipStrategies`.
+ *
+ * @param {object} raw the resolved `loop:` block (already unwrapped)
+ * @param {string[]} [knownAtsSources] valid source ids — pass scan-ats-full.mjs's
+ *   own `Object.keys(SOURCES)` to validate against the real thing.
+ * @returns {string[]|null} null means "not configured — use every source"
+ */
+export function resolveAtsSources(raw, knownAtsSources = DEFAULT_KNOWN_ATS_SOURCES) {
+  const provided = raw?.ats_sources !== undefined ? raw.ats_sources : raw?.atsSources;
+  if (provided === undefined || provided === null) return null;
+  if (!Array.isArray(provided) || provided.length === 0) {
+    throw new Error('config error: loop.ats_sources must be a non-empty list of ATS source ids.');
+  }
+  const ids = provided.map((v) => String(v).trim().toLowerCase()).filter(Boolean);
+  const unknown = ids.filter((id) => !knownAtsSources.includes(id));
+  if (unknown.length) {
+    throw new Error(`config error: loop.ats_sources has unknown source id(s): ${unknown.join(', ')}. `
+      + `Valid ids: ${knownAtsSources.join(', ')}.`);
+  }
+  return ids;
+}
+
 /**
  * Merge a `loop:` block from `config/profile.yml` over the defaults, ignoring
  * anything that isn't a usable number. A typo in the profile must not silently
@@ -139,10 +203,16 @@ const snake = (key) => key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
  * `minScore` is accepted too, because the same key is camelCase inside the state
  * file and mixing the two up is the obvious mistake to make.
  *
+ * `skip_strategies`/`ats_sources` are validated separately (they aren't
+ * numbers) — see `resolveSkipStrategies`/`resolveAtsSources`. Absent, both
+ * default to today's behaviour exactly: no rung skipped, every ATS source used.
+ *
  * @param {object} [profile] parsed config/profile.yml
- * @returns {typeof DEFAULT_LOOP_CONFIG}
+ * @param {object} [opts]
+ * @param {string[]} [opts.knownAtsSources] see `resolveAtsSources`
+ * @returns {typeof DEFAULT_LOOP_CONFIG & {skipStrategies: string[], atsSources: string[]|null}}
  */
-export function resolveLoopConfig(profile) {
+export function resolveLoopConfig(profile, { knownAtsSources } = {}) {
   const raw = profile && typeof profile.loop === 'object' && profile.loop ? profile.loop : {};
   const out = { ...DEFAULT_LOOP_CONFIG };
   for (const key of Object.keys(DEFAULT_LOOP_CONFIG)) {
@@ -150,7 +220,46 @@ export function resolveLoopConfig(profile) {
     const value = Number(provided);
     if (Number.isFinite(value) && value > 0) out[key] = value;
   }
+  out.skipStrategies = resolveSkipStrategies(raw);
+  out.atsSources = resolveAtsSources(raw, knownAtsSources);
   return out;
+}
+
+/**
+ * The ladder with `config.skipStrategies` rungs removed. WAVE_STRATEGIES
+ * itself is NEVER mutated — callers that read the base ladder directly (the
+ * `--resume` regression test, `wave --dry-run` before a config exists) must
+ * keep seeing the unmodified table.
+ *
+ * @param {{skipStrategies?: string[]}} [config]
+ * @returns {typeof WAVE_STRATEGIES}
+ */
+export function effectiveStrategies(config) {
+  const skip = new Set(config?.skipStrategies || []);
+  return WAVE_STRATEGIES.filter((s) => !skip.has(s.id));
+}
+
+/**
+ * Narrow an `ats-*` rung's `scan-ats-full.mjs` args to `config.atsSources`
+ * (`--ats a,b`) when the user has configured one. Returns a NEW object —
+ * never mutates the strategy it was given, so the shared WAVE_STRATEGIES
+ * entries stay identical across calls (and across a run where the config
+ * changes between waves would otherwise leak into a wave already recorded).
+ *
+ * A no-op for non-script rungs, for a script rung that isn't scan-ats-full.mjs
+ * (`portals`, `interamt`), and for a rung whose args already carry `--ats`
+ * (never override an explicit override).
+ *
+ * @param {object} strategy a WAVE_STRATEGIES entry
+ * @param {{atsSources?: string[]|null}} config
+ */
+export function applyAtsSources(strategy, config) {
+  if (!strategy || strategy.kind !== 'script') return strategy;
+  const sources = config?.atsSources;
+  if (!Array.isArray(sources) || sources.length === 0) return strategy;
+  if (!/scan-ats-full\.mjs$/.test(String(strategy.args?.[0] ?? ''))) return strategy;
+  if (strategy.args.includes('--ats')) return strategy;
+  return { ...strategy, args: [...strategy.args, '--ats', sources.join(',')] };
 }
 
 // ── Candidate identity ──────────────────────────────────────────────────────
@@ -429,7 +538,7 @@ function isFreeTriage(c) {
 
 /** Roll-up used by every decision and every status print. */
 export function summarize(state) {
-  const config = { ...DEFAULT_LOOP_CONFIG, ...(state?.config || {}) };
+  const config = { ...DEFAULT_LOOP_CONFIG, skipStrategies: [], atsSources: null, ...(state?.config || {}) };
   const candidates = allCandidates(state);
   const qualified = candidates.filter((c) => c.verdict === 'qualified').length;
   const unscored = candidates.filter((c) => c.verdict === 'pending').length;
@@ -455,6 +564,11 @@ export function summarize(state) {
     unreachable: candidates.filter((c) => c.verdict === 'unreachable').length,
     remaining: Math.max(0, config.target - qualified),
     barrenWaves: barrenWaveStreak(state),
+    // Echoed from config, not derived from state.waves — a skipped rung never
+    // appears there at all (see `effectiveStrategies`), so this is the only
+    // place a status/run-log reader can tell "not run by config" apart from
+    // "ran and found nothing".
+    skippedStrategies: config.skipStrategies,
   };
 }
 
@@ -485,8 +599,13 @@ export function pendingBatch(state, limit) {
  * bar to reach ten.
  */
 export function decideNextAction(state) {
-  const config = { ...DEFAULT_LOOP_CONFIG, ...(state?.config || {}) };
+  const config = { ...DEFAULT_LOOP_CONFIG, skipStrategies: [], atsSources: null, ...(state?.config || {}) };
   const stats = summarize(state);
+  // The ladder with any `loop.skip_strategies` rungs removed. Every wave-number
+  // decision below reads from THIS, never from raw WAVE_STRATEGIES — a skipped
+  // rung must never be selected, counted toward "ladder exhausted", or occupy a
+  // wave slot at all.
+  const ladder = effectiveStrategies(config);
 
   if (state?.phase === 'done') {
     return { action: 'done', reason: 'run already finished — start a new one with `--reset`', stats };
@@ -503,10 +622,10 @@ export function decideNextAction(state) {
     };
   }
 
-  const halt = haltReason(state, config, stats);
+  const halt = haltReason(state, config, stats, ladder);
   if (halt) return { action: 'halt', reason: halt, stats };
 
-  const strategy = WAVE_STRATEGIES[stats.waves];
+  const strategy = applyAtsSources(ladder[stats.waves], config);
   return {
     action: 'scan',
     reason: `${stats.qualified}/${config.target} qualified — widening to wave ${stats.waves + 1} (${strategy.id})`,
@@ -562,7 +681,7 @@ export function classifyHaltReason(reason) {
     : HALT_ABORTED;
 }
 
-function haltReason(state, config, stats) {
+function haltReason(state, config, stats, ladder = WAVE_STRATEGIES) {
   // `maxScored` caps PAID triage calls. A candidate the zero-token prefilter
   // rejected for free (`prefilterReject()`, or an agent applying the same
   // rule by hand through `record`) never touched the budget — see
@@ -580,8 +699,11 @@ function haltReason(state, config, stats) {
   if (stats.waves >= config.maxWaves) {
     return `wave budget spent — ${stats.waves} wave(s) run (loop.maxWaves = ${config.maxWaves})`;
   }
-  if (stats.waves >= WAVE_STRATEGIES.length) {
-    return `escalation ladder exhausted — all ${WAVE_STRATEGIES.length} strategies have been run`;
+  if (stats.waves >= ladder.length) {
+    const skipNote = config.skipStrategies?.length
+      ? `; skipped by config: ${config.skipStrategies.join(', ')}`
+      : '';
+    return `escalation ladder exhausted — all ${ladder.length} strategies have been run${skipNote}`;
   }
   return null;
 }

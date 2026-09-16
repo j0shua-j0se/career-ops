@@ -15,6 +15,7 @@ import {
   parseTriageLine, parseTriageOutput, recordScores,
   allCandidates, qualifiedCandidates, barrenWaveStreak, summarize, pendingBatch,
   decideNextAction, renderShortlist, renderRunLogEntry,
+  resolveSkipStrategies, resolveAtsSources, effectiveStrategies, applyAtsSources,
 } from '../loop-core.mjs';
 
 console.log('\n🔁 loop-core.mjs — scan loop control law');
@@ -565,4 +566,190 @@ console.log('\nloop-core — wave ladder order reflects cost vs measured yield')
   } else {
     fail('a mid-sentence budget phrase was read as a budget halt');
   }
+}
+
+// ---------------------------------------------------------------------------
+// `loop.skip_strategies` / `loop.ats_sources` — user overrides to the ladder.
+//
+// MEASURED DECISION: across 20 passes, Interamt scanned 16,328 postings (81%
+// of all scanner volume) and produced ZERO tracker rows; the ats-recent rung
+// produced 3 rows >= 3.7, all Workday/Ashby. This is a USER preference (their
+// own measured yield), so it is read from config/profile.yml, never
+// hardcoded into WAVE_STRATEGIES. Absent, both default to today's behaviour
+// exactly: nothing skipped, every ATS source used.
+console.log('\nloop-core — loop.skip_strategies / loop.ats_sources');
+
+// ── resolveSkipStrategies ────────────────────────────────────────────────
+
+eq(resolveSkipStrategies({}).length, 0, 'no skip_strategies key yields an empty skip list');
+eq(resolveSkipStrategies({ skip_strategies: undefined }).length, 0, 'an explicit undefined is the same as absent');
+{
+  const ids = resolveSkipStrategies({ skip_strategies: ['interamt'] });
+  eq(ids.length, 1, 'a valid single-id skip list is accepted');
+  eq(ids[0], 'interamt', 'the id is preserved');
+}
+{
+  const ids = resolveSkipStrategies({ skipStrategies: ['interamt', 'ats-deep'] });
+  eq(ids.join(','), 'interamt,ats-deep', 'camelCase skipStrategies is accepted like every other loop key');
+}
+{
+  let threw = null;
+  try { resolveSkipStrategies({ skip_strategies: ['not-a-real-rung'] }); } catch (err) { threw = err; }
+  check(threw instanceof Error, 'an unknown strategy id throws instead of being silently dropped');
+  check(/unknown strategy id/.test(threw?.message ?? ''), 'the error names the problem');
+  check((threw?.message ?? '').includes('not-a-real-rung'), 'the error names the offending id');
+}
+{
+  let threw = null;
+  try { resolveSkipStrategies({ skip_strategies: 'interamt' }); } catch (err) { threw = err; }
+  check(threw instanceof Error, 'a non-array skip_strategies is a config error, not coerced');
+}
+
+// ── resolveAtsSources ────────────────────────────────────────────────────
+
+eq(resolveAtsSources({}), null, 'no ats_sources key yields null (use every source)');
+{
+  const ids = resolveAtsSources({ ats_sources: ['Workday', 'Ashby'] });
+  eq(ids.join(','), 'workday,ashby', 'valid ids are accepted and lowercased');
+}
+{
+  const ids = resolveAtsSources({ atsSources: ['workday'] });
+  eq(ids.join(','), 'workday', 'camelCase atsSources is accepted too');
+}
+{
+  let threw = null;
+  try { resolveAtsSources({ ats_sources: ['workday', 'bogus-ats'] }); } catch (err) { threw = err; }
+  check(threw instanceof Error, 'an unknown ATS source id throws');
+  check((threw?.message ?? '').includes('bogus-ats'), 'the error names the offending id');
+}
+{
+  let threw = null;
+  try { resolveAtsSources({ ats_sources: [] }); } catch (err) { threw = err; }
+  check(threw instanceof Error, 'an empty ats_sources list is a config error, not "use nothing"');
+}
+{
+  // Validated against the CALLER's known-sources list (scan-loop.mjs passes
+  // scan-ats-full.mjs's real SOURCES keys) — not just the built-in fallback.
+  const ids = resolveAtsSources({ ats_sources: ['jazzhr'] }, ['jazzhr', 'workday']);
+  eq(ids.join(','), 'jazzhr', 'a custom knownAtsSources list is honored');
+  let threw = null;
+  try { resolveAtsSources({ ats_sources: ['ashby'] }, ['jazzhr', 'workday']); } catch (err) { threw = err; }
+  check(threw instanceof Error, 'an id valid under the DEFAULT list but not the custom one still errors');
+}
+
+// ── resolveLoopConfig wiring ─────────────────────────────────────────────
+
+{
+  const cfg = resolveLoopConfig({});
+  eq(cfg.skipStrategies.length, 0, 'absent skip_strategies is today\'s behaviour — nothing skipped');
+  eq(cfg.atsSources, null, 'absent ats_sources is today\'s behaviour — every source used');
+}
+{
+  const cfg = resolveLoopConfig({ loop: { skip_strategies: ['interamt'], ats_sources: ['workday', 'ashby'] } });
+  eq(cfg.skipStrategies.join(','), 'interamt', 'resolveLoopConfig surfaces skip_strategies');
+  eq(cfg.atsSources.join(','), 'workday,ashby', 'resolveLoopConfig surfaces ats_sources');
+}
+{
+  let threw = null;
+  try { resolveLoopConfig({ loop: { skip_strategies: ['nope'] } }); } catch (err) { threw = err; }
+  check(threw instanceof Error, 'resolveLoopConfig propagates a skip_strategies config error');
+}
+{
+  let threw = null;
+  try { resolveLoopConfig({ loop: { ats_sources: ['nope'] } }); } catch (err) { threw = err; }
+  check(threw instanceof Error, 'resolveLoopConfig propagates an ats_sources config error');
+}
+
+// ── effectiveStrategies ───────────────────────────────────────────────────
+
+{
+  const ladder = effectiveStrategies({ skipStrategies: [] });
+  eq(ladder.length, WAVE_STRATEGIES.length, 'no skip -> the full ladder, unchanged');
+}
+{
+  const ladder = effectiveStrategies(undefined);
+  eq(ladder.length, WAVE_STRATEGIES.length, 'an undefined config is treated as no skip');
+}
+{
+  const ladder = effectiveStrategies({ skipStrategies: ['interamt'] });
+  eq(ladder.length, WAVE_STRATEGIES.length - 1, 'a skipped rung shortens the ladder by exactly one');
+  check(!ladder.some((s) => s.id === 'interamt'), 'the skipped rung is absent');
+  eq(ladder[0].id, 'portals', 'wave 1 is unaffected when a later rung is skipped');
+  eq(ladder[1].id, 'ats-recent', 'the rung after the skipped one shifts up to fill its slot');
+  eq(WAVE_STRATEGIES.some((s) => s.id === 'interamt'), true, 'WAVE_STRATEGIES itself is never mutated');
+}
+
+// ── applyAtsSources ────────────────────────────────────────────────────────
+
+{
+  const base = strategyById('ats-recent');
+  const narrowed = applyAtsSources(base, { atsSources: ['workday', 'ashby'] });
+  check(narrowed.args.includes('--ats'), 'narrowing an ats-* rung appends --ats');
+  eq(narrowed.args[narrowed.args.indexOf('--ats') + 1], 'workday,ashby', 'the --ats value is a comma list of the configured sources');
+  eq(base.args.includes('--ats'), false, 'the base WAVE_STRATEGIES entry is never mutated');
+}
+{
+  const base = strategyById('ats-recent');
+  const untouched = applyAtsSources(base, { atsSources: null });
+  eq(untouched, base, 'no configured ats_sources -> the rung is returned as-is');
+}
+{
+  const base = strategyById('portals');
+  const untouched = applyAtsSources(base, { atsSources: ['workday'] });
+  eq(untouched, base, 'a non-scan-ats-full script rung (portals) is never narrowed');
+}
+{
+  const base = strategyById('interamt');
+  const untouched = applyAtsSources(base, { atsSources: ['workday'] });
+  eq(untouched, base, 'a non-scan-ats-full script rung (interamt) is never narrowed');
+}
+{
+  const base = strategyById('agent-web');
+  const untouched = applyAtsSources(base, { atsSources: ['workday'] });
+  eq(untouched, base, 'the agent rung is never narrowed (kind !== script)');
+}
+{
+  const alreadySet = { ...strategyById('ats-recent'), args: ['scan-ats-full.mjs', '--since', '7', '--ats', 'greenhouse'] };
+  const result = applyAtsSources(alreadySet, { atsSources: ['workday', 'ashby'] });
+  eq(result, alreadySet, 'a rung that already specifies --ats is never overridden');
+}
+
+// ── decideNextAction respects a skipped rung end-to-end ──────────────────
+//
+// A skipped rung must never be picked, must never occupy a wave slot, and
+// must never be countable as a "barren wave" — it never ran, so there is
+// nothing to count.
+{
+  const s = stateWith({ target: 10, skipStrategies: ['interamt'], maxBarrenWaves: 9, maxWaves: 9, maxScored: 999 }, 1);
+  seed(s, 1, [{ score: 2.0 }]); // wave 1 (portals) ran and was barren
+  const d = decideNextAction(s);
+  eq(d.action, 'scan', 'still short of target -> widen');
+  eq(d.strategy.id, 'ats-recent', 'interamt is skipped entirely — wave 2 goes straight to ats-recent');
+  eq(d.wave, 2, 'the skipped rung does not consume a wave number of its own');
+}
+{
+  // Every EFFECTIVE rung run and barren -> "ladder exhausted" references the
+  // shortened ladder, not the full WAVE_STRATEGIES count, and says what was
+  // left out so a report can't read this as "ran and found nothing" for
+  // interamt specifically.
+  const config = { target: 10, skipStrategies: ['interamt'], maxBarrenWaves: 99, maxWaves: 99, maxScored: 999 };
+  const ladder = effectiveStrategies(config);
+  const s = stateWith(config, ladder.length);
+  for (let i = 1; i <= ladder.length; i++) seed(s, i, [{ score: 1.0 }]);
+  const d = decideNextAction(s);
+  eq(d.action, 'halt', 'the loop halts once every EFFECTIVE rung has run');
+  check(d.reason.includes(`all ${ladder.length} strategies`), 'the halt count matches the shortened ladder, not the full one');
+  check(d.reason.includes('skipped by config: interamt'), 'the halt reason names what was skipped by config');
+  eq(barrenWaveStreak(s), ladder.length, 'the barren streak counts only the waves that actually ran');
+}
+{
+  // ats_sources propagates into the strategy decideNextAction actually hands
+  // back for an ats-* wave, and leaves non-ats-* waves alone.
+  const s = stateWith({ target: 10, atsSources: ['workday', 'ashby'], maxBarrenWaves: 9, maxWaves: 9, maxScored: 999 }, 2);
+  seed(s, 1, [{ score: 1.0 }]); // portals
+  seed(s, 2, [{ score: 1.0 }]); // interamt
+  const d = decideNextAction(s);
+  eq(d.strategy.id, 'ats-recent', 'wave 3 is the first ats-* rung');
+  check(d.strategy.args.includes('--ats'), 'the ats-recent rung carries --ats when loop.ats_sources is set');
+  eq(d.strategy.args[d.strategy.args.indexOf('--ats') + 1], 'workday,ashby', 'the --ats value matches the configured sources');
 }

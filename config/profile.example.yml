@@ -334,6 +334,19 @@ cover_letter:
 # Values that aren't positive numbers are ignored, so a typo here cannot
 # accidentally uncap a budget.
 #
+# Two more, optional, for narrowing the ladder to YOUR OWN measured yield —
+# see LOOP.md "Narrowing the ladder for YOUR measured yield". Absent, nothing
+# is skipped and every ATS source is used, exactly as before.
+#
+#   skip_strategies   — rung ids to leave out of the ladder entirely, e.g.
+#                       [interamt] if a rung never produces tracker rows for
+#                       you. An unknown id is a config error, not silently
+#                       ignored.
+#   ats_sources       — narrows every ats-* rung's scan-ats-full.mjs call to
+#                       these sources only (e.g. [workday, ashby] instead of
+#                       all five). Validated against scan-ats-full.mjs's own
+#                       SOURCES keys: greenhouse, lever, ashby, workday, icims.
+#
 # loop:
 #   target: 10
 #   min_score: 3.8
@@ -341,6 +354,8 @@ cover_letter:
 #   max_barren_waves: 2
 #   max_scored: 120
 #   score_batch: 12
+#   # skip_strategies: [interamt]
+#   # ats_sources: [workday, ashby]
 
 # ── Re-apply Cooldown Windows ──────────────────────────────────────────────
 #
