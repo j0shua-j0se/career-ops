@@ -320,6 +320,13 @@ export const SYNC_STEPS = [
   { id: 'deadlines', args: ['deadline-sweep.mjs'], required: false, describe: 'expired / closing-soon by recorded deadline (no fetch)' },
   { id: 'provider-health', args: ['provider-health.mjs'], required: false, describe: 'scrapers returning junk without erroring (no fetch)' },
   { id: 'verify', args: ['verify-pipeline.mjs'], required: false, describe: 'pipeline health check' },
+  // Zero-token post-pass review: where this pass's effort went, per source
+  // (found/new/free-rejected/triaged/qualified/evaluated/kit/applied) plus
+  // stage timings. Reads only files already on disk (run-log.md,
+  // loop-state.json, scan-history.tsv, discard.log, reports/, pdf-index.tsv,
+  // the tracker) — never fetches anything and never blocks the pass on a
+  // reporting step's own failure.
+  { id: 'run-retro', args: ['run-retro.mjs'], required: false, describe: 'per-source post-pass retro (data/run-retro.tsv)' },
   { id: 'dashboard', args: ['build-dashboard.mjs'], required: false, describe: 'rebuild the dashboard binary' },
 ];
 

@@ -269,9 +269,9 @@ try {
 
   const planned = (dry.json?.steps ?? []).map((s) => s.id);
   const WRITES = ['merge-tracker', 'pdf-flags', 'followup-seed'];
-  const REPORTS = ['deadlines', 'provider-health', 'verify', 'dashboard'];
+  const REPORTS = ['deadlines', 'provider-health', 'verify', 'run-retro', 'dashboard'];
   if (JSON.stringify(planned) === JSON.stringify([...WRITES, ...REPORTS])) {
-    pass('sync plans the three writes first, then the four reports, in that order');
+    pass('sync plans the three writes first, then the five reports, in that order');
   } else {
     fail(`sync planned ${JSON.stringify(planned)}`);
   }

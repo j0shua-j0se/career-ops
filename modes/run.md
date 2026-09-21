@@ -185,7 +185,7 @@ Verify by hand *before* overriding, and say in the summary which rows were overr
 
 ## Stage 4: what sync actually does
 
-Five steps, in order. The first three are writes; a failure in any of them stops the pass with a non-zero exit, because a later write on top of a failed merge compounds the damage.
+Six steps, in order. The first three are writes; a failure in any of them stops the pass with a non-zero exit, because a later write on top of a failed merge compounds the damage.
 
 | Step | Why |
 |---|---|
@@ -193,6 +193,7 @@ Five steps, in order. The first three are writes; a failure in any of them stops
 | `sync-pdf-flags.mjs` | reconciles the tracker's PDF column with what is actually in `output/` |
 | `followup-seed.mjs --backfill` | pins a first follow-up date on every row that turned `Applied` |
 | `verify-pipeline.mjs` | health check — findings are the user's to act on, so this does not fail the pass |
+| `run-retro.mjs` | zero-token per-source post-pass retro (`data/run-retro.tsv`) — reads only files already on disk, never fails the pass |
 | `build-dashboard.mjs` | needs a Go toolchain, which is genuinely optional — reported, not fatal |
 
 Then: `npm run serve:dashboard`.
