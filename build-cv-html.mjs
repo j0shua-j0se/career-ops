@@ -446,6 +446,9 @@ function buildEducation(entries, partial) {
       const org = e.org
         ? ` <span class="edu-org">${escapeHtml(e.org)}</span>`
         : '';
+      const location = e.location
+        ? `\n    <div class="edu-location">${escapeHtml(e.location)}</div>`
+        : '';
       const desc = e.description
         ? `\n    <div class="edu-desc">${escapeHtml(e.description)}</div>`
         : '';
@@ -453,7 +456,7 @@ function buildEducation(entries, partial) {
     <div class="edu-header">
       <div class="edu-title">${escapeHtml(e.title)}${org}</div>
       <div class="edu-year">${escapeHtml(e.year || '')}</div>
-    </div>${desc}
+    </div>${location}${desc}
   </div>`;
     }).join('\n  ');
   }
@@ -461,14 +464,16 @@ function buildEducation(entries, partial) {
   const { entryTemplate, blocks } = partial;
   return entries.filter(e => hasRequiredFields(e, 'education', 'html')).map(e => {
     const blockValues = new Map([
-      ['ORG_BLOCK',  { value: escapeHtml(e.org || ''),         present: Boolean(e.org) }],
-      ['DESC_BLOCK', { value: escapeHtml(e.description || ''), present: Boolean(e.description) }],
+      ['ORG_BLOCK',      { value: escapeHtml(e.org || ''),         present: Boolean(e.org) }],
+      ['LOCATION_BLOCK', { value: escapeHtml(e.location || ''),    present: Boolean(e.location) }],
+      ['DESC_BLOCK',     { value: escapeHtml(e.description || ''), present: Boolean(e.description) }],
     ]);
     return fillEntry(entryTemplate, blocks, {
-      TITLE: escapeHtml(e.title || ''),
-      ORG:   escapeHtml(e.org || ''),
-      YEAR:  escapeHtml(e.year || ''),
-      DESC:  escapeHtml(e.description || ''),
+      TITLE:    escapeHtml(e.title || ''),
+      ORG:      escapeHtml(e.org || ''),
+      LOCATION: escapeHtml(e.location || ''),
+      YEAR:     escapeHtml(e.year || ''),
+      DESC:     escapeHtml(e.description || ''),
     }, blockValues);
   }).join('\n  ');
 }
@@ -881,6 +886,7 @@ async function runSelfTest() {
     education: [{
       title: 'Bachelor of Science in Computer Science',
       org: 'Test University',
+      location: 'City, State',
       year: '2024',
       description: 'Coursework: Data Structures, Algorithms, Machine Learning.',
     }],
@@ -1005,12 +1011,17 @@ async function runSelfTest() {
     console.error('Self-test failed: job-location block not rendered when location is present');
     process.exit(1);
   }
+  if (!html.includes('class="edu-location"')) {
+    console.error('Self-test failed: edu-location block not rendered when education location is present');
+    process.exit(1);
+  }
 
-  // Test with an experience entry that has no location to verify the LOCATION_BLOCK
-  // conditional removal path.
+  // Test with experience and education entries that have no location to verify
+  // the LOCATION_BLOCK conditional removal path.
   const noLocSample = {
     ...sample,
     experience: [{ company: 'Acme', role: 'Engineer', dates: '2023', bullets: [] }],
+    education: [{ title: 'BSc', org: 'Test University', year: '2024' }],
     projects: [],
   };
   let noLocHtml;
@@ -1022,6 +1033,10 @@ async function runSelfTest() {
   }
   if (noLocHtml.includes('class="job-location"')) {
     console.error('Self-test failed: job-location block rendered when location is absent');
+    process.exit(1);
+  }
+  if (noLocHtml.includes('class="edu-location"')) {
+    console.error('Self-test failed: edu-location block rendered when education location is absent');
     process.exit(1);
   }
 

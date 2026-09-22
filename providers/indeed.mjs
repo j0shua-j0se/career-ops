@@ -1,6 +1,8 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
+import { safeEncodeURIComponent } from './_safe-url.mjs';
+
 // Indeed provider.
 //
 // THIS WAS PREVIOUSLY DECLARED IMPOSSIBLE, AND THAT WAS WRONG.
@@ -100,7 +102,11 @@ export function parseIndeedHtml(html, domain = DEFAULT_DOMAIN) {
     // The canonical permalink. Built from the job key rather than taken from
     // `link`/`viewJobLink`, which carry per-session tracking parameters that
     // would defeat dedup against scan-history.
-    const url = `https://${domain}/viewjob?jk=${encodeURIComponent(jobkey)}`;
+    // A lone surrogate in jobkey throws URIError out of encodeURIComponent and
+    // aborts this loop, losing every posting on the page. Drop just this one.
+    const encodedKey = safeEncodeURIComponent(jobkey);
+    if (encodedKey === null) continue;
+    const url = `https://${domain}/viewjob?jk=${encodedKey}`;
     if (seen.has(url)) continue;
     seen.add(url);
 

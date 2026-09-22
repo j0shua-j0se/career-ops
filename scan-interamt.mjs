@@ -32,6 +32,7 @@ import {
 } from './scan.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { localToday } from './lib/local-today.mjs';
+import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
 // ── Config ───────────────────────────────────────────────────────────
@@ -349,9 +350,7 @@ async function main() {
   }
 
   // Summary
-  console.log(`\n${'━'.repeat(45)}`);
-  console.log(`Interamt Scan — ${date}`);
-  console.log(`${'━'.repeat(45)}`);
+  printScanSummaryHeader('Interamt Scan', date);
   console.log(`Keywords searched:  ${keywords.length}`);
   console.log(`Total found:        ${totalFound}`);
   console.log(`Filtered by title:  ${titleSkipped.length}`);
