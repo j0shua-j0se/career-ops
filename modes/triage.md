@@ -35,6 +35,9 @@ isn't wrongly skipped just because WebFetch can't read it:
 
 - **Pre-fetched batch file**: if the orchestrator handed you a `fetch-jds.mjs` output
   file, read this posting's `text` field from it directly — no WebFetch, no browser.
+  (A `--rest-out` file has already had its zero-token verdicts removed — expired,
+  not-fetchable and fluent-tier-German postings are recorded before you see the
+  batch — so every entry in it genuinely needs your judgement.)
   Only fall back to WebFetch/browser for an entry whose `status` is `error`,
   `blocked`, or `robots-unconfirmed` (robots.txt permission could not be confirmed —
   not the same as a refusal), or whose `text` is under ~300 chars. An entry with `status: 'expired'`

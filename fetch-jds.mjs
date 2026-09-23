@@ -30,8 +30,14 @@
  * bypassed.
  *
  * Usage:
- *   node fetch-jds.mjs --file <batch.json> --out <out.json> [--max-chars 3500] [--concurrency 3] [--timeout-ms 25000]
+ *   node fetch-jds.mjs --file <batch.json> --out <out.json> [--max-chars 3500] [--concurrency 6] [--timeout-ms 25000]
+ *                      [--gate-out <gated.txt>] [--rest-out <rest.json>]
  *   node fetch-jds.mjs --help
+ *
+ * --gate-out / --rest-out split the batch before any model sees it: verdicts
+ * the triage contract already makes deterministic (expired, not fetchable) and
+ * the German hard stop are written as ready-to-record TRIAGE lines, and only
+ * the remainder goes to a worker. See splitGatedResults().
  *
  * Input (--file): a JSON array of {key, url, company?, title?, location?} — the
  * shape scan-loop.mjs's `next` action returns as `batch` for the `score` step.
@@ -71,16 +77,28 @@ import {
 } from './liveness-browser.mjs';
 import { checkRobots } from './robots-gate.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
+import { fetchText } from './providers/_http.mjs';
 import { validateFlags, flagValue, safeIntFlag } from './lib/cli-flags.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
 const USAGE = `Usage:
-  node fetch-jds.mjs --file <batch.json> --out <out.json> [--max-chars 3500] [--concurrency 3] [--timeout-ms 25000]
+  node fetch-jds.mjs --file <batch.json> --out <out.json> [--max-chars 3500] [--concurrency 6] [--timeout-ms 25000]
+                     [--gate-out <gated.txt>] [--rest-out <rest.json>]
+      --gate-out  TRIAGE lines for verdicts that need no model (expired, not fetchable,
+                  German hard stop), in the form \`scan-loop.mjs record\` reads
+      --rest-out  the entries still needing a triage worker
   node fetch-jds.mjs --help                  # print this usage block and exit
   node fetch-jds.mjs -h                      # alias for --help`;
 
 const DEFAULT_MAX_CHARS = 3500;
-const DEFAULT_CONCURRENCY = 3;
+// A batch is one scan-loop scoring turn — 12 postings, almost always 12
+// different hosts — and most entries never open a page at all, because the
+// API-first path answers Greenhouse/Lever/Ashby/Workday without the browser.
+// Each entry that does open one gets its own context, closed in a finally, so
+// the ceiling is this many live contexts in a single headless Chromium.
+// 3 meant a 12-URL batch waited through four sequential rounds of a 25s
+// timeout; 6 halves that. --concurrency still tunes it, down as well as up.
+const DEFAULT_CONCURRENCY = 6;
 const DEFAULT_TIMEOUT_MS = 25_000;
 const SIGNAL_CAP_CHARS = 800;
 
@@ -416,6 +434,170 @@ const EXPIRED_CODE_STATUS = {
   insufficient_content: 'error',
 };
 
+// ─── zero-token German hard stop ────────────────────────────────────────────
+
+// The German requirement that config/profile.yml's culture_screen treats as a
+// hard stop for an A2 speaker: "sehr gute Deutschkenntnisse", "verhandlungs-
+// sicheres Deutsch", "fließend", C1/C2 — and their English equivalents. On
+// 2026-09-23 triage passed a Siemens role at 4.3 that the full evaluation then
+// SKIPped on "Sehr gute Deutsch- und Englischkenntnisse", which was sitting in
+// the pre-fetched text all along: ~196k tokens and 7 minutes to find a phrase
+// a regex can see. Plain "gute Deutschkenntnisse" is deliberately NOT here —
+// the profile does not treat it as a hard stop.
+const GERMAN_HARD_STOP_RES = [
+  /\bsehr\s+gute[nrs]?\s+deutsch(?!land)(?:kenntniss\w*|-|\b)/i,
+  /\bverhandlungssicher\w*\s+(?:\w+\s+){0,2}deutsch(?!land)/i,
+  /\bdeutsch(?!land)\w*\s+(?:\w+\s+){0,4}verhandlungssicher/i,
+  /\bflie(?:ß|ss)end\w*\s+(?:\w+\s+){0,2}deutsch(?!land)/i,
+  /\bdeutsch(?!land)\w*\s+(?:\w+\s+){0,4}flie(?:ß|ss)end/i,
+  /\bdeutsch(?!land)\w*[^.\n]{0,25}\bc[12]\b/i,
+  /\b[cC][12]\b[^.\n]{0,15}\bdeutsch(?!land)/i,
+  /\b(?:fluent|native|very\s+good|excellent|business[- ]fluent)\s+(?:command\s+of\s+|skills\s+in\s+|in\s+)?german\b/i,
+  /\bgerman\b[^.\n]{0,12}\b(?:fluent(?:ly)?|native|c1|c2)\b/i,
+];
+
+// Any of these in the same line turns the requirement into a preference, and
+// German offered as an ALTERNATIVE to English ("Deutsch- oder Englisch-
+// kenntnisse") means English alone qualifies — both keep the posting.
+const GERMAN_HEDGE_RE = /\b(von vorteil|vorteilhaft|wünschenswert|wuenschenswert|idealerweise|ein plus|nice to have|a plus|is a plus|optional|preferred|beneficial|an advantage|advantageous|gerne|hilfreich|helpful|wäre schön)\b/i;
+const GERMAN_ALTERNATIVE_RE = /deutsch\w*[\s-]*(?:oder|bzw\.?|und\s*\/\s*oder)\s*englisch|englisch\w*[\s-]*(?:oder|bzw\.?|und\s*\/\s*oder)\s*deutsch|german\s+(?:or|and\/or)\s+english|english\s+(?:or|and\/or)\s+german/i;
+
+/**
+ * The line of a job description that states a hard-stop German requirement,
+ * verbatim, or null. Conservative by construction: a line that hedges the
+ * requirement or offers English as an alternative never counts, because the
+ * expensive error here is discarding a posting the candidate could have held.
+ *
+ * @param {string} text compacted JD text
+ * @returns {string|null}
+ */
+export function germanHardStop(text) {
+  if (!text || typeof text !== 'string') return null;
+  for (const raw of text.split(/\r?\n|(?<=[.;!?])\s+/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (!GERMAN_HARD_STOP_RES.some((re) => re.test(line))) continue;
+    if (GERMAN_HEDGE_RE.test(line) || GERMAN_ALTERNATIVE_RE.test(line)) continue;
+    return line.length > 160 ? `${line.slice(0, 157)}...` : line;
+  }
+  return null;
+}
+
+// ─── zero-token verdicts ────────────────────────────────────────────────────
+
+// One TRIAGE cell. parseTriageLine (loop-core.mjs) splits on `|` and reads the
+// score from the third cell, so a pipe inside a company or role would shift the
+// score and the line would be dropped silently — flatten them first.
+function triageCell(value) {
+  return String(value ?? '').replace(/[|\t\r\n]+/g, ' ').replace(/\s+/g, ' ').trim() || '?';
+}
+
+/**
+ * Split a fetched batch into verdicts that need no model and the rest.
+ *
+ * Every rule here is one the triage contract (modes/triage.md) already makes
+ * deterministic, or the German hard stop config/profile.yml defines — this
+ * only stops paying a worker to apply them:
+ *   - `expired`                     → SKIP, "Posting inaccessible or expired"
+ *   - `robots-blocked` / `unsafe-url` → SKIP, "Not fetchable (robots.txt / unsafe URL)"
+ *   - `ok` text with germanHardStop → FAIL 2.0/5, quoting the requirement verbatim
+ * Anything else — including `blocked`, `error` and `robots-unconfirmed`, where
+ * the contract still lets the worker try WebFetch — stays in `rest`.
+ *
+ * `gatedLines` are `{key}\tTRIAGE: ...` lines in exactly the form
+ * `scan-loop.mjs record` reads, so they can be recorded next to the worker's.
+ *
+ * @param {Array<{key:string, company?:string, title?:string, status:string, text?:string}>} results
+ * @returns {{gatedLines: string[], rest: object[], counts: {german:number, expired:number, notFetchable:number}}}
+ */
+export function splitGatedResults(results) {
+  const gatedLines = [];
+  const rest = [];
+  const counts = { german: 0, expired: 0, notFetchable: 0 };
+  for (const r of Array.isArray(results) ? results : []) {
+    const head = `${r.key}\tTRIAGE:`;
+    const who = `${triageCell(r.company)} | ${triageCell(r.title)}`;
+    if (r.status === 'expired') {
+      gatedLines.push(`${head} SKIP | ${who} | 0/5 | Posting inaccessible or expired`);
+      counts.expired++;
+      continue;
+    }
+    if (r.status === 'robots-blocked' || r.status === 'unsafe-url') {
+      gatedLines.push(`${head} SKIP | ${who} | 0/5 | Not fetchable (robots.txt / unsafe URL)`);
+      counts.notFetchable++;
+      continue;
+    }
+    const quote = r.status === 'ok' ? germanHardStop(r.text) : null;
+    if (quote) {
+      gatedLines.push(`${head} FAIL | ${who} | 2.0/5 | Hard DQ (zero-token gate): German requirement "${triageCell(quote)}"`);
+      counts.german++;
+      continue;
+    }
+    rest.push(r);
+  }
+  return { gatedLines, rest, counts };
+}
+
+// ─── plain-HTTP rung ────────────────────────────────────────────────────────
+
+// Hosts whose job pages are server-rendered and readable over a plain request
+// while headless Chromium's navigation to them fails. Measured, not assumed:
+// on the 2026-09-22 and 09-23 passes, StepStone navigations ended in
+// `navigation_error` 4/4 and 4/5 times, and every failed batch pushed a
+// WebFetch retry into the triage worker, while a plain GET of the same
+// `-inline.html` page returned 200 with the full description in ~0.9 s and no
+// redirect. Add a host here only with the same kind of evidence.
+const PLAIN_HTTP_HOSTS = /(?:^|\.)stepstone\.de$/i;
+
+// Words a real job description carries somewhere, in the languages these
+// boards post in. A 200 with none of them is a consent wall, a search page or
+// an interstitial, not a JD — and falls through to the browser.
+const JD_SECTION_RE = /\b(aufgaben|dein profil|ihr profil|anforderungen|qualifikationen?|wir bieten|das bieten wir|responsibilities|requirements|qualifications|your tasks|what you will do|we offer)\b/i;
+
+// Below this the page is a fragment (title/company/apply button), which the
+// browser path already handles; the plain rung only claims a full JD.
+const PLAIN_MIN_CHARS = 600;
+
+/**
+ * Read a JD with a single plain HTTP request, for PLAIN_HTTP_HOSTS only.
+ *
+ * Deliberately one-directional: it returns an `ok` result or `null`, never an
+ * `expired` or `error`. Over plain HTTP a 403 is ambiguous — a StepStone
+ * posting the browser saw as 410 answers 403 here — so no failure is
+ * interpreted; every non-success simply hands the entry to the existing
+ * browser path, exactly as before this rung existed. The worst it can do is
+ * nothing. `fetchText` refuses redirects, so a public URL cannot bounce the
+ * request somewhere private.
+ *
+ * @param {string} url
+ * @param {{fetchTextFn?: typeof fetchText, maxChars?: number}} [deps]
+ * @returns {Promise<{status:'ok', liveness:'plain_http', chars:number, text:string} | null>}
+ */
+export async function fetchPlainJd(url, { fetchTextFn = fetchText, maxChars = DEFAULT_MAX_CHARS } = {}) {
+  let host;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return null;
+  }
+  if (!PLAIN_HTTP_HOSTS.test(host)) return null;
+
+  let html;
+  try {
+    html = await fetchTextFn(url);
+  } catch {
+    return null;
+  }
+  // A full page, unlike an API description, carries script and style bodies
+  // that htmlToText would keep as text; drop them before extracting.
+  const visible = String(html ?? '').replace(/<(script|style|noscript)\b[\s\S]*?<\/\1>/gi, ' ');
+  const text = htmlToText(visible);
+  if (!JD_SECTION_RE.test(text)) return null;
+  const compact = compactJdText(text, { maxChars });
+  if (!compact || compact.length < PLAIN_MIN_CHARS) return null;
+  return { status: 'ok', liveness: 'plain_http', chars: compact.length, text: compact };
+}
+
 /**
  * Fetch and compact one entry's JD.
  *
@@ -444,6 +626,7 @@ export async function fetchOne(entry, {
   newPage,
   checkRobotsFn = checkRobots,
   checkLivenessViaApiFn = checkLivenessViaApi,
+  fetchTextFn = fetchText,
   maxChars = DEFAULT_MAX_CHARS,
 } = {}) {
   const base = {
@@ -480,6 +663,12 @@ export async function fetchOne(entry, {
   if (!gate.allowed) {
     return { ...base, status: gate.status, liveness: gate.code, chars: 0, text: '' };
   }
+
+  // Rung 2 — a plain HTTP read, for hosts where it is measured to work and the
+  // browser is measured not to. Placed AFTER the gate on purpose: robots.txt
+  // and the egress guard still decide first, and fetchText refuses redirects.
+  const plain = await fetchPlainJd(entry.url, { fetchTextFn, maxChars });
+  if (plain) return { ...base, ...plain };
 
   let page;
   try {
@@ -568,9 +757,9 @@ async function main() {
   const args = process.argv.slice(2);
   validateFlags(
     args,
-    ['--file', '--out', '--max-chars', '--concurrency', '--timeout-ms', '--help', '-h'],
+    ['--file', '--out', '--max-chars', '--concurrency', '--timeout-ms', '--gate-out', '--rest-out', '--help', '-h'],
     USAGE,
-    { valueFlags: ['--file', '--out', '--max-chars', '--concurrency', '--timeout-ms'], requireOperand: true },
+    { valueFlags: ['--file', '--out', '--max-chars', '--concurrency', '--timeout-ms', '--gate-out', '--rest-out'], requireOperand: true },
   );
 
   const filePath = flagValue(args, '--file');
@@ -642,6 +831,18 @@ async function main() {
   for (const r of results) counts[r.status] = (counts[r.status] || 0) + 1;
   const summary = Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ');
   console.log(`fetch-jds: wrote ${results.length} result(s) to ${outPath} — ${summary}`);
+
+  // Optional: the verdicts no model is needed for, ready for `scan-loop.mjs
+  // record`, and the remainder for the triage worker. --out above is always
+  // the full batch, so callers that ignore these flags see no change.
+  const gateOut = flagValue(args, '--gate-out');
+  const restOut = flagValue(args, '--rest-out');
+  if (gateOut || restOut) {
+    const { gatedLines, rest, counts: g } = splitGatedResults(results);
+    if (gateOut) await writeFile(gateOut, gatedLines.length ? `${gatedLines.join('\n')}\n` : '', 'utf-8');
+    if (restOut) await writeFile(restOut, JSON.stringify(rest, null, 2), 'utf-8');
+    console.log(`fetch-jds: zero-token verdicts ${gatedLines.length} (german=${g.german} expired=${g.expired} not-fetchable=${g.notFetchable}); ${rest.length} left for the triage worker`);
+  }
 }
 
 if (isMainModule(import.meta.url)) {

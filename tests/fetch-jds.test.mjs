@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { compactJdText, gateUrl, fetchOne, pickContainerText, htmlToText } from '../fetch-jds.mjs';
+import { compactJdText, gateUrl, fetchOne, fetchPlainJd, germanHardStop, splitGatedResults, pickContainerText, htmlToText } from '../fetch-jds.mjs';
 import { setHostResolver } from '../liveness-browser.mjs';
 
 // Every fetchOne test below a URL is not itself exercising the API rung passes
@@ -663,4 +663,167 @@ test('fetch-jds.mjs: --file must contain a JSON array', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─── plain-HTTP rung (StepStone) ───────────────────────────────────────────
+//
+// On 2026-09-22/23 every StepStone navigation but one ended in
+// `navigation_error`, pushing a WebFetch retry into each triage worker, while a
+// plain GET returned the full JD. The rung may only ever turn a would-be
+// browser attempt into an early success — never an `expired` or `error` —
+// so every non-success must fall through to the browser unchanged.
+
+const STEPSTONE = 'https://www.stepstone.de/stellenangebote--Werkstudent-Analytics-wmd-Muenchen-ADAC--1-inline.html';
+const JD_HTML = `<html><head><style>.x{color:red}</style><script>window.__STATE__={"a":1};function f(){}</script></head>
+<body><h1>Werkstudent Analytics Engineer (w/m/d)</h1>
+<h2>Deine Aufgaben</h2><ul>${[1, 2, 3, 4, 5, 6, 7, 8].map((n) => `<li>Aufgabe ${n}: Du baust Datenpipeline Nummer ${n} in Python und SQL und stimmst sie mit dem Analytics-Team ab.</li>`).join('')}</ul>
+<h2>Dein Profil</h2><ul>${[1, 2, 3, 4, 5, 6].map((n) => `<li>Anforderung ${n}: Studium der Informatik oder Data Science, Erfahrung mit Werkzeug ${n}, sehr gute Englischkenntnisse.</li>`).join('')}</ul>
+<h2>Wir bieten</h2><p>Flexible Arbeitszeiten und mobiles Arbeiten.</p></body></html>`;
+
+test('fetchPlainJd: a host outside PLAIN_HTTP_HOSTS is never requested', async () => {
+  let called = false;
+  const r = await fetchPlainJd('https://careers.example.com/job/1', { fetchTextFn: async () => { called = true; return JD_HTML; } });
+  assert.equal(r, null);
+  assert.equal(called, false);
+});
+
+test('fetchPlainJd: a StepStone JD page comes back ok, with script and style bodies stripped', async () => {
+  const r = await fetchPlainJd(STEPSTONE, { fetchTextFn: async () => JD_HTML });
+  assert.equal(r?.status, 'ok');
+  assert.equal(r.liveness, 'plain_http');
+  assert.match(r.text, /Deine Aufgaben/);
+  assert.doesNotMatch(r.text, /__STATE__|function f|color:red/);
+});
+
+test('fetchPlainJd: any request failure is not interpreted — a 403 falls through as null', async () => {
+  const r = await fetchPlainJd(STEPSTONE, { fetchTextFn: async () => { const e = new Error('HTTP 403 Forbidden'); e.status = 403; throw e; } });
+  assert.equal(r, null);
+});
+
+test('fetchPlainJd: a 200 with no JD section words (a consent wall) falls through as null', async () => {
+  const wall = `<html><body>${'<p>Wir verwenden Cookies, um Ihnen das beste Erlebnis zu bieten. Bitte stimmen Sie zu.</p>'.repeat(20)}</body></html>`;
+  assert.equal(await fetchPlainJd(STEPSTONE, { fetchTextFn: async () => wall }), null);
+});
+
+test('fetchPlainJd: a short fragment is left to the browser path', async () => {
+  const fragment = '<html><body><h1>Werkstudent</h1><p>Deine Aufgaben: kurz.</p></body></html>';
+  assert.equal(await fetchPlainJd(STEPSTONE, { fetchTextFn: async () => fragment }), null);
+});
+
+test('fetchOne: a readable StepStone page is served over plain HTTP without opening the browser', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    const result = await fetchOne({ key: 's1', url: STEPSTONE, company: 'ADAC', title: 'Werkstudent' }, {
+      newPage: async () => { throw new Error('the browser must not open when plain HTTP already has the JD'); },
+      checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: apiInconclusive,
+      fetchTextFn: async () => JD_HTML,
+    });
+    assert.equal(result.status, 'ok');
+    assert.equal(result.liveness, 'plain_http');
+    assert.equal(result.key, 's1');
+  } finally {
+    restoreDns();
+  }
+});
+
+test('fetchOne: robots.txt still decides first — a disallowed StepStone URL is never requested', async () => {
+  let requested = false;
+  const result = await fetchOne({ key: 's2', url: STEPSTONE }, {
+    newPage: () => { throw new Error('nope'); },
+    checkRobotsFn: async () => ({ retry: false, code: 'disallowed', reason: 'no' }),
+    checkLivenessViaApiFn: apiInconclusive,
+    fetchTextFn: async () => { requested = true; return JD_HTML; },
+  });
+  assert.equal(requested, false);
+  assert.notEqual(result.status, 'ok');
+});
+
+test('fetchOne: when the plain rung finds nothing, the browser path runs exactly as before', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    let opened = false;
+    await fetchOne({ key: 's3', url: STEPSTONE }, {
+      newPage: async () => { opened = true; throw new Error('stop here — reaching newPage is the assertion'); },
+      checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: apiInconclusive,
+      fetchTextFn: async () => { const e = new Error('HTTP 403'); e.status = 403; throw e; },
+    });
+    assert.equal(opened, true);
+  } finally {
+    restoreDns();
+  }
+});
+
+// ─── zero-token German gate + deterministic verdicts ───────────────────────
+//
+// On 2026-09-23 triage passed a Siemens role at 4.3 that the full evaluation
+// then SKIPped on "Sehr gute Deutsch- und Englischkenntnisse" — ~196k tokens to
+// find a phrase in the pre-fetched text. The gate is validated against 137
+// labelled postings (fires on 20; catches 12/13 German-language FAILs; the only
+// PASSes it fires on are the two genuine hard stops triage let through).
+
+test('germanHardStop: the hard-stop phrasings fire, verbatim', () => {
+  for (const line of [
+    'Sehr gute Deutsch- und Englischkenntnisse runden Dein Profil ab.',
+    'Du verfügst über sehr gute Deutschkenntnisse in Wort und Schrift (C1)',
+    'Verhandlungssichere Deutschkenntnisse',
+    'Fließende Deutsch- und Englischkenntnisse',
+    'Deutschkenntnisse auf dem Niveau C1 oder besser',
+    'Languages: You speak English and German fluently',
+    'Fluent German is required',
+  ]) {
+    assert.equal(germanHardStop(`Werkstudent Data\n${line}\nWir bieten Obstkorb.`), line, line);
+  }
+});
+
+test('germanHardStop: preferences, alternatives and the country name never fire', () => {
+  for (const line of [
+    'Gute Deutschkenntnisse',                                   // not a hard stop under the profile
+    'Sehr gute Deutsch- oder Englischkenntnisse',               // English alone qualifies
+    'Sehr gute Englischkenntnisse, Deutschkenntnisse von Vorteil',
+    'Fluent German is a plus',
+    'German or English at C1 level',
+    'Englisch C1, Deutsch wünschenswert',
+    'Standort: Deutschland, Remote C1-Gebäude',                 // "Deutschland" is not the language
+    'Sehr gute Kenntnisse in Python und SQL',
+  ]) {
+    assert.equal(germanHardStop(line), null, line);
+  }
+});
+
+test('splitGatedResults: deterministic verdicts are gated, everything else goes to the worker', () => {
+  const results = [
+    { key: 'a', company: 'Siemens', title: 'Werkstudent KI', status: 'ok', text: 'Aufgaben\nSehr gute Deutsch- und Englischkenntnisse runden Dein Profil ab.' },
+    { key: 'b', company: 'Acme', title: 'Werkstudent', status: 'expired', text: '' },
+    { key: 'c', company: 'Indeed row', title: 'Data', status: 'robots-blocked', text: '' },
+    { key: 'd', company: 'X', title: 'Y', status: 'unsafe-url', text: '' },
+    { key: 'e', company: 'Datev', title: 'Werkstudent BI', status: 'ok', text: 'Deutschkenntnisse von Vorteil, Englisch fließend.' },
+    { key: 'f', company: 'Z', title: 'W', status: 'robots-unconfirmed', text: '' },   // worker may still WebFetch
+    { key: 'g', company: 'Z', title: 'W', status: 'blocked', text: '' },              // worker may still WebFetch
+    { key: 'h', company: 'Z', title: 'W', status: 'error', text: '' },
+  ];
+  const { gatedLines, rest, counts } = splitGatedResults(results);
+  assert.deepEqual(counts, { german: 1, expired: 1, notFetchable: 2 });
+  assert.deepEqual(rest.map((r) => r.key), ['e', 'f', 'g', 'h']);
+  assert.match(gatedLines[0], /^a\tTRIAGE: FAIL \| Siemens \| Werkstudent KI \| 2\.0\/5 \| Hard DQ \(zero-token gate\): German requirement "Sehr gute Deutsch-/);
+});
+
+test('splitGatedResults: every gated line parses with the real loop parser, even with pipes in a cell', async () => {
+  const { parseTriageLine } = await import('../loop-core.mjs');
+  const { gatedLines } = splitGatedResults([
+    { key: 'k1', company: 'Acme | Holding', title: 'Data | AI\tWerkstudent', status: 'ok', text: 'Fließende Deutschkenntnisse erforderlich.' },
+    { key: 'k2', company: '', title: '', status: 'expired', text: '' },
+    { key: 'k3', company: 'B', title: 'C', status: 'robots-blocked', text: '' },
+  ]);
+  const want = [['FAIL', 2], ['SKIP', 0], ['SKIP', 0]];
+  gatedLines.forEach((line, i) => {
+    const [key, rest] = line.split('\t');
+    assert.equal(key, `k${i + 1}`);
+    const parsed = parseTriageLine(rest);
+    assert.ok(parsed, `the loop parser dropped: ${line}`);
+    assert.equal(parsed.verdict, want[i][0]);
+    assert.equal(parsed.score, want[i][1]);
+  });
+  assert.equal(parseTriageLine(gatedLines[0].split('\t')[1]).company, 'Acme Holding');
 });
