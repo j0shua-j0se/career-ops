@@ -588,6 +588,214 @@ try {
     fail(`healthy tenant issued faceted requests: ${JSON.stringify(healthyCalls)}`);
   }
 
+
+  // ── Slice fan-out: concurrent, bounded, and order-stable ────────────
+  // A clamped tenant is large by definition, and its slices are independent
+  // queries whose cost is waiting on Workday. Dispatched one at a time, the
+  // recovery phase was the longest part of a sweep (abbott: 100 slices,
+  // bridgestone: 52). These three assertions pin the shape of the fix: the
+  // slices really do overlap, the overlap is bounded because it is aimed at a
+  // SINGLE tenant's host, and what the tenant returns does not depend on which
+  // slice answered first.
+  const EIGHT = Array.from({ length: 8 }, (_, i) => ({ id: `v${i}`, count: 400 }));
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fanOutJobs = await captureConsoleErrors(() => workday.fetch(ENTRY, mkCtx(async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    const key = sliceKey(body.appliedFacets);
+    if (key === '') {
+      return {
+        total: 2000,
+        facets: [{ facetParameter: 'jobFamily', values: EIGHT }],
+        jobPostings: postings('unfaceted', body.offset),
+      };
+    }
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    try {
+      // v0 answers last on purpose: if results were absorbed in completion
+      // order rather than facet order, its postings would land after v1-v7.
+      await new Promise((resolve) => setTimeout(resolve, key === 'jobFamily=v0' ? 30 : 1));
+      return { total: 20, facets: [], jobPostings: body.offset === 0 ? postings(key, 0) : [] };
+    } finally {
+      inFlight--;
+    }
+  }, { includeUndated: true }))).then((r) => r.result);
+
+  if (maxInFlight >= 2) {
+    pass('workday.fetch() dispatches a clamped tenant’s slices concurrently, not one at a time');
+  } else {
+    fail(`slice fan-out peaked at ${maxInFlight} in flight — the split is still serial`);
+  }
+
+  // The ceiling matters as much as the floor: this fan-out is aimed at one
+  // tenant's host, unlike scan-ats-full.mjs's 20, which is 20 different hosts.
+  if (maxInFlight <= 4) {
+    pass('workday.fetch() bounds the slice fan-out at SPLIT_SLICE_CONCURRENCY');
+  } else {
+    fail(`slice fan-out peaked at ${maxInFlight} in flight, above the bound of 4`);
+  }
+
+  const fanOutSliceTitles = fanOutJobs.map((j) => j.title).filter((t) => t.startsWith('jobFamily=v'));
+  // 8 slices x 20 postings, and the slowest slice's postings still come first.
+  if (fanOutSliceTitles.length === 160 && fanOutSliceTitles[0].startsWith('jobFamily=v0 ')) {
+    pass('workday.fetch() absorbs slices in facet-value order, not completion order');
+  } else {
+    fail(`slice fan-out returned ${fanOutSliceTitles.length} sliced postings starting with ${JSON.stringify(fanOutSliceTitles[0])}, expected 160 starting with jobFamily=v0`);
+  }
+
+
+  // ── Out-of-scope boards are not partitioned ─────────────────────
+  // The clamped tenants on a live sweep are overwhelmingly large US employers
+  // with no German presence. Their location facets hold nothing a German
+  // location_filter allows, so chooseSplitFacet() used to fall through to a
+  // generic partition and spend up to 100 slices recovering postings the caller
+  // then discarded: 3,290 slices across 70 tenants for 54 matches
+  // directory-wide.
+  const { boardOutOfLocationScope } = workdayModule;
+  const HINTS = { always_allow: ['Erlangen', 'Nürnberg'], allow: ['Germany'], block: [] };
+  const usOnlyFacets = (jobFamilyValues) => [
+    {
+      facetParameter: 'locations',
+      values: [
+        { id: 'us-tx', descriptor: 'Texas, United States', count: 1800 },
+        { id: 'us-ca', descriptor: 'California, United States', count: 1500 },
+      ],
+    },
+    { facetParameter: 'jobFamily', values: jobFamilyValues },
+  ];
+
+  const outOfScopeCalls = [];
+  const outOfScopeJobs = await captureConsoleErrors(() => workday.fetch(ENTRY, mkCtx(async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    outOfScopeCalls.push(sliceKey(body.appliedFacets));
+    return {
+      total: 2000,
+      facets: usOnlyFacets(Array.from({ length: 24 }, (_, i) => ({ id: `v${i}`, descriptor: `Family ${i}`, count: 2600 }))),
+      jobPostings: postings('us', body.offset),
+    };
+  }, { includeUndated: true, locationHints: HINTS }))).then((r) => r.result);
+
+  if (outOfScopeCalls.every((key) => key === '')) {
+    pass('workday.fetch() does not partition a clamped board whose location facet holds nothing in scope');
+  } else {
+    fail(`out-of-scope board still issued slices: ${JSON.stringify([...new Set(outOfScopeCalls)].filter(Boolean).slice(0, 5))}`);
+  }
+
+  // Skipping the split is a coverage decision and has to be stated as one: the
+  // tenant is not covered, it is out of scope, and a later sweep may want it.
+  if (outOfScopeJobs.workdayTruncated) {
+    pass('workday.fetch() tags an out-of-scope board truncated rather than reporting it fully covered');
+  } else {
+    fail('a board skipped as out of scope must still be tagged workdayTruncated');
+  }
+
+  // The unfaceted crawl is untouched by the skip — it is real coverage either way.
+  if (outOfScopeJobs.length === 2000) {
+    pass('workday.fetch() still returns the unfaceted crawl of an out-of-scope board');
+  } else {
+    fail(`out-of-scope board returned ${outOfScopeJobs.length} jobs, expected the 2000 already crawled`);
+  }
+
+  // One in-scope value is enough to keep the board: that is the whole point of
+  // scanning a global employer that happens to hire in Erlangen.
+  const inScopeCalls = [];
+  await captureConsoleErrors(() => workday.fetch(ENTRY, mkCtx(async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    const key = sliceKey(body.appliedFacets);
+    inScopeCalls.push(key);
+    if (key === '') {
+      return {
+        total: 2000,
+        facets: [{
+          facetParameter: 'locations',
+          values: [
+            { id: 'us-tx', descriptor: 'Texas, United States', count: 1800 },
+            { id: 'de-er', descriptor: 'Erlangen, Germany', count: 900 },
+          ],
+        }],
+        jobPostings: postings('mixed', body.offset),
+      };
+    }
+    return { total: 20, facets: [], jobPostings: body.offset === 0 ? postings(key, 0) : [] };
+  }, { includeUndated: true, locationHints: HINTS })));
+
+  const inScopeSlices = [...new Set(inScopeCalls.filter(Boolean))];
+  if (inScopeSlices.length === 1 && inScopeSlices[0] === 'locations=de-er') {
+    pass('workday.fetch() still splits a board with an in-scope location, and only on that value');
+  } else {
+    fail(`in-scope board issued slices ${JSON.stringify(inScopeSlices)}, expected only locations=de-er`);
+  }
+
+  // Unjudgeable is not out of scope. A facet whose values carry no descriptor
+  // says nothing about where the jobs are, and guessing would silently drop a
+  // board the sweep is supposed to cover.
+  const undescribedCalls = [];
+  await captureConsoleErrors(() => workday.fetch(ENTRY, mkCtx(async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    undescribedCalls.push(sliceKey(body.appliedFacets));
+    return {
+      total: 2000,
+      facets: [
+        { facetParameter: 'locations', values: [{ id: 'a', count: 1800 }, { id: 'b', count: 1500 }] },
+        { facetParameter: 'jobFamily', values: [{ id: 'x', descriptor: 'Data', count: 1600 }, { id: 'y', descriptor: 'Ops', count: 1400 }] },
+      ],
+      jobPostings: postings('undescribed', body.offset),
+    };
+  }, { includeUndated: true, locationHints: HINTS })));
+
+  if (undescribedCalls.some((key) => key !== '')) {
+    pass('workday.fetch() still splits a board whose location values carry no descriptor to judge');
+  } else {
+    fail('a board with undescribed location values is unjudgeable and must still be split');
+  }
+
+  if (boardOutOfLocationScope(usOnlyFacets([{ id: 'x', descriptor: 'Data', count: 10 }]), null) === false) {
+    pass('boardOutOfLocationScope() returns false when no location hints are configured');
+  } else {
+    fail('boardOutOfLocationScope() must not judge a board when the caller passed no hints');
+  }
+
+
+  // ── Truncated is not the same as retryable ──────────────────────────
+  // scan-ats-full.mjs re-fetches every retryable board sequentially after the
+  // parallel sweep. That second pass can only help a board that lost to load;
+  // a deterministic truncation reproduces itself exactly. On the 2026-09-23
+  // sweep the retry queue held 41 boards — including every out-of-scope skip
+  // — and cost about half an hour to recover nothing.
+  if (dyingJobs.workdayRetryable === true) {
+    pass('a slice that died on a fetch error marks the board retryable');
+  } else {
+    fail('a fetch-error truncation is exactly what the sequential retry exists for — it must be retryable');
+  }
+  if (page0Jobs.workdayRetryable === true) {
+    pass('a slice that failed on its first page marks the board retryable');
+  } else {
+    fail('a slice failing on page 0 is a transient failure and must be retryable');
+  }
+  if (outOfScopeJobs.workdayTruncated === true && outOfScopeJobs.workdayRetryable !== true) {
+    pass('an out-of-scope board is reported truncated but NOT queued for a retry that would reproduce the skip');
+  } else {
+    fail(`out-of-scope board: truncated=${outOfScopeJobs.workdayTruncated} retryable=${outOfScopeJobs.workdayRetryable} — expected truncated and not retryable`);
+  }
+
+  // The slice cap is the other deterministic cause worth pinning: a board that
+  // exhausted MAX_SPLIT_SLICES will exhaust it again on retry.
+  const capped = await captureConsoleErrors(() => workday.fetch(ENTRY, mkCtx(async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    const depth = Object.keys(body.appliedFacets || {}).length;
+    return {
+      total: 2000,
+      facets: [{ facetParameter: `f${depth}`, values: Array.from({ length: 24 }, (_, i) => ({ id: `v${i}`, count: 2600 })) }],
+      jobPostings: postings(`cap${depth}`, body.offset),
+    };
+  }, { includeUndated: true }))).then((r) => r.result);
+  if (capped.workdayTruncated === true && capped.workdayRetryable !== true) {
+    pass('a board truncated by the slice/page budget is reported truncated but not retryable');
+  } else {
+    fail(`capped board: truncated=${capped.workdayTruncated} retryable=${capped.workdayRetryable} — a budget cap reproduces itself on retry`);
+  }
+
 } catch (e) {
   fail(`workday facet-split fetch tests crashed: ${e.message}`);
 }

@@ -979,7 +979,10 @@ async function main() {
           const jobs = await source.provider.fetch(entry, ctx);
           recordBoardResult(deadBoards, name, deadBoard, 200);
           consecutiveResolverFailures = 0;
-          if (jobs.workdayTruncated) truncated.push(entry);
+          // Only a board that lost to load is worth a second pass on a quiet
+          // line; a deterministic truncation would reproduce itself exactly.
+          // See workdayRetryable in providers/workday.mjs.
+          if (jobs.workdayTruncated && jobs.workdayRetryable) truncated.push(entry);
           if (jobs.icimsTruncated) {
             cappedBoards++;
             if (opts.verbose) console.error(`  ⚠ ${name}/${entry.name}: hit the page cap — later postings not scanned`);

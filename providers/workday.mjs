@@ -59,6 +59,25 @@ const MAX_SPLIT_DEPTH = 2;
 // values, each still clamped) must not turn one board into an unbounded crawl.
 const MAX_SPLIT_SLICES = 100;
 
+// How many of a clamped tenant's slices are queried at once.
+//
+// Each slice is an independent query whose cost is almost entirely waiting on
+// Workday, and a clamped tenant is large by definition — abbott spent 100
+// slices, bridgestone 52 — so dispatching them one at a time made the recovery
+// phase the longest part of a --since sweep, well after the 12,884-tenant
+// directory pass had finished.
+//
+// 4 is deliberately modest: this fan-out is against a SINGLE tenant's host,
+// unlike scan-ats-full.mjs's CONCURRENCY of 20, which is 20 different hosts.
+// CAREER_OPS_WORKDAY_SLICE_CONCURRENCY tunes it; 1 restores the old strictly
+// serial behaviour, and the value is clamped to 8 so a typo cannot turn one
+// tenant into a burst source.
+const SPLIT_SLICE_CONCURRENCY = (() => {
+  const raw = Number.parseInt(process.env.CAREER_OPS_WORKDAY_SLICE_CONCURRENCY ?? '', 10);
+  if (!Number.isInteger(raw) || raw < 1) return 4;
+  return Math.min(raw, 8);
+})();
+
 // Page budget for a whole tenant, as a multiple of max_pages. A clamped board
 // is crawled once unfaceted and then once per slice, and slices overlap, so the
 // page count is not bounded by the board size — this is what stops one
@@ -176,6 +195,47 @@ function locationValueScore(value, hints) {
   if (alwaysAllow.some((term) => text.includes(term))) return 3;
   if (allow.some((term) => text.includes(term))) return 2;
   return 0;
+}
+
+/**
+ * True when the caller is location-scoped, the board says where its jobs are,
+ * and none of those places is in scope.
+ *
+ * This is the escape hatch for the clamped-board split. The split exists to
+ * recover the postings above the offset ceiling, but on a 2026-09-22 sweep the
+ * clamped tenants were overwhelmingly large US employers — abbott, jabil,
+ * leidos, iqvia, fresenius — with no German presence at all. None of their
+ * location values matches a German hint, so chooseSplitFacet() falls through to
+ * the generic partition (jobFamily and friends) and spends up to
+ * MAX_SPLIT_SLICES queries recovering postings the caller's location filter
+ * then discards: 3,290 slices across 70 tenants, for a directory-wide yield of
+ * 54 matches.
+ *
+ * Judged only on what the board itself publishes, and deliberately timid:
+ * - No hints configured: not our call, never out of scope.
+ * - A location facet with even ONE in-scope value: in scope, split normally
+ *   (chooseSplitFacet then narrows to those values anyway).
+ * - A facet whose values carry no descriptors cannot be judged — locationValueScore
+ *   reads the descriptor — so it does not count as evidence either way.
+ * - No usable location facet at all: unjudgeable, so the split proceeds.
+ *
+ * The caller marks a board skipped this way as incomplete rather than covered,
+ * because that is what it is: the unfaceted crawl still returns and is still
+ * filtered normally, and the tenant stays eligible for a later sweep.
+ */
+export function boardOutOfLocationScope(facets, locationHints) {
+  if (!locationHints || typeof locationHints !== 'object') return false;
+  let sawJudgeableLocationFacet = false;
+  for (const facet of Array.isArray(facets) ? facets : []) {
+    if (!facetLooksLikeLocation(facet)) continue;
+    const values = (Array.isArray(facet.values) ? facet.values : []).filter(
+      (v) => typeof v?.id === 'string' && v.id && String(v?.descriptor || '').trim() !== '',
+    );
+    if (values.length === 0) continue;
+    sawJudgeableLocationFacet = true;
+    if (values.some((value) => locationValueScore(value, locationHints) > 0)) return false;
+  }
+  return sawJudgeableLocationFacet;
 }
 
 /**
@@ -557,6 +617,13 @@ export default {
     // part of the board still unreached — the difference between "this is the
     // whole board" and "this is as much of it as we could get".
     let splitIncomplete = false;
+    // Set only by a TRANSIENT cause: a slice or page that died on a fetch
+    // error. Every other reason the split can stop short — the slice cap, the
+    // page budget, the depth limit, no splittable facet, a facet that
+    // under-covers the board, an out-of-scope board — is deterministic, and a
+    // retry re-derives exactly the same outcome. See the workdayRetryable tag
+    // at the end of fetch().
+    let transientFailure = false;
     let slicesSpent = 0;
     let jobs = root.jobs;
 
@@ -599,10 +666,19 @@ export default {
         // every clamped board and say nothing.
         if (result.stopReason === 'fetch-error' || (result.stopReason === 'cap' && !result.clamped)) {
           splitIncomplete = true;
+          if (result.stopReason === 'fetch-error') transientFailure = true;
         }
         if (!result.clamped) return;
 
         if (depth >= MAX_SPLIT_DEPTH) { splitIncomplete = true; return; }
+        // A location-scoped caller gains nothing from partitioning a board
+        // whose own location facet says it has no jobs in scope — see
+        // boardOutOfLocationScope(). Marked incomplete, not covered: the
+        // unfaceted crawl still stands and the board stays eligible next sweep.
+        if (boardOutOfLocationScope(result.facets, ctx?.locationHints)) {
+          splitIncomplete = true;
+          return;
+        }
         const facet = chooseSplitFacet(result.facets, {
           exclude: excluded,
           locationHints: ctx?.locationHints,
@@ -640,34 +716,75 @@ export default {
           if (trueTotal - chosenCoverage > spread) splitIncomplete = true;
         }
 
-        for (const value of facet.values) {
-          if (slicesSpent >= MAX_SPLIT_SLICES) { splitIncomplete = true; break; }
-          if (pagesSpent >= pageBudget) { splitIncomplete = true; break; }
-          slicesSpent++;
-          await sleep(INTER_PAGE_DELAY_MS, ctx);
-          const nextApplied = { ...applied, [facet.facetParameter]: [value.id] };
-          // runQuery()'s page-0 fetch is unguarded — fine for the one page-0 of
-          // an ordinary board, but here it runs once per slice against a tenant
-          // that is by definition large, which is where a WAF or rate limiter
-          // lives. Letting it throw would abandon the whole tenant including
-          // the unfaceted crawl already absorbed into `out`, so a dead slice
-          // becomes an incomplete split and the rest of the partition is still
-          // tried. Same accounting as a slice that died mid-pagination.
-          let sliceResult;
-          try {
-            sliceResult = await runQuery(nextApplied);
-          } catch (err) {
-            const attempts = err.attempts ?? RETRY_POLICY.retries + 1;
-            console.error(`⚠️  workday: ${entry.name} slice ${facet.facetParameter}=${value.id} failed on its first page after ${attempts} attempts: ${err.message}`);
-            splitIncomplete = true;
-            continue;
+        // Slices go out in bounded-concurrency chunks rather than one at a
+        // time. They are independent queries against the same tenant, so the
+        // serial version spent the whole recovery phase waiting: a 100-slice
+        // board is 100 round trips end to end, each one carrying up to
+        // RETRY_POLICY.retries + 1 attempts when Workday answers a slice with a
+        // 502. Chunked rather than fully parallel — each chunk is awaited
+        // before the next is dispatched — so the burst against one host stays
+        // bounded and INTER_PAGE_DELAY_MS still paces the tenant between bursts.
+        //
+        // **The budgets stay exact, and that rests on dispatch order.**
+        // `slicesSpent++` here and `pagesSpent++` at the top of runQuery are
+        // both synchronous reservations taken before that function's first
+        // await, so two slices can never both pass a check only one had budget
+        // for. That holds ONLY while nothing is awaited between the checks and
+        // the runQuery call — which is why the sleep moved out of this loop and
+        // the call below is not awaited in place. Reintroducing an await there
+        // would let a chunk overshoot MAX_SPLIT_SLICES and the page budget by up
+        // to SPLIT_SLICE_CONCURRENCY - 1.
+        //
+        // Results are absorbed in facet-value order, never completion order, so
+        // which slice answers first cannot change what the tenant returns.
+        const sliceValues = facet.values;
+        let dispatchStopped = false;
+        for (let i = 0; i < sliceValues.length && !dispatchStopped; i += SPLIT_SLICE_CONCURRENCY) {
+          const inFlight = [];
+          for (const value of sliceValues.slice(i, i + SPLIT_SLICE_CONCURRENCY)) {
+            if (slicesSpent >= MAX_SPLIT_SLICES) { splitIncomplete = true; dispatchStopped = true; break; }
+            if (pagesSpent >= pageBudget) { splitIncomplete = true; dispatchStopped = true; break; }
+            slicesSpent++;
+            const nextApplied = { ...applied, [facet.facetParameter]: [value.id] };
+            // runQuery()'s page-0 fetch is unguarded — fine for the one page-0 of
+            // an ordinary board, but here it runs once per slice against a tenant
+            // that is by definition large, which is where a WAF or rate limiter
+            // lives. Letting it throw would abandon the whole tenant including
+            // the unfaceted crawl already absorbed into `out`, so a dead slice
+            // becomes an incomplete split and the rest of the partition is still
+            // tried. Same accounting as a slice that died mid-pagination. The
+            // rejection is captured here rather than left to Promise.all, which
+            // would discard the siblings that answered.
+            inFlight.push({
+              value,
+              nextApplied,
+              settled: runQuery(nextApplied).then(
+                (result) => ({ result }),
+                (err) => ({ err }),
+              ),
+            });
           }
-          await split(
-            sliceResult,
-            nextApplied,
-            depth + 1,
-            [...excluded, facet.facetParameter],
-          );
+          if (inFlight.length === 0) break;
+          const settled = await Promise.all(inFlight.map((slice) => slice.settled));
+          for (let k = 0; k < inFlight.length; k++) {
+            const { err, result } = settled[k];
+            if (err) {
+              const attempts = err.attempts ?? RETRY_POLICY.retries + 1;
+              console.error(`⚠️  workday: ${entry.name} slice ${facet.facetParameter}=${inFlight[k].value.id} failed on its first page after ${attempts} attempts: ${err.message}`);
+              splitIncomplete = true;
+              transientFailure = true;
+              continue;
+            }
+            await split(
+              result,
+              inFlight[k].nextApplied,
+              depth + 1,
+              [...excluded, facet.facetParameter],
+            );
+          }
+          if (!dispatchStopped && i + SPLIT_SLICE_CONCURRENCY < sliceValues.length) {
+            await sleep(INTER_PAGE_DELAY_MS, ctx);
+          }
         }
       };
 
@@ -734,6 +851,16 @@ export default {
     // A split that could not reach the whole board is the same kind of partial
     // result, and scan-ats-full.mjs already knows how to report that tag.
     if (splitIncomplete || budgetExhausted) jobs.workdayTruncated = true;
+    // Truncated is not the same as retryable, and conflating them was costly.
+    // scan-ats-full.mjs re-fetches every workdayTruncated board sequentially
+    // after the parallel sweep — the whole board again, one at a time — which
+    // only helps when the first attempt lost to load. A board truncated by the
+    // slice cap, the page budget or an out-of-scope location comes back
+    // truncated for the identical reason: on the 2026-09-23 sweep that queue
+    // held 41 boards and cost roughly half an hour to recover nothing. So the
+    // retry is gated on this tag, set only by a fetch error; `workdayTruncated`
+    // keeps meaning "not fully covered" for reporting.
+    if (stopReason === 'fetch-error' || transientFailure) jobs.workdayRetryable = true;
 
     return jobs;
   },
