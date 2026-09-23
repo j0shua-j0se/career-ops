@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pass, fail } from './helpers.mjs';
-import { boardKey, loadDeadBoards, recordBoardResult, saveDeadBoards, shouldSkipDeadBoard } from '../dead-boards.mjs';
+import { boardKey, isBoardNotFound, loadDeadBoards, recordBoardResult, saveDeadBoards, shouldSkipDeadBoard } from '../dead-boards.mjs';
 
 console.log('\nPersistent dead-board memory (#2840)');
 const root = mkdtempSync(join(tmpdir(), 'career-ops-dead-boards-'));
@@ -54,6 +54,33 @@ try {
   recordBoardResult(partial, 'lever', board, 500, now);
   if (!partial.has(`lever\t${board}`)) pass('transient errors clear partial 404 progress');
   else fail('transient errors kept partial 404 progress');
+
+  // Workday answers a tenant that no longer exists with 422, never 404. Until
+  // this was recognised, ~7,000 dead Workday tenants were re-contacted on every
+  // sweep and only 120 ever entered the ledger.
+  const wd = new Map();
+  const deadTenant = 'https://gone.wd1.myworkdayjobs.com/external';
+  recordBoardResult(wd, 'workday', deadTenant, 422, now);
+  recordBoardResult(wd, 'workday', deadTenant, 422, now);
+  recordBoardResult(wd, 'workday', deadTenant, 422, now);
+  if (shouldSkipDeadBoard(wd, 'workday', deadTenant, now)) pass('three Workday 422s retire the tenant, exactly like three 404s');
+  else fail('Workday 422 did not advance the dead-board counter');
+  recordBoardResult(wd, 'workday', deadTenant, 200, now);
+  if (!shouldSkipDeadBoard(wd, 'workday', deadTenant, now)) pass('a Workday tenant that answers again is un-retired');
+  else fail('a live Workday response left the tenant retired');
+
+  // Scoped per ATS: another provider's 422 is a malformed query, not a
+  // missing board, and must behave like any other non-404 failure.
+  const other = new Map();
+  recordBoardResult(other, 'lever', board, 422, now);
+  if (!other.has(`lever\t${board}`)) pass("a 422 from a non-Workday ATS never counts as a dead board");
+  else fail('a non-Workday 422 was recorded as a dead-board miss');
+  if (isBoardNotFound('workday', 422) && isBoardNotFound('workday', 404)
+    && !isBoardNotFound('workday', 500) && !isBoardNotFound('lever', 422) && isBoardNotFound('ashby', 404)) {
+    pass('isBoardNotFound: 404 everywhere, 422 only for Workday, never a 5xx');
+  } else {
+    fail('isBoardNotFound misclassified a status');
+  }
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
