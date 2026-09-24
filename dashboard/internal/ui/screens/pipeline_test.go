@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/santifer/career-ops/dashboard/internal/data"
 	"github.com/santifer/career-ops/dashboard/internal/model"
 	"github.com/santifer/career-ops/dashboard/internal/theme"
 )
@@ -222,6 +223,36 @@ func TestOpenURLKeyEmitsTrackerURL(t *testing.T) {
 	}
 	if msg.URL != jobURL {
 		t.Fatalf("opened URL = %q, want %q", msg.URL, jobURL)
+	}
+}
+
+func TestOpenURLKeyOnStepStoneRowEmitsEmployerSearchURL(t *testing.T) {
+	const jobURL = "https://www.stepstone.de/stellenangebote--Triage-Engineer--1234.html"
+	apps := []model.CareerApplication{
+		{Company: "Acme", Role: "Triage Engineer", Status: "Evaluated", Score: 4.0, JobURL: jobURL},
+	}
+	pm := NewPipelineModel(theme.NewTheme("catppuccin-mocha"), apps, model.PipelineMetrics{Total: 1}, "..", 120, 40)
+	pm.viewMode = "flat"
+	pm.applyFilterAndSort()
+
+	pm, cmd := pm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if cmd == nil {
+		t.Fatal("expected an open command for the employer search fallback")
+	}
+	msg, ok := cmd().(PipelineOpenURLMsg)
+	if !ok {
+		t.Fatalf("command returned %T, want PipelineOpenURLMsg", cmd())
+	}
+
+	wantURL := data.EmployerSearchURL("Acme", "Triage Engineer")
+	if msg.URL != wantURL {
+		t.Fatalf("opened URL = %q, want employer search URL %q", msg.URL, wantURL)
+	}
+	if msg.URL == jobURL {
+		t.Fatal("expected the blocked StepStone URL NOT to be opened directly")
+	}
+	if !strings.Contains(pm.flash, "StepStone") {
+		t.Fatalf("expected flash message to mention StepStone, got %q", pm.flash)
 	}
 }
 

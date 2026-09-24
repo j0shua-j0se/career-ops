@@ -608,6 +608,13 @@ func (m PipelineModel) handleKey(msg tea.KeyMsg) (PipelineModel, tea.Cmd) {
 				m.flash = "No URL found for this application"
 				break
 			}
+			if data.IsBlockedAggregatorURL(app.JobURL) {
+				m.flash = "StepStone blocks this browser — opened an employer search instead"
+				searchURL := data.EmployerSearchURL(app.Company, app.Role)
+				return m, func() tea.Msg {
+					return PipelineOpenURLMsg{URL: searchURL}
+				}
+			}
 			return m, func() tea.Msg {
 				return PipelineOpenURLMsg{URL: app.JobURL}
 			}
@@ -1775,8 +1782,18 @@ func (m PipelineModel) renderAppLine(app model.CareerApplication, selected bool)
 	scoreStyle := m.scoreStyle(app.Score)
 	score := scoreStyle.Render(fmt.Sprintf("%.1f", app.Score))
 
-	// Company (truncate)
-	company := truncateRunes(app.Company, cw.company)
+	// Company (truncate). Blocked-aggregator rows (e.g. StepStone, which
+	// answers the user's own browser with "403 Zugriff verweigert") get a
+	// small unobtrusive prefix so the dead click is visible before opening
+	// the detail view. There is no dedicated URL/indicator column to place
+	// this in, so it rides in the existing company cell's truncation budget
+	// — the cell is still rendered/truncated to exactly cw.company, so
+	// column widths and alignment are unaffected.
+	companyText := app.Company
+	if data.IsBlockedAggregatorURL(app.JobURL) {
+		companyText = "⊘ " + companyText
+	}
+	company := truncateRunes(companyText, cw.company)
 	companyStyle := lipgloss.NewStyle().Foreground(m.theme.Text).Width(cw.company)
 
 	// Date (fixed width)
@@ -1888,6 +1905,21 @@ func (m PipelineModel) renderPreview() string {
 	}
 	if len(facts) > 0 {
 		lines = append(lines, padStyle.Render(strings.Join(facts, "   ")))
+	}
+
+	// URL line — flags a blocked aggregator (e.g. StepStone, which answers
+	// the user's own browser with "403 Zugriff verweigert") so the dead
+	// click is visible before pressing `o`, which itself falls back to an
+	// employer search for these rows.
+	if app.JobURL != "" {
+		urlText := app.JobURL
+		urlValueStyle := valueStyle
+		if data.IsBlockedAggregatorURL(app.JobURL) {
+			urlText = "⊘ StepStone (blocked) — " + app.JobURL
+			urlValueStyle = lipgloss.NewStyle().Foreground(m.theme.Red)
+		}
+		lines = append(lines, padStyle.Render(
+			labelStyle.Render("URL: ")+urlValueStyle.Render(truncateRunes(urlText, m.width-10))))
 	}
 
 	outcome := previewOutcome(app)

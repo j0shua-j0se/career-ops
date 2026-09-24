@@ -23,6 +23,8 @@
  * 18. Duplicate reports hidden behind an employer-name variant, a shared req/job/
  *     posting ID, or an identical posting URL (warning — see the ZEISS 012/043 gap)
  * 19. Duplicate tracker rows in the window before a report exists (warning)
+ * 20. Open tracker rows (status still Evaluated) pointing at a blocked
+ *     job-board host, e.g. stepstone.de (warning)
  *
  * Run: node career-ops/verify-pipeline.mjs
  */
@@ -38,7 +40,7 @@ import {
 } from './tracker-parse.mjs';
 import { REQ_NUMBER_RE } from './tracker-parse.mjs';
 import { CONTROL_CHARS } from './tracker-utils.mjs';
-import { checkTrackerSync } from './tracker-sync-check.mjs';
+import { checkTrackerSync, loadLifecycle, normalizeStatus } from './tracker-sync-check.mjs';
 import { checkFollowupsSchema } from './stats.mjs';
 
 const CODE_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -126,6 +128,7 @@ for (const line of lines) {
     pdf: parts[COLMAP.pdf],
     report: parts[COLMAP.report],
     notes: COLMAP.notes != null ? (parts[COLMAP.notes] || '') : '',
+    url: COLMAP.url != null ? (parts[COLMAP.url] || '') : '',
   });
 }
 
@@ -1189,6 +1192,51 @@ for (let i = 0; i < lines.length; i++) {
   controlByteRows++;
 }
 if (controlByteRows === 0) ok('No control characters in tracker cells');
+
+// --- Check 20: open tracker rows pointing at a blocked job-board host ---
+// StepStone began answering HTTP 403 to both the user's own browser and this
+// machine on 2026-09-23; the portals.yml StepStone board and search_queries
+// were disabled 2026-09-24 so no new StepStone requests go out. This check is
+// the other half: a StepStone URL already sitting in a tracker row that the
+// user cannot open. A dated exported list (below) rather than a bare literal
+// so a future blocked board is one line, not a new check.
+//
+// Only rows still "Evaluated" are flagged. Per templates/states.yml's
+// lifecycle order (LIFECYCLE_ORDER, non-terminal states in file order) and
+// `terminal` flags, that is every non-terminal state EXCEPT "applied" and
+// whatever comes after it (Applied/Responded/Interview) — those rows already
+// moved past the posting URL being actionable, the same way the row itself
+// records that the user acted through some other channel before the 403
+// started. A terminal row (Offer/Hired/Rejected/Discarded/SKIP) is already
+// resolved and flagging it would just be noise the user can never clear.
+export const BLOCKED_JOB_BOARD_HOSTS = ['stepstone.de'];
+
+/** @param {string} rawUrl @returns {boolean} whether rawUrl's host is blocked. */
+function isBlockedJobBoardUrl(rawUrl) {
+  let hostname;
+  try {
+    hostname = new URL(String(rawUrl || '').trim()).hostname.toLowerCase();
+  } catch {
+    return false; // blank/unparseable — not this check's problem to report.
+  }
+  return BLOCKED_JOB_BOARD_HOSTS.some((h) => hostname === h || hostname.endsWith(`.${h}`));
+}
+
+const { order: LIFECYCLE_ORDER } = loadLifecycle(STATES_FILE);
+const appliedIdx = LIFECYCLE_ORDER.indexOf('applied');
+// Non-terminal AND strictly before "applied" in the lifecycle order. Derived
+// from states.yml rather than hardcoded to "evaluated" so a states.yml
+// reorder or a new pre-Applied state can't silently desync this check.
+const OPEN_STATUSES = new Set(appliedIdx === -1 ? LIFECYCLE_ORDER : LIFECYCLE_ORDER.slice(0, appliedIdx));
+
+let blockedBoardRows = 0;
+for (const e of entries) {
+  if (!OPEN_STATUSES.has(normalizeStatus(e.status))) continue;
+  if (!isBlockedJobBoardUrl(e.url)) continue;
+  warn(`#${e.num} ${e.company}: URL is a StepStone listing (blocked for the user) — repoint to the employer's own posting or close the row`);
+  blockedBoardRows++;
+}
+if (blockedBoardRows === 0) ok('No open tracker rows point at a blocked job-board host');
 
 // --- Summary ---
 console.log('\n' + '='.repeat(50));
