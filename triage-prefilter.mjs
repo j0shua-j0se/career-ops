@@ -784,6 +784,94 @@ export const HARD_DQ = [
   },
 ];
 
+// ── Title-level seniority / full-time classifier (2026-09-29) ───────────────
+// Measured on the 2026-09-29 loop: about 30% of 85 paid triage verdicts read
+// "full-time/senior role cannot run alongside a full-time MSc" — a verdict the
+// TITLE already carried. This is the zero-token version of that cut.
+//
+// It complements HARD_DQ, whose `seniority` rule already drops senior / sr /
+// lead / principal / staff / head of / director / chief / vp / *leitung and
+// roman-numeral levels. What HARD_DQ lacked, and this adds: manager, architect,
+// distinguished, expert, consultant/berater, mid-level, "N+ years", and Trainee
+// programmes. `vocational` (Ausbildung / duales Studium) is repeated here so the
+// classifier is complete on its own and testable without rankEntry.
+//
+// STUDENT MARKER GUARD: a title carrying any student marker is NEVER skipped by
+// this classifier — "Werkstudent Consulting", "Praktikum Projektmanager-
+// Assistenz", "Working Student Product Manager" all describe the part-time
+// contract this search is built around, and the manager/consultant word names
+// the team, not the seat. "Trainee" is deliberately NOT a guard word: it is a
+// full-time graduate programme, which is exactly what this rule exists to drop.
+// (`trainee` stays in STUDENT_RE for the ranking tiers; the two lists answer
+// different questions.)
+export const STUDENT_GUARD_RE = /(?<![a-zäöüß])(werkstudent\w*|working[- ]student\w*|praktik(um|ant\w*)|internship\w*|intern|hiwi|hilfskraft|hilfskr[äa]fte|thesis|abschlussarbeit\w*|masterarbeit\w*|student\w*)(?![a-zäöüß])/i;
+
+export const FULLTIME_TITLE_RULES = [
+  {
+    id: 'senior',
+    re: /(?<![a-zäöüß])(senior|sr\.?|lead|principal|staff|head of|director|chief|vp|distinguished|leiter\w*|leitung)(?![a-zäöüß])/i,
+  },
+  {
+    // No left boundary on purpose: "Projektmanager", "Productmanager",
+    // "Datenmanager" are managers too. Right boundary keeps "Managerin"/"Managers"
+    // in and "Managementassistenz" out (that is a support seat, and 'management'
+    // alone is a department word, not a seat).
+    id: 'manager',
+    re: /manager(in|innen|s)?(?![a-zäöüß])/i,
+  },
+  {
+    id: 'architect',
+    // Left boundary omitted so "Softwarearchitekt" / "Datenarchitekt" match;
+    // the right boundary keeps "Architecture" (a domain word) out.
+    re: /architects?(?![a-zäöüß])|architekt(in|innen|en)?(?![a-zäöüß])/i,
+  },
+  {
+    // "Expert" as a seat ("SAP Expert", "Data Expert"), not "Expertise".
+    id: 'expert',
+    re: /(?<![a-zäöüß])(expert(e|en|in|s)?)(?![a-zäöüß])/i,
+  },
+  {
+    id: 'consultant',
+    re: /(?<![a-zäöüß])(consultants?|beraterin|berater|beraterinnen)(?![a-zäöüß])|(?<=[a-zäöüß])berater(in)?(?![a-zäöüß])/i,
+  },
+  {
+    id: 'mid-level',
+    re: /(?<![a-zäöüß])(mid[- ]?level|mid[- ]senior|intermediate)(?![a-zäöüß])/i,
+  },
+  {
+    // "5+ years", "3+ Jahre", "3-5 years", "5 years of experience". A bare
+    // "3 years" is not matched: it is as often a contract length.
+    id: 'years-required',
+    re: /(?<![\d.])\d{1,2}\s*\+\s*(years?|yrs?|jahre\w*)|(?<![\d.])\d{1,2}\s*[-–]\s*\d{1,2}\s*(years?|yrs?|jahre\w*)|(?<![\d.])\d{1,2}\s*(years?|yrs?|jahre\w*)\s*(of\s+)?(experience|erfahrung|berufserfahrung)/i,
+  },
+  {
+    id: 'programme',
+    re: /(?<![a-zäöüß])(trainee\w*|ausbildung|auszubildende\w*|duales? studium|duale[rn]? student\w*|berufsausbildung|volontariat|volont[äa]r\w*)(?![a-zäöüß])/i,
+  },
+];
+
+export const FULLTIME_TITLE_REASON = 'Title: senior/full-time role (zero-token)';
+
+/**
+ * Title-only cut for senior / experienced / full-time-programme roles.
+ * Pure and title-only, so the loop can apply it before any worker sees the row.
+ *
+ * @param {string} title
+ * @returns {{skip: boolean, rule: string|null, reason: string|null}}
+ */
+export function classifyFullTimeTitle(title) {
+  const t = typeof title === 'string' ? title : '';
+  if (!t.trim()) return { skip: false, rule: null, reason: null };
+  // The guard always wins here. "dualer Student" is the one student-worded
+  // vocational title, and HARD_DQ's `vocational` rule (which runs regardless)
+  // still drops it in rankEntry.
+  if (STUDENT_GUARD_RE.test(t)) return { skip: false, rule: null, reason: null };
+  for (const rule of FULLTIME_TITLE_RULES) {
+    if (rule.re.test(t)) return { skip: true, rule: rule.id, reason: FULLTIME_TITLE_REASON };
+  }
+  return { skip: false, rule: null, reason: null };
+}
+
 /**
  * Off-stack cores, mirroring the "Core stack outside the CV" bullet in the
  * modes/_brief.md Hard DQ list, which tests/triage-prefilter.test.mjs pins.
@@ -846,6 +934,11 @@ export function rankEntry(entry) {
   for (const rule of HARD_DQ) {
     if (rule.re.test(title)) return drop(rule.reason);
   }
+  // Senior / manager / architect / consultant / "N+ years" / Trainee programme:
+  // a title-level "cannot run alongside a full-time MSc" verdict, never applied
+  // to a title with a student marker (see STUDENT_GUARD_RE).
+  const fullTime = classifyFullTimeTitle(title);
+  if (fullTime.skip) return drop(fullTime.reason);
   if (STACK_FLAG_RE.test(title)) return drop('core stack outside the CV');
 
   const tech = TECH_RE.test(title);
@@ -1804,6 +1897,37 @@ function selfTest() {
   check(classifyReach('Remote, Wuerzburg or Taiwan') === 'remote', 'a transliterated German city is a German marker that keeps a dual-scope remote cell reachable');
   check(classifyReach('Remote, Muenchen') === 'munich', 'a transliterated Munich in a remote cell resolves like "Remote, München" (city tier first)');
   check(classifyReach('Israel') !== 'munich' && classifyReach('Israel') !== 'home', '"ae" inside a foreign word is not folded into a home/munich city');
+
+  // ── 2026-09-29: title-level seniority / full-time classifier ──
+  const ftSkip = (t) => classifyFullTimeTitle(t).skip;
+  for (const t of ['Senior Data Scientist', 'Sr. Software Engineer', 'Lead Data Engineer', 'Principal Engineer', 'Staff Machine Learning Engineer',
+    'Head of Data', 'Director of AI', 'Engineering Manager', 'Projektmanager KI (m/w/d)', 'Product Manager Data', 'Solutions Architect',
+    'Softwarearchitekt (m/w/d)', 'Distinguished Engineer', 'Data Expert (m/w/d)', 'Experte für Machine Learning', 'Consultant Data & AI (m/w/d)',
+    'IT-Berater (m/w/d)', 'Unternehmensberater Analytics', 'Data Analyst (Senior)', 'Mid-level Data Analyst', 'Data Engineer (Mid Level)',
+    'Data Scientist 5+ years experience', 'ML Engineer (3+ Jahre Berufserfahrung)', 'Analyst, 3-5 years', 'Duales Studium Informatik',
+    'Ausbildung Fachinformatiker Anwendungsentwicklung', 'Trainee Data Science (m/w/d)', 'Traineeprogramm Künstliche Intelligenz', 'Management Trainee Analytics']) {
+    check(ftSkip(t) === true, `title rule skips "${t}"`);
+  }
+  check(classifyFullTimeTitle('Senior Data Scientist').reason === 'Title: senior/full-time role (zero-token)', 'the reason string is the documented one');
+  // A student marker always wins — the part-time contract is the target.
+  for (const t of ['Werkstudent Consulting (m/w/d)', 'Werkstudent Project Manager Data (m/w/d)', 'Working Student Product Manager', 'Werkstudentin Data Architect',
+    'Praktikum Consultant Data & AI', 'Praktikant Projektmanagement Assistenz', 'Intern - Senior Leadership Analytics', 'Internship Engineering Manager Support',
+    'HiWi Expert Systems', 'Hilfskraft Beratung Lead Generation', 'Masterarbeit Architect Data Platform', 'Abschlussarbeit Consultant KI', 'Thesis: Manager Analytics',
+    'Studentische Hilfskraft Data Expert', 'Student (m/w/d) Senior Analytics Support', 'Werkstudent (m/w/d) Data Science – 3+ years of Python']) {
+    check(ftSkip(t) === false, `title rule never skips a student-marked title: "${t}"`);
+  }
+  // Ordinary technical titles and ambiguous words stay untouched.
+  for (const t of ['Data Analyst', 'Machine Learning Engineer (m/w/d)', 'Junior Data Scientist', 'AI Engineer', 'Software Engineer Internal Tools',
+    'Managementassistenz Data', 'Expertise Data Platform Engineer', 'International Data Analyst', 'Python Developer, 3 year contract', 'Data Analyst Berlin']) {
+    check(ftSkip(t) === false, `title rule leaves "${t}" alone`);
+  }
+  check(ftSkip('') === false && ftSkip(undefined) === false, 'an empty or missing title is never skipped by the title rule');
+  // Wired into rankEntry: skip with the title-rule reason, student rows untouched.
+  const rTitle = rankEntry({ title: 'Consultant Data Management & Machine Learning (m/w/d)', location: 'Erlangen' });
+  check(rTitle.bucket === 'skip' && rTitle.reason === 'Title: senior/full-time role (zero-token)', 'rankEntry drops a full-time consultant title at home base with the title-rule reason');
+  check(rankEntry({ title: 'Werkstudent Consulting Data Analytics (m/w/d)', location: 'Erlangen' }).bucket !== 'skip', 'rankEntry keeps a Werkstudent Consulting row');
+  check(rankEntry({ title: 'Working Student Project Manager Data', location: 'München' }).bucket !== 'skip', 'rankEntry keeps a Working Student Project Manager row');
+  check(rankEntry({ title: 'AI Architect', location: 'Munich' }).bucket === 'skip', 'rankEntry drops an AI Architect row');
 
   console.log(failures === 0 ? '\nALL SELF-TESTS PASSED' : `\n${failures} SELF-TEST FAILURE(S)`);
   return failures === 0 ? 0 : 1;
