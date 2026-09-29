@@ -2230,7 +2230,14 @@ function main() {
         const url = (/^\*\*URL:\*\*\s*(\S+)/m.exec(txt) || [])[1];
         if (!url) continue;
         const score = (/^\*\*Score:\*\*\s*([\d.]+)/m.exec(txt) || [])[1] ?? '?';
-        const pdf = !/^\*\*PDF:\*\*\s*(?:not generated|pending|—|-)\s*$/im.test(txt);
+        // Positive evidence only: a ✅ or a .pdf path in the header. The old
+        // test (anything except a bare "not generated"/"pending" line) read
+        // "**PDF:** not generated — no kit built yet (...)" as a PDF, because
+        // the trailing explanation defeated its end-of-line anchor
+        // (2026-09-29: three evaluators hand-corrected PDF ✅ → ❌).
+        const pdfLine = (/^\*\*PDF:\*\*[^\S\n]*(.*)$/m.exec(txt) || [])[1] ?? '';
+        const pdf = !/^(?:not generated|pending|none|no\b|n\/a|—|-|❌)/i.test(pdfLine.trim())
+          && /✅|\.pdf\b/i.test(pdfLine);
         byUrl.set(url, { num: f.slice(0, 3), score, pdf });
       }
     }
