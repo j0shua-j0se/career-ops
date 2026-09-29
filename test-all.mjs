@@ -18189,11 +18189,13 @@ try {
     fail('docs/SCRIPTS.md missing the exit-code semantics for check-table-freshness');
   }
 
-  const agentsDoc = readFile('AGENTS.md');
+  // The script catalog lives in the on-demand reference map
+  // (docs/agents/project-map.md), not in the always-loaded AGENTS.md.
+  const agentsDoc = readFile('AGENTS.md') + readFile('docs/agents/project-map.md');
   if (agentsDoc.includes('`check-table-freshness.mjs`')) {
-    pass('AGENTS.md Main Files table lists check-table-freshness.mjs');
+    pass('project map Main Files table lists check-table-freshness.mjs');
   } else {
-    fail('AGENTS.md Main Files table missing check-table-freshness.mjs');
+    fail('project map Main Files table missing check-table-freshness.mjs');
   }
 
   // Read-only import boundary: the ONLY fs capabilities the script may hold

@@ -31,6 +31,9 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const AGENT_DOCS = [
   'AGENTS.md', 'CLAUDE.md', 'CODEX.md', 'OPENCODE.md',
   'GEMINI.md', 'KIMI.md', 'DATA_CONTRACT.md',
+  // The script catalog AGENTS.md points at (progressive disclosure): a stale
+  // name here misleads exactly as it did when the catalog lived in AGENTS.md.
+  'docs/agents/project-map.md',
 ];
 
 // Backticked only. Prose can discuss a script that a user might write, and a
