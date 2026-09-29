@@ -149,7 +149,7 @@ const HOME_CITY_RE = /(?<![a-zäöüß])(erlangen|n[üu]rnberg|nuremberg|f[üu]r
 // short of Gilching or Starnberg: real places, but a materially longer commute
 // than anything else in this list, so they are left to the 'unknown' fallback
 // (fix (b) below) rather than asserted as reachable.
-const MUNICH_CITY_RE = /(?<![a-zäöüß])(m[üu]nchen|munich|garching|ismaning|unterf[öo]hring|neubiberg|ottobrunn|taufkirchen|unterhaching|oberhaching|gr[üu]nwald|planegg|martinsried|oberschlei[ßs]heim|unterschlei[ßs]heim|freising|dachau|eching|haar|pullach|feldkirchen|aschheim|kirchheim bei m[üu]nchen|poing|gr[äa]felfing|germering|puchheim)(?![a-zäöüß])/i;
+const MUNICH_CITY_RE = /(?<![a-zäöüß])(m[üu]nchen|munich|garching|ismaning|unterf[öo]hring|neubiberg|ottobrunn|taufkirchen|unterhaching|oberhaching|gr[üu]nwald|planegg|martinsried|oberschlei(?:ß|ss|s)heim|unterschlei(?:ß|ss|s)heim|parsdorf|vaterstetten|freising|dachau|eching|haar|pullach|feldkirchen|aschheim|kirchheim bei m[üu]nchen|poing|gr[äa]felfing|germering|puchheim)(?![a-zäöüß])/i;
 
 // Deliberately narrow: "de" is not in here. It matches inside ordinary foreign
 // location strings ("Ciudad de México") and would file them as German.
@@ -296,7 +296,7 @@ const FOREIGN_REGION_RE = new RegExp(
 // REMOTE_TITLE_RE: scan.mjs has top-level side effects (see
 // providers/_registry.mjs), so importing it to reuse one regex would run a
 // scanner as a side effect of a prefilter. Keep the two in sync by hand.
-const REMOTE_RE = /(?<![a-zäöüß])(remote|home ?office|telearbeit|ortsunabh[äa]ngig|deutschlandweit)(?![a-zäöüß])/i;
+const REMOTE_RE = /(?<![a-zäöüß])(remote|home ?office|telearbeit|ortsunabh[äa]ngig|deutschlandweit|bundesweit)(?![a-zäöüß])/i;
 const REMOTE_NEGATED_RE = /(?<![a-zäöüß])(non|not|no|kein|nicht)[^a-zäöüß]*remote/i;
 
 // German postal codes for the reachable regions. Ranges rather than a keyword
@@ -666,6 +666,104 @@ export function classifyReach(location, title = '', url = '') {
   return 'unknown';
 }
 
+// ── Reverse-ATS sweep gate (2026-09-29) ─────────────────────────────────────
+// scan-ats-full.mjs sweeps ~38k companies of UNKNOWN geography and, until now,
+// judged each posting only with portals.yml's `location_filter`. That filter is
+// built to be lenient (an empty location passes; "Remote"/"Hybrid" sit in its
+// `allow` list), so on 2026-09-29 a Workday+Ashby sweep added 52 postings and
+// none was useful: US tenants ("Remote MO", "Other Remote NY", /job/Remote-US/)
+// and bare "Remote" roles whose employer is US or Indian — a bare "Remote"
+// carries no evidence of where the seat is, and here there is no curated
+// company list to vouch for the employer. classifyReach already knew most of
+// these were unreachable; the sweep never asked it.
+//
+// The gate below is deliberately STRICTER than classifyReach for one case:
+// classifyReach treats an unqualified "Remote" as reachable (right for a
+// hand-picked portal); the sweep requires the remote to be scoped to Germany /
+// Deutschland / DE / EU / Europe / DACH / EMEA or a German place ("remote-DE").
+
+// Scopes that make a remote posting reachable from Erlangen. Anchored the same
+// way as the other reach regexes: "eu" must not match inside a word, and the
+// two-letter "de" only counts in capitals ("Ciudad de México" is not Germany).
+const REMOTE_REACHABLE_SCOPE_RE = /(?<![a-zäöüß])(germany|deutschland|deu|dach|emea|europe|europa|eu|eea)(?![a-zäöüß])/i;
+const REMOTE_DE_CODE_RE = /(?<![A-Za-z0-9])DE(?![A-Za-z0-9])/;
+
+function explicitReachableScope(text) {
+  const t = String(text ?? '');
+  return REMOTE_REACHABLE_SCOPE_RE.test(t) || REMOTE_DE_CODE_RE.test(t)
+    || testDe(HOME_CITY_RE, t) || testDe(MUNICH_CITY_RE, t) || testDe(OTHER_DE_CITY_RE, t);
+}
+
+/**
+ * classifyReach for a job, plus the one thing classifyReach refuses to do: when
+ * the location cell is uninformative ("3 Locations") and the Workday
+ * /job/<segment>/ names a HOME or MUNICH place, use it. classifyReach lets a
+ * URL move a verdict only towards 'abroad' — a rule that protects the
+ * curated-inbox path — but a sweep that cannot use "Nuremberg-Germany" to keep
+ * a YouGov Werkstudent posting would drop exactly the postings it exists to find.
+ * The URL still never confers 'remote'.
+ *
+ * @param {{location?: string, title?: string, url?: string}} job
+ * @returns {{reach: string, via: 'location'|'url', segment: string}}
+ */
+export function sweepReach(job) {
+  const loc = typeof job?.location === 'string' ? job.location : '';
+  const title = typeof job?.title === 'string' ? job.title : '';
+  const url = typeof job?.url === 'string' ? job.url : '';
+  const reach = classifyReach(loc, title, url);
+  const { locationSegment } = locationTextFromUrl(url);
+  const segment = locationSegment.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (UNINFORMATIVE_LOCATION_RE.test(loc) && segment) {
+    const fromUrl = classifyReach(segment);
+    if (fromUrl === 'home' || fromUrl === 'munich') return { reach: fromUrl, via: 'url', segment };
+  }
+  return { reach, via: 'location', segment };
+}
+
+/**
+ * Should the reverse-ATS sweep keep this posting? Home and Munich always;
+ * remote only when explicitly scoped to Germany/EU/Europe/DACH/EMEA or a German
+ * place; everything else — abroad, elsewhere-in-Germany on-site, bare "Remote",
+ * "N Locations" with no German evidence — is dropped.
+ *
+ * `alwaysAllow` (portals.yml location_filter.always_allow) rescues an 'unknown'
+ * verdict whose location names one of the user's own home regions ("Bayern",
+ * "Mittelfranken"), which the location filter already vouched for by name.
+ *
+ * @param {{location?: string, title?: string, url?: string}} job
+ * @param {{alwaysAllow?: string[]}} [opts]
+ * @returns {{keep: boolean, reach: string, reason: string}}
+ */
+export function sweepReachGate(job, { alwaysAllow = [] } = {}) {
+  const { reach, segment } = sweepReach(job);
+  const loc = typeof job?.location === 'string' ? job.location : '';
+  if (reach === 'home' || reach === 'munich') return { keep: true, reach, reason: `${reach}` };
+  if (reach === 'remote') {
+    if (explicitReachableScope(`${loc} ${segment}`)) return { keep: true, reach, reason: 'remote scoped to Germany/EU/Europe/DACH/EMEA or a German place' };
+    return { keep: false, reach, reason: 'bare remote with no German/EU scope' };
+  }
+  if (reach === 'unknown') {
+    const lowered = loc.toLowerCase();
+    const named = (Array.isArray(alwaysAllow) ? alwaysAllow : []).some((t) => {
+      const term = String(t ?? '').trim().toLowerCase();
+      if (!term || !lowered) return false;
+      const at = lowered.indexOf(term);
+      if (at === -1) return false;
+      const before = lowered[at - 1], after = lowered[at + term.length];
+      return !/[a-zäöüß]/.test(before ?? '') && !/[a-zäöüß]/.test(after ?? '');
+    });
+    if (named) return { keep: true, reach, reason: 'location names one of the always_allow regions' };
+    // A bare regional label ("Europe", "EMEA", "DACH") is what the user's own
+    // location_filter.allow reads as remote-within-the-area. Eastern Europe /
+    // Baltics / Balkans are regions too, but not ones that include Germany.
+    if (REMOTE_REACHABLE_SCOPE_RE.test(loc) && !/eastern europe|baltics|balkans/i.test(loc)) {
+      return { keep: true, reach, reason: 'regional label that includes Germany' };
+    }
+    return { keep: false, reach, reason: 'no German location evidence' };
+  }
+  return { keep: false, reach, reason: reach === 'germany' ? 'elsewhere in Germany, not remote' : 'outside Germany' };
+}
+
 /** Location score from modes/_brief.md "Location Scoring". Remote-in-Germany is 4.5. */
 export const REACH_SCORE = { home: 5.0, remote: 4.5, munich: 4.0, unknown: 2.5, germany: 1.5, abroad: 1.0 };
 
@@ -826,9 +924,13 @@ export const FULLTIME_TITLE_RULES = [
     re: /architects?(?![a-zäöüß])|architekt(in|innen|en)?(?![a-zäöüß])/i,
   },
   {
-    // "Expert" as a seat ("SAP Expert", "Data Expert"), not "Expertise".
+    // English "Expert" as a seat ("SAP Expert", "Data Science Expert"), not
+    // "Expertise" — and NOT the German "Experte/Expertin": tests/prefilter-in-loop
+    // pins the 2026-08-31 qualifier "Mitarbeiter (w/m/d) gesucht als Data Scientist /
+    // Experte für Machine Learning", where the word is one descriptor among
+    // several, not the seat.
     id: 'expert',
-    re: /(?<![a-zäöüß])(expert(e|en|in|s)?)(?![a-zäöüß])/i,
+    re: /(?<![a-zäöüß])(experts?)(?![a-zäöüß])/i,
   },
   {
     id: 'consultant',
@@ -1947,11 +2049,53 @@ function selfTest() {
   check(classifyReach('Remote, Muenchen') === 'munich', 'a transliterated Munich in a remote cell resolves like "Remote, München" (city tier first)');
   check(classifyReach('Israel') !== 'munich' && classifyReach('Israel') !== 'home', '"ae" inside a foreign word is not folded into a home/munich city');
 
+  // ── 2026-09-29: reverse-ATS sweep reach gate ──
+  const gate = (location, url = '', title = 'Data Analyst', alwaysAllow = []) => sweepReachGate({ location, url, title }, { alwaysAllow });
+  const wd = (seg) => `https://acme.wd5.myworkdayjobs.com/en-US/Ext/job/${seg}/Data-Analyst_R1`;
+  // Dropped: the 2026-09-29 sweep's actual shapes.
+  check(gate('Remote MO', wd('Remote-MO')).keep === false, 'sweep gate drops "Remote MO" (US state)');
+  check(gate('Other Remote NY', wd('Other-Remote-NY')).keep === false, 'sweep gate drops "Other Remote NY"');
+  check(gate('Remote', wd('Remote')).keep === false && gate('Remote').reason === 'bare remote with no German/EU scope',
+    'sweep gate drops a bare "Remote" — no evidence of where the seat is');
+  check(gate('Remote Job Posting', wd('Remote-Job-Posting')).keep === false, 'sweep gate drops "Remote Job Posting"');
+  check(gate('Remote Location', wd('Remote-Location')).keep === false, 'sweep gate drops "Remote Location" (US university)');
+  check(gate('Global · Remote').keep === false && gate('Remote, Global').keep === false, 'sweep gate drops global-scoped remote (no German scope)');
+  check(gate('3 Locations', wd('999-REMOTE')).keep === false && gate('3 Locations', wd('999-REMOTE')).reason === 'no German location evidence',
+    'sweep gate drops "N Locations" with no German evidence');
+  check(gate('Taiwan (Remote)').keep === false && gate('United Arab Emirates (remote)').keep === false, 'sweep gate drops foreign-qualified remote');
+  check(gate('Toronto, Canada').keep === false && gate('Palo Alto - Hybrid').keep === false, 'sweep gate drops abroad and unrecognised-foreign places');
+  check(gate('Berlin, Germany').keep === false && gate('Berlin, Germany').reason === 'elsewhere in Germany, not remote',
+    'sweep gate drops on-site elsewhere-in-Germany (the prefilter would skip it anyway)');
+  check(gate('Worldwide').keep === false && gate('Anywhere').keep === false, 'sweep gate drops a bare Worldwide/Anywhere');
+  // Kept.
+  check(gate('Erlangen').keep === true && gate('Nürnberg').keep === true, 'sweep gate keeps home');
+  check(gate('Munich, Germany').keep === true && gate('Muenchen').keep === true, 'sweep gate keeps Munich (incl. ASCII spelling)');
+  check(gate('DEU - Bayern - Unterschleissheim').keep === true, 'Unterschleissheim (double s) is a Munich-ring town');
+  check(gate('Parsdorf, Bavaria, Germany').keep === true, 'Parsdorf (Isar Aerospace) is a Munich-ring town');
+  check(gate('Germany · Remote').keep === true && gate('Remote, Germany').keep === true, 'sweep gate keeps remote scoped to Germany');
+  check(gate('Remote (EU)').keep === true && gate('Remote - Europe').keep === true && gate('Remote, DACH').keep === true && gate('Remote EMEA').keep === true,
+    'sweep gate keeps remote scoped to EU/Europe/DACH/EMEA');
+  check(gate('Remote DE').keep === true, 'sweep gate keeps "Remote DE" (capitals = the ISO code)');
+  check(gate('Berlin · Remote').keep === true, 'sweep gate keeps a German city plus remote');
+  check(gate('Europe').keep === true && gate('EMEA').keep === true, 'a bare regional label that includes Germany is kept (location_filter.allow reads it as remote-in-area)');
+  check(gate('Eastern Europe, Baltics & Balkans').keep === false, 'Eastern Europe / Baltics / Balkans do not include Germany');
+  check(gate('DE Bundesweit').keep === true, '"DE Bundesweit" (Germany nationwide) is reachable');
+  // URL evidence: only towards home/munich, never towards remote.
+  check(gate('3 Locations', wd('Nuremberg-Germany')).keep === true && gate('3 Locations', wd('Nuremberg-Germany')).reach === 'home',
+    'an uninformative cell with a /job/Nuremberg-Germany/ URL is kept as home (YouGov Werkstudent)');
+  check(gate('2 Locations', wd('Munich-Bavaria-Germany')).reach === 'munich', 'a /job/Munich-Bavaria-Germany/ URL is kept as munich');
+  check(classifyReach('3 Locations', 'Werkstudent', wd('Nuremberg-Germany')) === 'unknown', 'classifyReach itself still never moves a verdict towards home from a URL');
+  check(gate('Remote', wd('Remote-Germany')).keep === true, 'a Germany-scoped Workday segment makes a bare "Remote" cell reachable');
+  // always_allow rescue for an unrecognised town the user's own config names.
+  check(gate('Bubenreuth, Bayern').keep === false && gate('Bubenreuth, Bayern', '', 'x', ['Bayern']).keep === true,
+    'an unknown place naming an always_allow region is kept only when the config says so');
+  check(gate('Bubenreuth, Bayernland', '', 'x', ['Bayern']).keep === false, 'always_allow matching is word-bounded');
+
   // ── 2026-09-29: title-level seniority / full-time classifier ──
   const ftSkip = (t) => classifyFullTimeTitle(t).skip;
   for (const t of ['Senior Data Scientist', 'Sr. Software Engineer', 'Lead Data Engineer', 'Principal Engineer', 'Staff Machine Learning Engineer',
     'Head of Data', 'Director of AI', 'Engineering Manager', 'Projektmanager KI (m/w/d)', 'Product Manager Data', 'Solutions Architect',
-    'Softwarearchitekt (m/w/d)', 'Distinguished Engineer', 'Data Expert (m/w/d)', 'Experte für Machine Learning', 'Consultant Data & AI (m/w/d)',
+    'Softwarearchitekt (m/w/d)', 'Distinguished Engineer', 'Data Expert (m/w/d)', 'LAB IT Expert für HPC-, KI- und Forschungsinfrastruktur', 'Consultant Data & AI (m/w/d)',
     'IT-Berater (m/w/d)', 'Unternehmensberater Analytics', 'Data Analyst (Senior)', 'Mid-level Data Analyst', 'Data Engineer (Mid Level)',
     'Data Scientist 5+ years experience', 'ML Engineer (3+ Jahre Berufserfahrung)', 'Analyst, 3-5 years', 'Duales Studium Informatik',
     'Ausbildung Fachinformatiker Anwendungsentwicklung', 'Trainee Data Science (m/w/d)', 'Traineeprogramm Künstliche Intelligenz', 'Management Trainee Analytics']) {
@@ -1967,7 +2111,8 @@ function selfTest() {
   }
   // Ordinary technical titles and ambiguous words stay untouched.
   for (const t of ['Data Analyst', 'Machine Learning Engineer (m/w/d)', 'Junior Data Scientist', 'AI Engineer', 'Software Engineer Internal Tools',
-    'Managementassistenz Data', 'Expertise Data Platform Engineer', 'International Data Analyst', 'Python Developer, 3 year contract', 'Data Analyst Berlin']) {
+    'Managementassistenz Data', 'Expertise Data Platform Engineer',
+    'Mitarbeiter (w/m/d) gesucht als Data Scientist / Experte für Machine Learning', 'International Data Analyst', 'Python Developer, 3 year contract', 'Data Analyst Berlin']) {
     check(ftSkip(t) === false, `title rule leaves "${t}" alone`);
   }
   check(ftSkip('') === false && ftSkip(undefined) === false, 'an empty or missing title is never skipped by the title rule');

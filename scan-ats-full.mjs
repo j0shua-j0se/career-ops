@@ -54,6 +54,7 @@ import lever from './providers/lever.mjs';
 import ashby from './providers/ashby.mjs';
 import workday from './providers/workday.mjs';
 import icims from './providers/icims.mjs';
+import { sweepReachGate } from './triage-prefilter.mjs';
 import { buildTitleFilter, buildTitleFilterOverrides, buildTitleFilterWithOverrides, buildLocationFilter, buildContentFilter, buildCountryEligibilityFilter, countryEligibilityTestable, loadCandidateCountry, matchedTitleKeywords, loadSeenUrls, normalizeUrlForDedup, appendToPipeline, appendToScanHistory, loadBlacklist, parseSinceDays, PORTALS_PATH, PIPELINE_PATH } from './scan.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
@@ -262,7 +263,7 @@ export const SOURCES = {
 const KNOWN_FLAGS = [
   '--since', '--limit', '--ats', '--seeds', '--dry-run', '--liveness',
   '--verbose', '--md-out', '--json', '--include-undated', '--include-blacklisted',
-  '--shuffle', '--resume', '--keep-unlocated', '--help', '-h',
+  '--shuffle', '--resume', '--keep-unlocated', '--no-reach-gate', '--help', '-h',
 ];
 
 // Flags that consume the next argv token as a value (space-separated form —
@@ -281,6 +282,7 @@ const USAGE = `Usage:
   node scan-ats-full.mjs --md-out <dir>       # also write a dated markdown digest to <dir>
   node scan-ats-full.mjs --resume             # continue an interrupted sweep from its checkpoint
   node scan-ats-full.mjs --keep-unlocated     # queue postings that report no location (unfilterable)
+  node scan-ats-full.mjs --no-reach-gate      # skip the reach gate (keeps bare Remote / non-German postings the location_filter lets through)
   node scan-ats-full.mjs --help               # print this usage block and exit`;
 
 // Exported so scan-loop.mjs's buildWaveArgs can derive the exact same opts
@@ -355,6 +357,7 @@ export function parseArgs(argv) {
     json: args.includes('--json'),
     includeUndated: args.includes('--include-undated'),
     keepUnlocated: args.includes('--keep-unlocated'),
+    reachGate: !args.includes('--no-reach-gate'),
     includeBlacklisted: args.includes('--include-blacklisted'),
     shuffle: args.includes('--shuffle'),
     resume: args.includes('--resume'),
@@ -476,6 +479,25 @@ export function passesFilters(job, { titleFilter, locationFilter, contentFilter,
   if (!locationFilter(job.location, job.url, job.title)) return false;
   if (contentFilter && !contentFilter(job.description, matchedTitleKeywords(job.title, titleFilterConfig))) return false;
   return true;
+}
+
+/**
+ * The sweep's reach gate for one posting (see the call site in main() for why
+ * it exists). Pure so it can be tested without a network sweep.
+ *
+ * - Off with `opts.reachGate === false` (`--no-reach-gate`).
+ * - Only rows that HAVE a location cell are judged: an empty one belongs to the
+ *   no-location rule and to `--keep-unlocated`, which is the explicit request to
+ *   queue what cannot be judged.
+ * - `opts.alwaysAllow` is portals.yml `location_filter.always_allow`.
+ *
+ * @returns {{keep: boolean, reason: string}}
+ */
+export function reachGateVerdict(job, opts = {}) {
+  if (opts.reachGate === false) return { keep: true, reason: 'gate off' };
+  if (!String(job?.location ?? '').trim()) return { keep: true, reason: 'no location cell — not judged here' };
+  const gate = sweepReachGate(job, { alwaysAllow: opts.alwaysAllow });
+  return { keep: gate.keep, reason: gate.reason };
 }
 
 // Prefer a provider's own scoped dedup key over URL normalization when the
@@ -743,6 +765,7 @@ async function main() {
   // Attach filters to opts so runSeedScan can use them without extra parameters.
   opts.titleFilter = titleFilter;
   opts.locationFilter = locationFilter;
+  opts.alwaysAllow = config?.location_filter?.always_allow;
   opts.contentFilter = contentFilter;
   // Raw title_filter config, needed by matchedTitleKeywords() to scope
   // content_filter.by_title_keyword the same way scan.mjs does.
@@ -818,6 +841,11 @@ async function main() {
   let droppedContent = cc.droppedContent || 0;
   let droppedCountryEligibility = cc.droppedCountryEligibility || 0;
   let droppedNoLocation = cc.droppedNoLocation || 0;
+  // Postings the reach gate (triage-prefilter.mjs sweepReachGate) dropped after
+  // location_filter passed them, by reason. Carried in the checkpoint like every
+  // other counter so a resumed sweep does not restart the tally.
+  let droppedReach = cc.droppedReach || 0;
+  const droppedReachReasons = { ...(cc.droppedReachReasons || {}) };
   // Postings with no description for the eligibility filter to read. Carried
   // so a resumed sweep does not restart the tally and report a smaller,
   // healthier-looking number than the run actually earned.
@@ -840,7 +868,7 @@ async function main() {
     totalCompaniesScanned, totalErrors, totalRetiredBoardsSkipped,
     droppedNoDate, droppedContent,
     droppedCountryEligibility, countryEligibilityUntestable,
-    droppedNoLocation,
+    droppedNoLocation, droppedReach, droppedReachReasons,
     noDateSkipCompanies, noDateSkipJobs, cappedBoards,
   });
   const checkpointBase = () => ({
@@ -889,6 +917,23 @@ async function main() {
       // location segment when the provider reports a rolled-up "N Locations" string;
       // job.title so a title-stated remote role survives a city-only location.
       if (!locationFilter(job.location, job.url, job.title)) continue;
+      // Reach gate. location_filter is lenient by design — it passes an empty
+      // location, and "Remote"/"Hybrid" sit in its `allow` list — so on this
+      // sweep of ~38k companies of unknown geography it let US tenants ("Remote
+      // MO", /job/Remote-US/) and bare "Remote" roles through: 52 added on
+      // 2026-09-29, none useful. classifyReach had the answer for most of them
+      // and was never asked. The gate keeps only home, Munich and remote scoped
+      // to Germany/EU/Europe/DACH/EMEA (or a German place) — see
+      // sweepReachGate for the one place it is stricter than classifyReach
+      // (a bare "Remote"). Only rows that HAVE a location cell are judged here: an
+      // empty one belongs to the no-location rule just below (and to
+      // --keep-unlocated, the explicit request to queue what cannot be judged).
+      const gate = reachGateVerdict(job, opts);
+      if (!gate.keep) {
+        droppedReach++;
+        droppedReachReasons[gate.reason] = (droppedReachReasons[gate.reason] || 0) + 1;
+        continue;
+      }
       if (!contentFilter(job.description, matchedTitleKeywords(job.title, fullTitleFilterConfig))) { droppedContent++; continue; }
       if (!countryEligibilityTestable(job.description)) countryEligibilityUntestable++;
       if (!countryEligibilityFilter(job.description)) { droppedCountryEligibility++; continue; }
@@ -1157,6 +1202,10 @@ async function main() {
   }
   if (droppedContent) log(`Content-filtered:   ${droppedContent}`);
   if (droppedNoLocation) log(`No location:        ${droppedNoLocation} (unfilterable — use --keep-unlocated to queue them anyway)`);
+  if (droppedReach) {
+    const why = Object.entries(droppedReachReasons).sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} ${r}`).join('; ');
+    log(`Out of reach:       ${droppedReach} (${why}; --no-reach-gate to keep them)`);
+  }
   // Same rule as scan.mjs: never a bare zero. "0 removed" reads as all-clear
   // when it almost always means the filter had nothing to read.
   if (config?.country_eligibility_filter || droppedCountryEligibility) {
