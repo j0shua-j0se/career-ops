@@ -1029,6 +1029,8 @@ ${sections.join('\n')}</div>
     // before parsing an argument.
     mkdirSync(join(sandbox, 'lib'), { recursive: true });
     copyFileSync(join(ROOT, 'lib', 'is-main-module.mjs'), join(sandbox, 'lib', 'is-main-module.mjs'));
+    // generate-pdf.mjs stamps /Author through lib/pdf-info.mjs, so the copy needs it too.
+    copyFileSync(join(ROOT, 'lib', 'pdf-info.mjs'), join(sandbox, 'lib', 'pdf-info.mjs'));
 
     // theme-style.mjs and tracker-utils.mjs both `import * as yaml from
     // 'js-yaml'`, resolved by walking up into the repo's node_modules -- from
@@ -1166,6 +1168,8 @@ export const chromium = {
     // before parsing an argument.
     mkdirSync(join(sandbox, 'lib'), { recursive: true });
     copyFileSync(join(ROOT, 'lib', 'is-main-module.mjs'), join(sandbox, 'lib', 'is-main-module.mjs'));
+    // generate-pdf.mjs stamps /Author through lib/pdf-info.mjs, so the copy needs it too.
+    copyFileSync(join(ROOT, 'lib', 'pdf-info.mjs'), join(sandbox, 'lib', 'pdf-info.mjs'));
 
     // theme-style.mjs and tracker-utils.mjs both `import * as yaml from
     // 'js-yaml'`, resolved by walking up into the repo's node_modules -- from

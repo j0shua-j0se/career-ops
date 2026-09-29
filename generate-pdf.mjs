@@ -40,9 +40,10 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFile
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
 import { getCareerOpsRoot } from './path-resolver.mjs';
-import { readStyleTokens, injectThemeStyle, readCvSectionOrder } from './theme-style.mjs';
+import { readStyleTokens, injectThemeStyle, readCvSectionOrder, readCandidateName } from './theme-style.mjs';
 import { resolvePdfIndexPath, resolveTrackerPath, resolveWorkspaceRoot } from './tracker-utils.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { setPdfAuthor } from './lib/pdf-info.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const trackerPath = resolveTrackerPath(getCareerOpsRoot());
@@ -1045,6 +1046,25 @@ export function enforcePageBudget(pageCount, { maxPages = 2, strictPages = false
 }
 
 /**
+ * Return the rendered PDF with `/Author` set to `author`, or the buffer
+ * untouched when there is no author or the PDF's structure is not one
+ * `lib/pdf-info.mjs` recognises. Never throws: a metadata stamp must not cost
+ * the candidate a render.
+ *
+ * @param {Buffer} pdfBuffer - PDF bytes returned by Chromium.
+ * @param {string} author - The candidate's name.
+ * @returns {Buffer}
+ */
+export function stampPdfAuthor(pdfBuffer, author) {
+  try {
+    return setPdfAuthor(pdfBuffer, author).buffer;
+  } catch (err) {
+    console.warn(`⚠️  Could not set the PDF /Author: ${err.message}`);
+    return pdfBuffer;
+  }
+}
+
+/**
  * Read the page count from the PDF catalog's root /Pages dictionary.
  *
  * Following the catalog reference keeps page-like text in content streams or
@@ -1758,7 +1778,7 @@ async function renderInPage(browser, html, outputPath, opts = {}) {
     await page.evaluate(() => document.fonts.ready);
 
     // Generate PDF
-    const pdfBuffer = await page.pdf({
+    const rendered = await page.pdf({
       printBackground: true,
       margin: {
         top: '0',
@@ -1768,6 +1788,15 @@ async function renderInPage(browser, html, outputPath, opts = {}) {
       },
       preferCSSPageSize: true,
     });
+
+    // Chromium writes /Title but never /Author, so the file properties would show
+    // a title and nobody's name. Stamp the candidate's own name (config/profile.yml
+    // candidate.full_name, the source of the CV header) — never hard-coded, and a
+    // profile without one just leaves the PDF as Chromium made it.
+    const pdfBuffer = stampPdfAuthor(
+      rendered,
+      opts.author ?? readCandidateName(resolve(outputRoot, 'config', 'profile.yml')),
+    );
 
     // Write PDF only after rendering has completed. Renderer cleanup still runs
     // if an injected browser fails before producing a buffer.

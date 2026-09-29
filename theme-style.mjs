@@ -72,6 +72,27 @@ export function styleTokensFrom(style) {
 }
 
 /**
+ * Read the candidate's name from a profile file: `candidate.full_name`, the same
+ * field the CV and cover-letter payloads take their header name from
+ * (modes/pdf.md, modes/cover.md). generate-pdf.mjs writes it into each PDF's
+ * `/Author`. Missing file / absent or non-string field / bad YAML → ''. Same
+ * defensive contract as readStyleTokens: an unreadable profile must never stop
+ * a CV rendering, it just leaves the PDF without an author.
+ * @param {string} [profilePath]
+ * @returns {string}
+ */
+export function readCandidateName(profilePath = 'config/profile.yml') {
+  try {
+    if (!existsSync(profilePath)) return '';
+    const raw = yaml.load(readFileSync(profilePath, 'utf-8')) || {};
+    const name = raw?.candidate?.full_name;
+    return typeof name === 'string' ? name.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Read the declared CV section order from a profile file (#2533):
  *
  *   cv:
