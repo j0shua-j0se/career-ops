@@ -35,6 +35,7 @@ import { appendToPipeline, appendToScanHistory } from './scan.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { loadEvalReferences } from './lib/eval-references.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const tracker = new TokenAccumulator();
@@ -648,7 +649,12 @@ async function cmdScan() {
 async function cmdEvaluate(input, ctx) {
   tracker.recordZeroToken('scan');
   tracker.recordZeroToken('pdf payload');
-  const modeContent = readFile('modes/oferta.md') ?? readFile('modes/auto-pipeline.md') ?? '';
+  const ofertaMode = readFile('modes/oferta.md');
+  // oferta.md defers Block G signals 6-15 to a reference file; a one-shot prompt
+  // cannot read on demand, so inline it (auto-pipeline.md has no such index).
+  const modeContent = ofertaMode !== null
+    ? ofertaMode + loadEvalReferences(DATA_ROOT)
+    : (readFile('modes/auto-pipeline.md') ?? '');
 
   let jdText = input;
 

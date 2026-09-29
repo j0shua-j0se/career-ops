@@ -20,6 +20,7 @@ import { execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { rejectPrivateOrInvalid } from './liveness-browser.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { withEvalReferences } from './lib/eval-references.mjs';
 import { TSV_ADDITION_HEADER } from './tracker-parse.mjs';
 const execFileAsync = promisify(execFile);
 try {
@@ -139,7 +140,7 @@ let systemPromptTemplate;
 function loadContext() {
   console.log('📂 Loading context files...');
   const sharedContext  = readFile(PATHS.shared, '_shared.md');
-  const ofertaLogic    = readFile(PATHS.oferta, 'oferta.md');
+  const ofertaLogic    = withEvalReferences(readFile(PATHS.oferta, 'oferta.md'), ROOT);
   const cvContent      = readFile(PATHS.cv, 'cv.md');
   const profileContent = readFile(PATHS.profile, '_profile.md');
   const profileYml     = readFile(PATHS.profileYml, 'profile.yml');

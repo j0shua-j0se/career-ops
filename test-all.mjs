@@ -3169,6 +3169,11 @@ if (
 }
 
 const ofertaMode = readFile('modes/oferta.md');
+// Block G signals 6-15 live in a reference file behind oferta.md's trigger
+// index; the signal-text assertions below read them from there. Anchored on the
+// bold heading so the file's own contents list is never mistaken for a signal.
+const ofertaSignalsRef = readFile('modes/reference/posting-legitimacy-signals.md');
+const ofertaSignals = ofertaSignalsRef.slice(Math.max(ofertaSignalsRef.indexOf('**6. Employment Classification Risk**'), 0));
 const autoPipelineMode = readFile('modes/auto-pipeline.md');
 if (
   ofertaMode.includes('## Liveness gate (URL inputs)') &&
@@ -3266,9 +3271,9 @@ if (
 
   // 2. oferta.md carries the agency-licensing section with the agency-mediated
   //    trigger, registry pointer, tracker-note suggestion, and jurisdiction derivation
-  const alStart = ofertaMode.indexOf('Agency Licensing Check');
-  const alEnd = ofertaMode.indexOf('### Output format:', Math.max(alStart, 0));
-  const alSection = alStart >= 0 && alEnd > alStart ? ofertaMode.slice(alStart, alEnd) : '';
+  const alStart = ofertaSignals.indexOf('Agency Licensing Check');
+  const alEnd = ofertaSignals.length;
+  const alSection = alStart >= 0 && alEnd > alStart ? ofertaSignals.slice(alStart, alEnd) : '';
   if (
     alSection.includes('templates/agency-licensing.yml') &&
     alSection.includes('agency-mediated') &&
@@ -3395,9 +3400,9 @@ if (
   // 2. oferta.md carries Signal 15 with both the presence-based (a) and
   //    corroborating-only (b) halves, the jurisdiction derivation mirroring
   //    the agency-licensing/immigration-status pattern, and the not-legal-advice note.
-  const asdStart = ofertaMode.indexOf('**15. AI-Screening Disclosure**');
-  const asdEnd = ofertaMode.indexOf('### Output format:', Math.max(asdStart, 0));
-  const asdSection = asdStart >= 0 && asdEnd > asdStart ? ofertaMode.slice(asdStart, asdEnd) : '';
+  const asdStart = ofertaSignals.indexOf('**15. AI-Screening Disclosure**');
+  const asdEnd = ofertaSignals.length;
+  const asdSection = asdStart >= 0 && asdEnd > asdStart ? ofertaSignals.slice(asdStart, asdEnd) : '';
   if (
     asdSection &&
     asdSection.includes('templates/jurisdiction-ai-screening-disclosure.yml') &&
@@ -3528,9 +3533,9 @@ if (
   }
 
   // oferta.md carries the standalone, table-free range-width signal
-  const ptStart = ofertaMode.indexOf('Pay-Transparency Range-Width Check');
-  const ptEnd = ofertaMode.indexOf('### Output format:', Math.max(ptStart, 0));
-  const ptSection = ptStart >= 0 && ptEnd > ptStart ? ofertaMode.slice(ptStart, ptEnd) : '';
+  const ptStart = ofertaSignals.indexOf('Pay-Transparency Range-Width Check');
+  const ptEnd = ofertaSignals.length;
+  const ptSection = ptStart >= 0 && ptEnd > ptStart ? ofertaSignals.slice(ptStart, ptEnd) : '';
   if (
     ptSection &&
     !ptSection.includes('templates/pay-transparency.yml') &&
@@ -3579,9 +3584,9 @@ if (
   //    and JD-hours-first normalization are preserved, and no staleness/
   //    carve-out-eligibility machinery (which existed only to support the
   //    now-deleted table comparison) remains.
-  const mwStart = ofertaMode.indexOf('**14. Minimum-Wage Lawyer Question**');
-  const mwEnd = ofertaMode.indexOf('### Output format:', Math.max(mwStart, 0));
-  const mwSection = mwStart >= 0 && mwEnd > mwStart ? ofertaMode.slice(mwStart, mwEnd) : '';
+  const mwStart = ofertaSignals.indexOf('**14. Minimum-Wage Lawyer Question**');
+  const mwEnd = ofertaSignals.length;
+  const mwSection = mwStart >= 0 && mwEnd > mwStart ? ofertaSignals.slice(mwStart, mwEnd) : '';
   if (
     mwSection &&
     !mwSection.includes('templates/minimum-wage.yml') &&
@@ -18004,10 +18009,11 @@ console.log('\n68. Immigration-status requirement overreach (#2033)');
   //    exceptions honesty, ITAR note) + apply step (status-vs-authorization
   //    rule, never-auto-answer guarantees).
   const ofertaNow = readFile('modes/oferta.md');
+  const ofertaNowSignals = ofertaSignals;
   const applyNow = readFile('modes/apply.md');
-  const sigStart = ofertaNow.indexOf('**11. Immigration-Status Requirement Overreach**');
-  const sigEnd = ofertaNow.indexOf('### Output format:', Math.max(sigStart, 0));
-  const sigSection = sigStart >= 0 && sigEnd > sigStart ? ofertaNow.slice(sigStart, sigEnd) : '';
+  const sigStart = ofertaNowSignals.indexOf('**11. Immigration-Status Requirement Overreach**');
+  const sigEnd = ofertaNowSignals.length;
+  const sigSection = sigStart >= 0 && sigEnd > sigStart ? ofertaNowSignals.slice(sigStart, sigEnd) : '';
   if (
     sigSection.includes('templates/immigration-status-requirements.yml') &&
     sigSection.includes('config/profile.yml') &&
@@ -18104,11 +18110,12 @@ console.log('\n69. Jurisdiction-prohibited content signal (#2018)');
   }
 
   if (
+    // the trigger index stays in oferta.md; the signal text is in the reference file
     ofertaMode.includes('**12. Jurisdiction-Prohibited Content**') &&
     ofertaMode.includes('templates/jurisdiction-prohibited-content.yml') &&
-    ofertaMode.includes('⚠️ **Jurisdiction-prohibited content signal:**') &&
-    ofertaMode.includes('not legal advice') &&
-    ofertaMode.includes('never naive keyword matching')
+    ofertaSignals.includes('⚠️ **Jurisdiction-prohibited content signal:**') &&
+    ofertaSignals.includes('not legal advice') &&
+    ofertaSignals.includes('never naive keyword matching')
   ) {
     pass('oferta Block G signal 10 reads the jurisdiction table with agent-judged matching and a not-legal-advice note (#2018)');
   } else {
@@ -18130,9 +18137,9 @@ console.log('\n69. Jurisdiction-prohibited content signal (#2018)');
   // Phrasing discipline (#2018): the new mode text states verifiable facts about
   // the posting/form only. Outside the explicit "never assert ..." guidance
   // sentence, the new sections must not contain employer-lawbreaking language.
-  const signal9 = ofertaMode.slice(
-    ofertaMode.indexOf('**12. Jurisdiction-Prohibited Content**'),
-    ofertaMode.indexOf('**13. Pay-Transparency Range-Width Check**')
+  const signal9 = ofertaSignals.slice(
+    ofertaSignals.indexOf('**12. Jurisdiction-Prohibited Content**'),
+    ofertaSignals.indexOf('**13. Pay-Transparency Range-Width Check**')
   );
   const step5c = applyMode.slice(
     applyMode.indexOf('## Step 5c — Jurisdiction-prohibited content check'),

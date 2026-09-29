@@ -34,6 +34,10 @@ for (const relativePath of [
   // path-resolver.mjs (CAREER_OPS_ROOT), so the fixture carries that too.
   'path-resolver.mjs',
   'lib/context-budget.mjs',
+  // ollama-eval appends modes/oferta.md's reference files (Block G signals
+  // 6-15) through lib/eval-references.mjs; the fixture's oferta.md is a
+  // stand-in, so the missing reference file only warns.
+  'lib/eval-references.mjs',
   // reserve-report-num.mjs's main-guard comes from lib/is-main-module.mjs
   // (#3170), so a fixture that carries it has to carry the helper too.
   'lib/is-main-module.mjs',

@@ -56,6 +56,7 @@ import {
   formatReportNumber, releaseReportNumbers, reserveReportNumbers,
 } from './reserve-report-num.mjs';
 import { buildBudgetedPrompt } from './lib/context-budget.mjs';
+import { withEvalReferences } from './lib/eval-references.mjs';
 import * as yaml from 'js-yaml';
 
 // ---------------------------------------------------------------------------
@@ -364,7 +365,10 @@ console.log('\n📂  Loading context files...');
 const sharedLabel = join(modesDir, '_shared.md').replace(/\\/g, '/');
 const ofertaLabel = join(modesDir, evalFilename).replace(/\\/g, '/');
 const sharedContext  = readFile(PATHS.shared,      sharedLabel);
-const ofertaLogic    = readFile(PATHS.oferta,      ofertaLabel);
+// A localized evaluation mode carries its own content; only the default
+// modes/oferta.md defers Block G signals 6-15 to a reference file, which a
+// one-shot prompt must inline.
+const ofertaLogic    = withEvalReferences(readFile(PATHS.oferta,      ofertaLabel), CODE_ROOT, { modesDir, evalFilename });
 const cvContent      = readFile(PATHS.cv,          'cv.md');
 const profileContent = readFile(PATHS.profile,     'modes/_profile.md');
 const profileYml     = readFile(PATHS.profileYml,  'config/profile.yml');

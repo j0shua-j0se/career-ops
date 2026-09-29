@@ -141,6 +141,8 @@ const SYSTEM_PATHS = [
   'modes/_brief.template.md',
   'voice-dna.template.md',
   'modes/oferta.md',
+  // Block G signals 6-15, deferred behind oferta.md's trigger index.
+  'modes/reference/',
   'modes/pdf.md',
   'modes/ats.md',
   'modes/text.md',
@@ -246,6 +248,7 @@ const SYSTEM_PATHS = [
   'story-provenance-check.mjs',
   'lib/latex-content.mjs',
   'lib/context-budget.mjs',
+  'lib/eval-references.mjs',
   // Retired 2026-09-05: the suite moved to tests/context-budget.test.mjs. The
   // entry stays so staleSystemFiles() prunes the orphan on an upgraded install;
   // drop it once a release has shipped past that move.

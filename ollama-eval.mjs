@@ -33,6 +33,7 @@ import {
 } from './reserve-report-num.mjs';
 import { TokenAccumulator, formatBreakdown, normalizeOpenAIUsage } from './utils/token-tracker.mjs';
 import { buildBudgetedPrompt } from './lib/context-budget.mjs';
+import { withEvalReferences } from './lib/eval-references.mjs';
 
 const tracker = new TokenAccumulator();
 tracker.recordZeroToken('scan');
@@ -306,7 +307,7 @@ try {
 console.log('\n📂  Loading context files...');
 
 const sharedContext = readFile(PATHS.shared, 'modes/_shared.md');
-const ofertaLogic   = readFile(PATHS.oferta, 'modes/oferta.md');
+const ofertaLogic   = withEvalReferences(readFile(PATHS.oferta, 'modes/oferta.md'), ROOT);
 const cvContent     = readFile(PATHS.cv,     'cv.md');
 const profileContent = readFile(PATHS.profile, 'modes/_profile.md');
 const profileYml    = readFile(PATHS.profileYml, 'config/profile.yml');
