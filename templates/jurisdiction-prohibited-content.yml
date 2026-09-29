@@ -2,7 +2,7 @@
 #
 # Content that employers are legally prohibited from requiring or asking for,
 # keyed by the candidate's jurisdiction. Consumed prompt-level by:
-#   - modes/oferta.md  — Block G "Jurisdiction-Prohibited Content" signal (JD text)
+#   - modes/oferta.md + modes/reference/posting-legitimacy-signals.md — Block G "Jurisdiction-Prohibited Content" signal (JD text)
 #   - modes/apply.md   — Step 5c form-field warning (application forms)
 #
 # No script reads this file at runtime. Matching is agent-judged against each

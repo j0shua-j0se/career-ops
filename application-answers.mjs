@@ -322,7 +322,7 @@ export function parseApplicationAnswersSection(reportText, { strict = false } = 
  * A DIFFERENT producer and a different format from the section above.
  * `parseApplicationAnswersSection` reads a format this module also writes, so
  * the two halves are pinned to each other. Nothing writes Block H from code:
- * `modes/oferta.md:622` specifies its heading and nothing about its body, so
+ * `modes/oferta.md` (`## H) Draft Application Answers`) specifies its heading and nothing about its body, so
  * the bold-question-then-paragraph shape below is a CONVENTION the evaluation
  * happens to emit, not a contract. This reads the convention and degrades to an
  * empty list when it does not hold, rather than guessing: a mispaired

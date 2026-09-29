@@ -2,7 +2,7 @@
 //
 // `parseApplicationAnswersSection` reads a format this same module writes, so
 // the two halves are pinned to each other and a round-trip test is meaningful.
-// Block H has no writer in the tree: `modes/oferta.md:622` specifies the heading
+// Block H has no writer in the tree: `modes/oferta.md` (`## H) Draft Application Answers`) specifies the heading
 // and says nothing about the body, so the bold-question-then-paragraph shape is
 // something the evaluation happens to emit. There is no fixed point to assert.
 //

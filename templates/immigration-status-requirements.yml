@@ -4,7 +4,7 @@
 # jurisdiction allows employers to demand — "US citizens only," "must be a
 # Canadian citizen or permanent resident," "must be permanently authorized to
 # work." Keyed by the candidate's jurisdiction. Consumed prompt-level by:
-#   - modes/oferta.md — Block G "Immigration-Status Requirement Overreach"
+#   - modes/oferta.md + modes/reference/posting-legitimacy-signals.md — Block G "Immigration-Status Requirement Overreach"
 #     signal (JD text)
 #   - modes/apply.md  — Step 5d form-question warning (application forms)
 #
