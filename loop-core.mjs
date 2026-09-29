@@ -385,9 +385,11 @@ export function ingestOffers(state, offers, wave) {
  *   TRIAGE: {PASS|MARGINAL|FAIL|SKIP} | {Company} | {Role} | {Score}/5 | {reason}
  *
  * Only the verdict keyword and the `{Score}/5` cell are load-bearing here — the
- * loop's own `minScore` decides qualification, not triage's PASS/FAIL band,
- * because the two thresholds are configured independently (`pipeline
- * .triage_threshold` vs `loop.minScore`).
+ * loop's own `minScore` decides qualification for MARGINAL/FAIL, not triage's
+ * band, because the two thresholds are configured independently (`pipeline
+ * .triage_threshold` vs `loop.minScore`). The one exception is PASS: the
+ * Priority Override in `modes/triage.md` returns PASS regardless of score, and
+ * `recordScores` honours that.
  *
  * @returns {{verdict:string, company:string, role:string, score:number, reason:string}|null}
  */
@@ -462,9 +464,18 @@ export function recordScores(state, results) {
     candidate.reason = String(result.reason ?? '').trim();
     // A SKIP verdict means the posting was unreachable, not that it scored 0 —
     // keep it out of the qualifier count and out of the barren-wave maths.
-    candidate.verdict = String(result.verdict ?? '').toUpperCase() === 'SKIP'
+    //
+    // A PASS verdict qualifies regardless of score: modes/triage.md's Priority
+    // Override returns PASS for a listed employer whatever the score ("TRIAGE:
+    // PASS | ... | 2.8/5 | Priority employer ..."), so the verdict — not the
+    // number — is the signal there. Comparing the 2.8 to minScore recorded such
+    // a line as rejected, which is exactly the outcome the override exists to
+    // prevent. MARGINAL and FAIL (and a result with no verdict at all) keep the
+    // plain score rule, so a high-scoring FAIL still qualifies exactly as before.
+    const triageVerdict = String(result.verdict ?? '').toUpperCase();
+    candidate.verdict = triageVerdict === 'SKIP'
       ? 'unreachable'
-      : (score >= minScore ? 'qualified' : 'rejected');
+      : (triageVerdict === 'PASS' || score >= minScore ? 'qualified' : 'rejected');
     if (candidate.verdict === 'qualified') qualified++;
     scored++;
   }

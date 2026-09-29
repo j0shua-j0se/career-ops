@@ -212,6 +212,44 @@ eq(
   eq(summarize(s).unreachable, 1, 'unreachable is counted separately from rejected');
 }
 
+// ── Priority Override: a PASS verdict qualifies regardless of score ─────────
+// modes/triage.md returns PASS for a Priority Override List employer whatever
+// the score, so `TRIAGE: PASS | ... | 2.8/5 | Priority employer ...` must not be
+// re-judged against minScore. MARGINAL/FAIL keep the plain score rule.
+{
+  const s = stateWith({ minScore: 3.7, target: 1 });
+  const urls = ['https://p.com/1', 'https://p.com/2', 'https://p.com/3', 'https://p.com/4', 'https://p.com/5', 'https://p.com/6'];
+  ingestOffers(s, urls.map((url) => ({ url })), 1);
+  const [pass28] = parseTriageOutput('TRIAGE: PASS | Siemens | Werkstudent Data | 2.8/5 | Priority employer, override applied');
+  eq(pass28.verdict, 'PASS', 'the priority-override line parses as PASS');
+  eq(pass28.score, 2.8, 'the priority-override line keeps its low score');
+  const r = recordScores(s, [
+    { key: candidateKey(urls[0]), ...pass28 },
+    { key: candidateKey(urls[1]), score: 3.6, verdict: 'MARGINAL' },
+    { key: candidateKey(urls[2]), score: 4.0, verdict: 'FAIL' },
+    { key: candidateKey(urls[3]), score: 1.2, verdict: 'FAIL' },
+    { key: candidateKey(urls[4]), score: 3.9, verdict: 'MARGINAL' },
+    { key: candidateKey(urls[5]), score: 4.4, verdict: 'PASS' },
+  ]);
+  eq(s.candidates[candidateKey(urls[0])].verdict, 'qualified', 'PASS at 2.8 qualifies despite minScore 3.7 (priority override)');
+  eq(s.candidates[candidateKey(urls[0])].score, 2.8, 'the recorded score is still the real 2.8, not inflated');
+  eq(s.candidates[candidateKey(urls[1])].verdict, 'rejected', 'MARGINAL 3.6 under minScore 3.7 is rejected');
+  eq(s.candidates[candidateKey(urls[2])].verdict, 'qualified', 'FAIL with a score at/above minScore keeps its existing score-based verdict (qualified)');
+  eq(s.candidates[candidateKey(urls[3])].verdict, 'rejected', 'FAIL 1.2 is rejected');
+  eq(s.candidates[candidateKey(urls[4])].verdict, 'qualified', 'MARGINAL 3.9 at/above minScore still qualifies by score');
+  eq(s.candidates[candidateKey(urls[5])].verdict, 'qualified', 'PASS above minScore still qualifies');
+  eq(r.qualified, 4, 'recordScores counts the priority PASS in its qualified total');
+  eq(summarize(s).qualified, 4, 'summarize().qualified includes the priority PASS');
+  eq(qualifiedCandidates(s).some((c) => c.key === candidateKey(urls[0])), true, 'the priority PASS reaches the shortlist candidates');
+  eq(decideNextAction(s).action, 'finish', 'target met by qualified count triggers finish promotion');
+
+  const solo = stateWith({ minScore: 3.7, target: 1 });
+  ingestOffers(solo, [{ url: 'https://p.com/solo' }], 1);
+  recordScores(solo, [{ key: candidateKey('https://p.com/solo'), score: 2.8, verdict: 'PASS' }]);
+  eq(decideNextAction(solo).action, 'finish', 'a lone priority PASS at 2.8 meets a target of 1');
+  eq(summarize(solo).qualified, 1, 'and is counted as qualified in the stats');
+}
+
 // ── Counting and batching ───────────────────────────────────────────────────
 
 {

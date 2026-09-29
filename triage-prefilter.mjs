@@ -368,6 +368,80 @@ const inRanges = (code, ranges) => ranges.some(([from, to]) => code >= from && c
 // than foreign. Only reached when nothing above matched.
 const OTHER_DE_CITY_RE = /(?<![a-zäöüß])(berlin|hamburg|k[öo]ln|cologne|frankfurt|stuttgart|d[üu]sseldorf|dresden|leipzig|hannover|bremen|essen|dortmund|bonn|karlsruhe|mannheim|aachen|darmstadt|freiburg|jena|ulm|kassel|kiel|rostock|magdeburg|saarbr[üu]cken|w[üu]rzburg|regensburg|augsburg|ingolstadt|walldorf|potsdam|braunschweig|paderborn|m[üu]nster|bielefeld|duisburg|wuppertal|chemnitz|erfurt|koblenz|trier|siegen|g[öo]ttingen|oldenburg|osnabr[üu]ck|heidelberg|t[üu]bingen|konstanz|passau|bayreuth|coburg|schweinfurt|aschaffenburg)(?![a-zäöüß])/i;
 
+// ── Remote qualifiers (2026-09-29) ──────────────────────────────────────────
+// Rule: "remote" is reachable only when unqualified, or qualified with Germany /
+// Deutschland / DE / EU / Europe / DACH / EMEA. Remote qualified by any other
+// country, a US state code, or a non-German region is remote WITHIN that place.
+// The existing FOREIGN_* lists already covered the common spellings; these are
+// the gaps the 2026-09-29 pass found ("Remote MO", "Other Remote NY", "Taiwan
+// (Remote)", "United Arab Emirates (remote)"). They are consulted ONLY inside
+// the remote branch of classifyReach, so a bare "Taiwan" with no remote marker
+// keeps its old 'unknown' verdict — the scope of this change is remote claiming
+// the 'remote' tier, nothing wider.
+//
+// Deliberately left out because they double as ordinary words or German names:
+// jordan, chad, niger, guinea, oman, turkey-as-food, "georgia" (a US state,
+// already in FOREIGN_REGION_RE) and "america" alone.
+const FOREIGN_REMOTE_QUALIFIER_RE = new RegExp(
+  '(?<![a-zäöüß])(' + [
+    'taiwan', 'hong kong', 'macau', 'south korea', 'korea', 'united arab emirates', 'uae',
+    'saudi arabia', 'qatar', 'kuwait', 'bahrain', 'lebanon', 'morocco', 'tunisia', 'algeria',
+    'ghana', 'ethiopia', 'uganda', 'tanzania', 'rwanda', 'senegal', 'zimbabwe', 'zambia',
+    'sri lanka', 'nepal', 'cambodia', 'myanmar', 'kazakhstan', 'uzbekistan', 'armenia',
+    'azerbaijan', 'russia', 'belarus', 'moldova', 'serbia', 'croatia', 'slovenia', 'slovakia',
+    'bulgaria', 'hungary', 'czech republic', 'czechia', 'greece', 'cyprus', 'malta',
+    'netherlands', 'the netherlands', 'holland', 'belgium', 'luxembourg', 'france', 'italy',
+    'sweden', 'norway', 'denmark', 'finland', 'iceland', 'estonia', 'latvia', 'lithuania',
+    'uruguay', 'paraguay', 'ecuador', 'bolivia', 'venezuela', 'panama', 'guatemala',
+    'dominican republic', 'puerto rico', 'jamaica', 'trinidad', 'el salvador', 'honduras',
+    'nicaragua', 'cuba',
+    // German-language country names a German board may print.
+    'frankreich', 'italien', 'spanien', 'niederlande', 'belgien', 'schweden', 'norwegen',
+    'd[äa]nemark', 'finnland', 'polen', 'ungarn', 'tschechien', 'griechenland',
+    'vereinigte staaten', 'gro[ßs]britannien', 'vereinigtes k[öo]nigreich', 'indien',
+    // Non-German regions. EMEA / Europe / EU / DACH are NOT here — they include Germany.
+    'asia', 'asia pacific', 'middle east', 'mena', 'africa', 'oceania', 'caribbean', 'nordics',
+    'benelux', 'baltics', 'anz',
+  ].join('|') + ')(?![a-zäöüß])',
+  'i',
+);
+
+// "Remote MO", "Other Remote NY", "Remote (TX)": a US state / foreign ISO2 code
+// TRAILING the remote marker, separated by a space, which the punctuated and
+// cell-leading branches of FOREIGN_REGION_RE cannot see. The code must be
+// UPPERCASE in the source text and end the cell (or sit before closing
+// punctuation): "Remote or Hybrid" and "Remote in Berlin" are ordinary words, and
+// only the case + terminal-position pair tells them from "Remote OR" (Oregon).
+// "DE" is excluded — it is Germany's own ISO code.
+const REMOTE_TRAILING_CODE_RE = /(?<![a-zäöüß])(?:remote|hybrid|home ?office)\s*[-,·:(]?\s*([A-Za-z]{2})(?=\s*(?:$|[)\],;|/·]))/gi;
+const TRAILING_CODE_SET = new Set(
+  ('AL AK AZ AR CA CO CT FL GA HI ID IL IN IA KS KY LA MD MA MI MN MS MO NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC '
+    + FOREIGN_ISO2_CODES.toUpperCase().replace(/\|/g, ' ')).split(' '),
+);
+function hasRemoteTrailingCode(text) {
+  for (const m of text.matchAll(REMOTE_TRAILING_CODE_RE)) {
+    const code = m[1];
+    if (code === code.toUpperCase() && TRAILING_CODE_SET.has(code)) return true;
+  }
+  return false;
+}
+
+// Every foreign-scope test the remote branch applies to a piece of text.
+function remoteQualifiedAbroad(text, { both = text } = {}) {
+  return FOREIGN_COUNTRY_RE.test(both) || FOREIGN_REGION_RE.test(both)
+    || FOREIGN_REMOTE_SCOPE_RE.test(both) || FOREIGN_CITY_RE.test(both)
+    || FOREIGN_REMOTE_QUALIFIER_RE.test(text) || hasRemoteTrailingCode(text);
+}
+
+// ASCII transliterations of umlauts — "Muenchen", "Nuernberg", "Fuerth",
+// "Wuerzburg", "Moehrendorf" — are ordinary in ATS location cells and URLs, and
+// the German city lists only spell the umlaut form (plus a u/o fallback). Fold
+// ue/oe/ae to ü/ö/ä before matching those lists. The fold is applied to a COPY
+// tested IN ADDITION to the original, only for German-city matching, so it can
+// add a German match but never remove one, and never feeds a foreign regex.
+const foldUmlauts = (s) => s.replace(/ue/gi, 'ü').replace(/oe/gi, 'ö').replace(/ae/gi, 'ä');
+const testDe = (re, s) => re.test(s) || re.test(foldUmlauts(s));
+
 /**
  * Classify how reachable a posting is from Erlangen.
  *
@@ -467,8 +541,8 @@ export function classifyReach(location, title = '', url = '') {
   if (codes.some((c) => inRanges(c, HOME_PLZ_RANGES))) return 'home';
   if (codes.some((c) => inRanges(c, MUNICH_PLZ_RANGES))) return 'munich';
 
-  if (HOME_CITY_RE.test(loc)) return 'home';
-  if (MUNICH_CITY_RE.test(loc)) return 'munich';
+  if (testDe(HOME_CITY_RE, loc)) return 'home';
+  if (testDe(MUNICH_CITY_RE, loc)) return 'munich';
   if (!REMOTE_NEGATED_RE.test(both) && REMOTE_RE.test(both)) {
     // "Remote" scoped to a foreign country is remote WITHIN that country, not
     // remote-reachable from Erlangen. "US-TX-REMOTE" was scoring 4.5 (the
@@ -477,8 +551,8 @@ export function classifyReach(location, title = '', url = '') {
     //
     // Only when the location names no German marker at all: "Remote, Germany"
     // and "Remote — Germany or US" are both genuinely reachable and must stay.
-    const germanMarker = GERMANY_RE.test(loc) || OTHER_DE_CITY_RE.test(loc)
-      || HOME_CITY_RE.test(loc) || MUNICH_CITY_RE.test(loc);
+    const germanMarker = GERMANY_RE.test(loc) || testDe(OTHER_DE_CITY_RE, loc)
+      || testDe(HOME_CITY_RE, loc) || testDe(MUNICH_CITY_RE, loc);
     // FOREIGN_REMOTE_SCOPE_RE and FOREIGN_CITY_RE catch the same class of
     // foreign-scoped remote posting the two checks above were already built
     // for, just spelled a different way: "Remote - Nationwide" and "(North
@@ -494,8 +568,25 @@ export function classifyReach(location, title = '', url = '') {
     // on purpose: a title mentioning Germany while the location is genuinely
     // foreign is not a case seen in practice, and widening it risks masking a
     // real foreign location behind unrelated title text.
-    if (!germanMarker && (FOREIGN_COUNTRY_RE.test(both) || FOREIGN_REGION_RE.test(both)
-      || FOREIGN_REMOTE_SCOPE_RE.test(both) || FOREIGN_CITY_RE.test(both))) return 'abroad';
+    //
+    // remoteQualifiedAbroad adds the 2026-09-29 gaps on top of those four: a
+    // trailing state code ("Remote MO"), and country/region names the older
+    // lists never carried ("Taiwan (Remote)", "United Arab Emirates (remote)").
+    if (!germanMarker && remoteQualifiedAbroad(loc, { both })) return 'abroad';
+    // An unscoped "Remote" cell ("Remote Job Posting") can still sit on a Workday
+    // URL whose /job/<segment>/ names the place ("Remote-MO", "Remote-US"). The
+    // URL may only move the verdict towards 'abroad' — never towards home or
+    // remote: a German-looking slug is not evidence a role is reachable.
+    if (!germanMarker) {
+      const { locationSegment } = locationTextFromUrl(url);
+      if (locationSegment) {
+        const segmentWords = locationSegment.replace(/-+/g, ' ');
+        const germanSeg = (t) => GERMANY_RE.test(t) || testDe(OTHER_DE_CITY_RE, t)
+          || testDe(HOME_CITY_RE, t) || testDe(MUNICH_CITY_RE, t);
+        if (!germanSeg(locationSegment) && !germanSeg(segmentWords)
+          && (remoteQualifiedAbroad(locationSegment) || remoteQualifiedAbroad(segmentWords))) return 'abroad';
+      }
+    }
     return 'remote';
   }
   // A location that carries no information is 'unknown', not 'abroad'. Falling
@@ -512,8 +603,8 @@ export function classifyReach(location, title = '', url = '') {
     // DLR row this 'unknown' branch exists to protect had no foreign marker
     // anywhere in its URL either, so it is untouched.
     const { locationSegment, slugText } = locationTextFromUrl(url);
-    const germanInUrl = (text) => GERMANY_RE.test(text) || OTHER_DE_CITY_RE.test(text)
-      || HOME_CITY_RE.test(text) || MUNICH_CITY_RE.test(text);
+    const germanInUrl = (text) => GERMANY_RE.test(text) || testDe(OTHER_DE_CITY_RE, text)
+      || testDe(HOME_CITY_RE, text) || testDe(MUNICH_CITY_RE, text);
     // A Workday /job/<segment>/ is a location, so every foreign pattern applies
     // to it — including the two-letter state and ISO codes.
     // The hyphenated form feeds the code branches ("us-ca-remote"); a spaced
@@ -535,7 +626,7 @@ export function classifyReach(location, title = '', url = '') {
     }
     return 'unknown';
   }
-  if (GERMANY_RE.test(loc) || OTHER_DE_CITY_RE.test(loc)) return 'germany';
+  if (GERMANY_RE.test(loc) || testDe(OTHER_DE_CITY_RE, loc)) return 'germany';
   // Nothing above recognised the location as home, Munich, remote, or
   // elsewhere-in-Germany. That is not, by itself, evidence the role is abroad —
   // the exact same principle as the placeholder case above, just for a real
@@ -1679,6 +1770,40 @@ function selfTest() {
     'a multi-word city in a hyphenated job segment is matched by name');
   check(classifyReach('Multiple Locations', 'Werkstudent Data', 'https://ex.com/jobs/1') === 'unknown',
     'a placeholder with no foreign signal in the URL stays unknown, never abroad');
+
+  // ── 2026-09-29: remote qualified by a foreign place, and ASCII umlauts ──
+  // Rule: "remote" is reachable only unqualified or qualified with Germany /
+  // Deutschland / DE / EU / Europe / DACH / EMEA. Anything else is abroad.
+  check(classifyReach('Remote MO') === 'abroad', '"Remote MO" (trailing US state code) is abroad, not remote');
+  check(classifyReach('Other Remote NY') === 'abroad', '"Other Remote NY" is abroad, not remote');
+  check(classifyReach('Remote (TX)') === 'abroad', '"Remote (TX)" is abroad');
+  check(classifyReach('Remote - NY, Hybrid') === 'abroad', 'a trailing state code before punctuation is abroad');
+  check(classifyReach('Taiwan (Remote)') === 'abroad', '"Taiwan (Remote)" is abroad, not remote');
+  check(classifyReach('United Arab Emirates (remote)') === 'abroad', '"United Arab Emirates (remote)" is abroad, not remote');
+  check(classifyReach('Remote, Netherlands') === 'abroad', '"Remote, Netherlands" is abroad');
+  check(classifyReach('Remote - Asia') === 'abroad', 'remote scoped to a non-German region is abroad');
+  check(classifyReach('Remote Job Posting') === 'remote', 'an unqualified remote cell with no URL evidence stays remote');
+  check(classifyReach('Remote Job Posting', 'Data Analyst', 'https://acme.wd5.myworkdayjobs.com/en-US/Ext/job/Remote-MO/Data-Analyst_R123') === 'abroad',
+    '"Remote Job Posting" on a Workday /job/Remote-MO/ URL is abroad');
+  check(classifyReach('Remote Job Posting', 'Data Analyst', 'https://acme.wd5.myworkdayjobs.com/en-US/Ext/job/Remote-US/Data-Analyst_R123') === 'abroad',
+    '"Remote Job Posting" on a Workday /job/Remote-US/ URL is abroad');
+  check(classifyReach('Remote Job Posting', 'Data Analyst', 'https://acme.wd5.myworkdayjobs.com/en-US/Ext/job/Munich/Data-Analyst_R123') === 'remote',
+    'a German-looking URL never moves a remote verdict towards home (remote stays remote)');
+  check(classifyReach('Remote, Germany', 'Data Analyst', 'https://acme.wd5.myworkdayjobs.com/en-US/Ext/job/Remote-US/Data-Analyst_R123') === 'remote',
+    'an explicit German scope in the location cell is not overridden by the URL');
+  // Reachable remote forms and ordinary words must survive the widened rule.
+  for (const loc of ['Remote', 'Remote, Germany', 'Remote Deutschland', 'Remote DE', 'Remote (EU)', 'Remote - Europe', 'Remote, DACH', 'Remote EMEA (Germany)',
+    'Remote or Hybrid', 'Remote in Berlin', 'Remote OR Hybrid', 'Remote Work']) {
+    check(classifyReach(loc) === 'remote', `"${loc}" stays remote (reachable qualifier or ordinary word)`);
+  }
+  // ue/oe/ae transliterations of the umlaut city names.
+  for (const [loc, want] of [['Muenchen', 'munich'], ['München', 'munich'], ['Nuernberg', 'home'], ['Fuerth', 'home'], ['Moehrendorf', 'home'],
+    ['Gruenwald', 'munich'], ['Unterfoehring', 'munich'], ['Graefelfing', 'munich'], ['Wuerzburg', 'germany'], ['Duesseldorf', 'germany'], ['Koeln', 'germany']]) {
+    check(classifyReach(loc) === want, `"${loc}" reads as ${want}`);
+  }
+  check(classifyReach('Remote, Wuerzburg or Taiwan') === 'remote', 'a transliterated German city is a German marker that keeps a dual-scope remote cell reachable');
+  check(classifyReach('Remote, Muenchen') === 'munich', 'a transliterated Munich in a remote cell resolves like "Remote, München" (city tier first)');
+  check(classifyReach('Israel') !== 'munich' && classifyReach('Israel') !== 'home', '"ae" inside a foreign word is not folded into a home/munich city');
 
   console.log(failures === 0 ? '\nALL SELF-TESTS PASSED' : `\n${failures} SELF-TEST FAILURE(S)`);
   return failures === 0 ? 0 : 1;
