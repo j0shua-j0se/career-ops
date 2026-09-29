@@ -1,9 +1,9 @@
 # Career-Ops — Agency/Recruiter Licensing Regimes (jurisdiction table) (#2037)
 #
-# Consumed prompt-level by modes/oferta.md Block G (full text in modes/reference/posting-legitimacy-signals.md) ("Agency Licensing
+# Consumed prompt-level by modes/oferta.md Block G (full text in modes/reference/legitimacy/) ("Agency Licensing
 # Check"). This file is a DATA REFERENCE, not instruction logic: extending
 # it to a new jurisdiction never requires touching the rule text in
-# modes/reference/posting-legitimacy-signals.md. No script reads it — the agent does. Nothing in this
+# modes/reference/legitimacy/. No script reads it — the agent does. Nothing in this
 # system ever fetches or scrapes a registry URL: the candidate clicks the
 # official link themselves (zero-fetch by design).
 #
@@ -18,7 +18,7 @@
 # narrow and verified; extend via community PRs — same discipline as the
 # jurisdiction tables introduced for #2013/#2018/#2019/#2025.
 #
-# NEVER-ASSERT RULE (mandatory — mirrored in modes/reference/posting-legitimacy-signals.md): these rows
+# NEVER-ASSERT RULE (mandatory — mirrored in modes/reference/legitimacy/): these rows
 # describe licensing regimes and where the official registry lives. They
 # are NEVER a basis for asserting that any specific agency is unlicensed
 # or operating illegally — transitional rules alone (e.g. Ontario

@@ -3169,11 +3169,14 @@ if (
 }
 
 const ofertaMode = readFile('modes/oferta.md');
-// Block G signals 6-15 live in a reference file behind oferta.md's trigger
-// index; the signal-text assertions below read them from there. Anchored on the
-// bold heading so the file's own contents list is never mistaken for a signal.
-const ofertaSignalsRef = readFile('modes/reference/posting-legitimacy-signals.md');
-const ofertaSignals = ofertaSignalsRef.slice(Math.max(ofertaSignalsRef.indexOf('**6. Employment Classification Risk**'), 0));
+// Block G signals 6 and 8-15 live one file each under modes/reference/legitimacy/
+// behind oferta.md's trigger index (signal 7 stays inline); the signal-text
+// assertions below read them from there, in signal order.
+const ofertaSignals = readdirSync(join(ROOT, 'modes', 'reference', 'legitimacy'))
+  .filter((f) => f.endsWith('.md'))
+  .sort()
+  .map((f) => readFile(`modes/reference/legitimacy/${f}`))
+  .join('\n');
 const autoPipelineMode = readFile('modes/auto-pipeline.md');
 if (
   ofertaMode.includes('## Liveness gate (URL inputs)') &&

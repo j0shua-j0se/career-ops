@@ -141,7 +141,7 @@ const SYSTEM_PATHS = [
   'modes/_brief.template.md',
   'voice-dna.template.md',
   'modes/oferta.md',
-  // Block G signals 6-15, deferred behind oferta.md's trigger index.
+  // Block G signals, one file each, behind the trigger index in oferta.md.
   'modes/reference/',
   'modes/pdf.md',
   'modes/ats.md',

@@ -1,9 +1,9 @@
 # Career-Ops — AI-Screening Disclosure Requirements (jurisdiction table) (#2892)
 #
-# Consumed prompt-level by modes/oferta.md Block G (full text in modes/reference/posting-legitimacy-signals.md) ("AI-Screening Disclosure"
+# Consumed prompt-level by modes/oferta.md Block G (full text in modes/reference/legitimacy/) ("AI-Screening Disclosure"
 # signal). This file is a DATA REFERENCE, not instruction logic: extending it
 # to a new jurisdiction never requires touching the rule text in
-# modes/reference/posting-legitimacy-signals.md. No script reads it — the agent does. Nothing in this
+# modes/reference/legitimacy/. No script reads it — the agent does. Nothing in this
 # system ever fetches or scrapes an official page: the candidate clicks the
 # official link themselves (zero-fetch by design, same as agency-licensing.yml).
 #
@@ -19,7 +19,7 @@
 # narrow and verified; extend via community PRs — same discipline as the
 # jurisdiction tables introduced for #2013/#2018/#2019/#2025/#2037.
 #
-# NEVER-ASSERT RULE (mandatory — mirrored in modes/reference/posting-legitimacy-signals.md): these rows
+# NEVER-ASSERT RULE (mandatory — mirrored in modes/reference/legitimacy/): these rows
 # describe disclosure obligations that exist somewhere in the hiring process
 # (which may include steps that never appear in posting text at all — e.g.
 # Illinois' AI Video Interview Act requires disclosure and consent *before
