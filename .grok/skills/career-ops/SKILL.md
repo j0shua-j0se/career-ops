@@ -6,7 +6,6 @@ description: >-
   portals, generate a CV/PDF, track applications, prepare for interviews, draft
   outreach/emails, or run any career-ops mode.
 arguments: mode
-user_invocable: true
 user-invocable: true
 argument-hint: "[run | scan | discover | deep | pdf | text | latex | latex-tex | cover | email | add | expand | eu-swe | oferta | ofertas | apply | batch | tracker | agent-inbox | pipeline | contacto | training | project | interview-prep | interview | interview/plan | interview/practice | interview/debrief | interview-redflag | patterns | offer-prep | titles | upskill | followup | reply-watch | outcome | update]"
 license: MIT
