@@ -66,8 +66,10 @@
  *                          `expired` code that is NOT a strong signal (e.g.
  *                          'insufficient_content' — a page that simply didn't
  *                          render, most often an ATS SPA under headless
- *                          Playwright, not proof the posting is gone); retry or
- *                          fall back.
+ *                          Playwright, not proof the posting is gone), OR a live
+ *                          page whose extracted text is under MIN_OK_CHARS
+ *                          (`liveness: 'empty-text'` — a shell/cookie stub, not
+ *                          a JD); retry or fall back.
  */
 
 import { readFile, writeFile } from 'fs/promises';
@@ -450,23 +452,70 @@ const EXPIRED_CODE_STATUS = {
 // the pre-fetched text all along: ~196k tokens and 7 minutes to find a phrase
 // a regex can see. Plain "gute Deutschkenntnisse" is deliberately NOT here —
 // the profile does not treat it as a hard stop.
-const GERMAN_HARD_STOP_RES = [
-  /\bsehr\s+gute[nrs]?\s+deutsch(?!land)(?:kenntniss\w*|-|\b)/i,
-  /\bverhandlungssicher\w*\s+(?:\w+\s+){0,2}deutsch(?!land)/i,
-  /\bdeutsch(?!land)\w*\s+(?:\w+\s+){0,4}verhandlungssicher/i,
-  /\bflie(?:ß|ss)end\w*\s+(?:\w+\s+){0,2}deutsch(?!land)/i,
-  /\bdeutsch(?!land)\w*\s+(?:\w+\s+){0,4}flie(?:ß|ss)end/i,
-  /\bdeutsch(?!land)\w*[^.\n]{0,25}\bc[12]\b/i,
-  /\b[cC][12]\b[^.\n]{0,15}\bdeutsch(?!land)/i,
-  /\b(?:fluent|native|very\s+good|excellent|business[- ]fluent)\s+(?:command\s+of\s+|skills\s+in\s+|in\s+)?german\b/i,
-  /\bgerman\b[^.\n]{0,12}\b(?:fluent(?:ly)?|native|c1|c2)\b/i,
-];
+const GERMAN_HARD_STOP_RES = (() => {
+  // "Deutsch" the language, not "Deutschland" and not the proper names that
+  // start with "Deutsche/-n/-r" (Deutsche Bahn, Deutsche Telekom, ...).
+  const DE = String.raw`deutsch(?!land|e[nmrs]?\s+(?:bahn|bank|telekom|post|börse|boerse|lufthansa|welle|rentenversicherung|forschungsgemeinschaft|akademie|unfallversicherung|zentrum|gesellschaft)\b)`;
+  // Up to 25 chars between a language word and a CEFR level, crossing the
+  // abbreviation dots of "mind. C1" but never a lower level ("Deutsch B2,
+  // Englisch C1" — the C1 belongs to English).
+  const GAP = String.raw`(?:(?!\b[ab][12]\b)[^.\n]|\b(?:mind|min|ca)\.){0,25}?`;
+  const STRONG = String.raw`(?:exzellent|ausgezeichnet|hervorragend|perfekt|einwandfrei|fehlerfrei|makellos|muttersprachlich|flie(?:ß|ss)end)\w*`;
+  const EN_STRONG = String.raw`(?:excellent|perfect|outstanding|exceptional|flawless|impeccable|native|fluent|very\s+good|business[- ]fluent)`;
+  // JS `\w` is ASCII-only, so "Kommunikationsfähigkeiten" would end a word run
+  // at the ä; widen it for every pattern below.
+  const wide = (re) => new RegExp(re.source.replace(/\\w/g, '[\\wäöüÄÖÜß]'), re.flags);
+  return [
+    // German-language phrasings.
+    new RegExp(String.raw`\bsehr\s+gut(?:e[nmrs]?)?\s+${DE}(?:kenntniss\w*|-|\b)`, 'i'),
+    new RegExp(String.raw`\bverhandlungssicher\w*\s+(?:\w+\s+){0,2}${DE}`, 'i'),
+    new RegExp(String.raw`\b${DE}\w*\s+(?:\w+\s+){0,4}verhandlungssicher`, 'i'),
+    new RegExp(String.raw`\b${STRONG}\s+(?:\w+\s+){0,2}${DE}`, 'i'),
+    new RegExp(String.raw`\b${DE}\w*\s+(?:\w+\s+){0,4}flie(?:ß|ss)end`, 'i'),
+    new RegExp(String.raw`\b${DE}\w*${GAP}\bc[12]\b`, 'i'),
+    new RegExp(String.raw`\b[cC][12]\b[^.\n]{0,15}\b${DE}`, 'i'),
+    // "Deutsch ... fehlerfrei", "Deutsch auf Muttersprachniveau", "Muttersprache Deutsch"
+    new RegExp(String.raw`\b${DE}\w*\s+(?:\w+\s+){0,3}(?:fehlerfrei|fehlerlos|einwandfrei|perfekt|makellos|muttersprach)\w*`, 'i'),
+    new RegExp(String.raw`\bmuttersprach\w*\s+(?:\w+\s+){0,3}${DE}`, 'i'),
+    // "Sehr gute Kommunikationsfähigkeiten in Wort und Schrift auf Deutsch"
+    new RegExp(String.raw`\bsehr\s+gut(?:e[nmrs]?)?\s+(?:\w+\s+){0,3}?(?:kommunikation|ausdrucks|sprach|schreib|redegewandt)\w*[^.,;\n]{0,60}?(?:\b(?:auf|in|und|sowie)\s+(?:der\s+)?|\(\s*)${DE}`, 'i'),
+    // "ausgezeichnete Kommunikation auf Deutsch", "exzellente Kenntnisse in Deutsch"
+    new RegExp(String.raw`\b${STRONG}\s+(?:\w+\s+){0,3}?(?:auf|in)\s+(?:der\s+)?${DE}`, 'i'),
+    // English-language phrasings.
+    new RegExp(String.raw`\b${EN_STRONG}\s+(?:(?:command|knowledge|skills?|communication|written|spoken|oral|verbal|and|in|of|english|both|proficiency|language|abilities|ability|the|a|&|/)\s+){0,5}german\b(?!-)`, 'i'),
+    new RegExp(String.raw`\bgerman\b(?:(?!\b[ab][12]\b)[^.\n]){0,30}?\b(?:fluent(?:ly)?|native|c1|c2)\b`, 'i'),
+    // "Professional proficiency in German is required"
+    new RegExp(String.raw`\b(?:(?:professional|business)(?:[- ]level)?\s+(?:proficiency|command|fluency)\s+(?:of|in)\s+german|(?:professional|business)[- ]level\s+german)\b(?!-)`, 'i'),
+  ].map(wide);
+})();
 
-// Any of these in the same line turns the requirement into a preference, and
+// Any of these in the SAME CLAUSE as the German (or in a bare, language-less
+// fragment like "wünschenswert") turns the requirement into a preference. A
+// hedge in a clause about another language does not: "Verhandlungssichere
+// Deutschkenntnisse, gute Englischkenntnisse wünschenswert" hedges English.
+const GERMAN_HEDGE_RE = /\b(von vorteil|vorteilhaft|wünschenswert|wuenschenswert|idealerweise|ein plus|nice to have|a plus|is a plus|optional|preferred|beneficial|an advantage|advantageous|gerne|hilfreich|helpful|wäre schön|preferably|ideally|bonus)\b/i;
+const GERMAN_MENTION_RE = /\bgerman\b(?!-?\s*(?:speaking\s+)?(?:market|customers?|clients?))|\bdeutsch(?!land)/i;
+const OTHER_LANGUAGE_RE = /\b(?:englisch|english|französisch|french|spanisch|spanish|italienisch|italian|niederländisch|dutch|russisch|russian|chinesisch|chinese|polnisch|polish|türkisch|turkish|portugiesisch|portuguese|arabisch|arabic|japanisch|japanese)/i;
 // German offered as an ALTERNATIVE to English ("Deutsch- oder Englisch-
-// kenntnisse") means English alone qualifies — both keep the posting.
-const GERMAN_HEDGE_RE = /\b(von vorteil|vorteilhaft|wünschenswert|wuenschenswert|idealerweise|ein plus|nice to have|a plus|is a plus|optional|preferred|beneficial|an advantage|advantageous|gerne|hilfreich|helpful|wäre schön)\b/i;
+// kenntnisse") means English alone qualifies — keeps the posting.
 const GERMAN_ALTERNATIVE_RE = /deutsch\w*[\s-]*(?:oder|bzw\.?|und\s*\/\s*oder)\s*englisch|englisch\w*[\s-]*(?:oder|bzw\.?|und\s*\/\s*oder)\s*deutsch|german\s+(?:or|and\/or)\s+english|english\s+(?:or|and\/or)\s+german/i;
+
+function germanIsHedged(line) {
+  for (const clause of line.split(/[,;:]/)) {
+    if (!GERMAN_HEDGE_RE.test(clause)) continue;
+    if (GERMAN_MENTION_RE.test(clause)) return true;
+    // A hedge fragment that names no language at all ("wünschenswert",
+    // "von Vorteil") still belongs to the German just before it — but only
+    // when nothing else is in the fragment: "Erfahrung mit SAP wünschenswert"
+    // is about SAP, not about the German before it.
+    const rest = clause.replace(GERMAN_HEDGE_RE, ' ').trim();
+    if (!OTHER_LANGUAGE_RE.test(clause) && (rest ? rest.split(/\s+/).length : 0) <= 2) return true;
+  }
+  return false;
+}
+
+// Sentence/line split that does not cut at "mind. C1", "z. B.", "ca. 3"...
+const JD_LINE_SPLIT_RE = /\r?\n|(?<!\b(?:mind|min|ca|bzw|ggf|evtl|inkl|vgl|usw|etc|approx|sog|max)\.)(?<!\b[a-z]\.\s?[a-z]\.)(?<=[.;!?])\s+/i;
 
 /**
  * The line of a job description that states a hard-stop German requirement,
@@ -479,11 +528,11 @@ const GERMAN_ALTERNATIVE_RE = /deutsch\w*[\s-]*(?:oder|bzw\.?|und\s*\/\s*oder)\s
  */
 export function germanHardStop(text) {
   if (!text || typeof text !== 'string') return null;
-  for (const raw of text.split(/\r?\n|(?<=[.;!?])\s+/)) {
+  for (const raw of text.split(JD_LINE_SPLIT_RE)) {
     const line = raw.trim();
     if (!line) continue;
     if (!GERMAN_HARD_STOP_RES.some((re) => re.test(line))) continue;
-    if (GERMAN_HEDGE_RE.test(line) || GERMAN_ALTERNATIVE_RE.test(line)) continue;
+    if (GERMAN_ALTERNATIVE_RE.test(line) || germanIsHedged(line)) continue;
     return line.length > 160 ? `${line.slice(0, 157)}...` : line;
   }
   return null;
@@ -605,6 +654,13 @@ export async function fetchPlainJd(url, { fetchTextFn = fetchText, maxChars = DE
   return { status: 'ok', liveness: 'plain_http', chars: compact.length, text: compact };
 }
 
+// An `ok` result must carry enough text to triage from. Below this a page
+// delivered a shell, a cookie stub or a title line, not a job description; the
+// worker's fallback rule (WebFetch/browser) only runs for non-`ok` results.
+export const MIN_OK_CHARS = 200;
+export const EMPTY_TEXT_CODE = 'empty-text';
+const isUsableJdText = (text) => typeof text === 'string' && text.length >= MIN_OK_CHARS;
+
 /**
  * Fetch and compact one entry's JD.
  *
@@ -672,12 +728,12 @@ export async function fetchOne(entry, {
   }
   if (api?.result === 'active' && api.description) {
     const compact = compactJdText(htmlToText(api.description), { maxChars });
-    if (compact) {
+    if (isUsableJdText(compact)) {
       return { ...base, status: 'ok', liveness: api.code, chars: compact.length, text: compact };
     }
-    // Confirmed live but nothing usable came out of the description field —
-    // fall through to the gate + browser path rather than reporting `ok` with
-    // no text.
+    // Confirmed live but nothing usable came out of the description field
+    // (empty, or under MIN_OK_CHARS — a stub, not a JD) — fall through to the
+    // gate + browser path rather than reporting `ok` with no real text.
   }
   // Every other outcome (null = not an ATS URL / inconclusive, `uncertain`, or
   // `active` with no description) is inconclusive FOR OUR PURPOSES (we need
@@ -726,22 +782,21 @@ export async function fetchOne(entry, {
       return { ...base, status: 'error', liveness: verdict.code, chars: 0, text: '' };
     }
 
-    // Do NOT re-gate on a content-length threshold here: classifyLiveness
-    // already decided `active`/`no_apply_control` using its own rules (an
-    // apply control alone is sufficient — see `hasApplyControl` in
-    // liveness-core.mjs, checked BEFORE that function's own length check), and
-    // re-imposing a stricter length floor on top of an already-active verdict
-    // produced a false `error` for real, live, thin-JD pages. Case in point:
-    // StepStone's own `-inline.html` fragment renders only title/company/apply
-    // — genuinely short — yet `check-liveness.mjs` correctly calls it `active`
-    // via `apply_control_visible`; a length re-check here turned that into
-    // `error` (`no_content`) even though the posting is live. Whatever text we
-    // extracted, short or long, is reported as `ok`; only a truly EMPTY compact
-    // result (extraction failed outright) falls back to `error`.
+    // Liveness and text are separate questions. classifyLiveness already said
+    // the posting is live (an apply control alone is enough, and a thin
+    // StepStone `-inline.html` fragment is live), but this result is a JD
+    // handed to a triage worker that scores from the text alone. Text under
+    // MIN_OK_CHARS is a stub (jobs.schaeffler.com returned 25-27 chars that a
+    // worker then triaged as if it were a posting), so it is reported as
+    // `error`/`empty-text` and the worker's WebFetch/browser fallback runs
+    // instead. A truly empty extraction keeps its own `no_content` code.
     const rawText = await extractPageText(page);
     const compact = compactJdText(rawText, { maxChars });
     if (!compact) {
       return { ...base, status: 'error', liveness: 'no_content', chars: 0, text: '' };
+    }
+    if (!isUsableJdText(compact)) {
+      return { ...base, status: 'error', liveness: EMPTY_TEXT_CODE, chars: 0, text: '' };
     }
     return { ...base, status: 'ok', liveness: verdict.code, chars: compact.length, text: compact };
   } catch (err) {

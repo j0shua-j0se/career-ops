@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { compactJdText, gateUrl, fetchOne, fetchPlainJd, germanHardStop, splitGatedResults, pickContainerText, htmlToText } from '../fetch-jds.mjs';
+import { compactJdText, gateUrl, fetchOne, fetchPlainJd, germanHardStop, splitGatedResults, pickContainerText, htmlToText, MIN_OK_CHARS } from '../fetch-jds.mjs';
 import { setHostResolver } from '../liveness-browser.mjs';
 
 // Every fetchOne test below a URL is not itself exercising the API rung passes
@@ -282,7 +282,7 @@ function fakeActivePage({ bodyText, applyControls, finalUrl }) {
   };
 }
 
-test('fetchOne: a live page with a short body is reported ok (not re-gated to error)', async () => {
+test('fetchOne: a live page whose text is a stub (< MIN_OK_CHARS) is error/empty-text, not ok — the worker falls back', async () => {
   const restoreDns = setHostResolver(async () => ['93.184.216.34']);
   try {
     const finalUrl = 'https://careers.example.com/stellenangebote--werkstudent-inline.html';
@@ -296,10 +296,12 @@ test('fetchOne: a live page with a short body is reported ok (not re-gated to er
       checkLivenessViaApiFn: apiInconclusive,
     });
 
-    assert.equal(result.status, 'ok', `expected ok, got ${JSON.stringify(result)}`);
-    assert.equal(result.liveness, 'apply_control_visible');
-    assert.ok(result.chars > 0);
-    assert.ok(result.text.includes('Ich bin interessiert'));
+    // Live, but 70 chars of text is not a JD a triage worker can score from;
+    // `ok` here made jobs.schaeffler.com stubs (25-27 chars) look triageable.
+    assert.equal(result.status, 'error', `expected error, got ${JSON.stringify(result)}`);
+    assert.equal(result.liveness, 'empty-text');
+    assert.equal(result.chars, 0);
+    assert.equal(result.text, '');
   } finally {
     restoreDns();
   }
@@ -501,7 +503,7 @@ test('fetchOne: API confirms the posting live with description text → status o
     result: 'active',
     code: 'workday_api_ok',
     reason: 'ATS API returns the posting (live)',
-    description: '<p>Senior Engineer role.</p><ul><li>Own the platform</li></ul>',
+    description: '<p>Senior Engineer role.</p><ul><li>Own the platform</li></ul><p>' + 'You will design, build and operate the data platform that every product team relies on. '.repeat(3) + '</p>',
   });
   const entry = { key: 'k', url: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Toronto-ON-CAN/Role_R1', company: 'Acme', title: 'Senior Engineer', location: 'Toronto' };
   const result = await fetchOne(entry, {
@@ -514,6 +516,53 @@ test('fetchOne: API confirms the posting live with description text → status o
   assert.ok(result.text.includes('Senior Engineer role.'), `text: ${result.text}`);
   assert.ok(result.text.includes('Own the platform'), `text: ${result.text}`);
   assert.ok(result.chars > 0);
+});
+
+test('fetchOne: an API description under MIN_OK_CHARS is not ok — it falls through to the browser rung, which can still rescue it', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    const stubApi = async () => ({ result: 'active', code: 'workday_api_ok', reason: 'live', description: '<p>Senior Engineer role.</p>' });
+    const page = fakePage({ status: 200, bodyText: 'Ich bin interessiert. '.repeat(20), applyControls: ['Ich bin interessiert'] });
+    const entry = { key: 'k', url: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Toronto-ON-CAN/Role_R1', company: 'Acme', title: 'Senior Engineer', location: 'Toronto' };
+    const result = await fetchOne(entry, {
+      newPage: async () => page,
+      checkRobotsFn: async () => ({ retry: true }),
+      checkLivenessViaApiFn: stubApi,
+    });
+    assert.equal(result.status, 'ok');
+    assert.notEqual(result.liveness, 'workday_api_ok', 'the 27-char API stub must not be the JD');
+    assert.ok(result.chars >= MIN_OK_CHARS);
+  } finally {
+    restoreDns();
+  }
+});
+
+test('fetchOne: the MIN_OK_CHARS boundary — 25 chars is error/empty-text, exactly MIN_OK_CHARS is ok', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    const finalUrl = 'https://jobs.schaeffler.com/job/Herzogenaurach-Werkstudent/1';
+    const run = async (bodyText) => fetchOne(
+      { key: 'k', url: finalUrl, company: 'Schaeffler', title: 'Werkstudent', location: 'Herzogenaurach' },
+      {
+        newPage: async () => fakeActivePage({ bodyText, applyControls: ['Jetzt bewerben'], finalUrl }),
+        checkRobotsFn: async () => ({ retry: true }),
+        checkLivenessViaApiFn: apiInconclusive,
+      },
+    );
+    assert.equal(MIN_OK_CHARS, 200);
+    const stub = await run('Wir suchen Dich als Werkst');           // 26 chars, the Schaeffler shape
+    assert.equal(stub.status, 'error');
+    assert.equal(stub.liveness, 'empty-text');
+    assert.equal(stub.text, '');
+    const exact = await run('a'.repeat(MIN_OK_CHARS));
+    assert.equal(exact.status, 'ok');
+    assert.equal(exact.chars, MIN_OK_CHARS);
+    const justUnder = await run('a'.repeat(MIN_OK_CHARS - 1));
+    assert.equal(justUnder.status, 'error');
+    assert.equal(justUnder.liveness, 'empty-text');
+  } finally {
+    restoreDns();
+  }
 });
 
 test('fetchOne: API confirms the posting expired → status expired, no browser opened', async () => {
@@ -838,6 +887,108 @@ test('germanHardStop: preferences, alternatives and the country name never fire'
     'Englisch C1, Deutsch wünschenswert',
     'Standort: Deutschland, Remote C1-Gebäude',                 // "Deutschland" is not the language
     'Sehr gute Kenntnisse in Python und SQL',
+  ]) {
+    assert.equal(germanHardStop(line), null, line);
+  }
+});
+
+// Found on the 2026-09-29 pass: real fluent-tier lines the first version let
+// through. Root causes — (1) the hedge veto looked at the whole line, so a
+// "wünschenswert" attached to ENGLISH cancelled a hard German requirement;
+// (2) the sentence splitter cut "mind. C1" in half and the C1 gap refused the
+// dot; (3) JS w is ASCII-only, so "Kommunikationsfähigkeiten" broke every
+// word-run pattern; (4) no pattern for adjective+skills+"auf Deutsch", the
+// "fehlerfrei"/"Muttersprache" family, or "excellent English and German".
+test('germanHardStop: 2026-09-29 misses now fire, verbatim', () => {
+  for (const line of [
+    'Verhandlungssichere Deutschkenntnisse in Wort und Schrift, gute Englischkenntnisse wünschenswert',
+    'Strukturierte Arbeitsweise und ausgeprägte Kommunikationsfähigkeit auf Deutsch (mind. C1)',
+    'Sehr gute Kommunikationsfähigkeiten in Wort und Schrift auf Deutsch',
+    'Du sprichst und schreibst die deutsche Sprache fehlerfrei, um gekonnt mit unterschiedlichen Zielgruppen zu kommunizieren',
+    'Languages: You have excellent English and German skills for effective communication in our international team',
+    '- Sprachkenntnisse: Exzellente Kommunikationsfähigkeiten in Deutsch (fließend/Muttersprache) sowie gute Englischkenntnisse in Wort und Schrift.',
+    'Professional proficiency in German is required, alongside English',
+  ]) {
+    assert.equal(germanHardStop(`Werkstudent Data
+${line}
+Wir bieten Obstkorb.`), line, line);
+  }
+});
+
+test('germanHardStop: sibling phrasings (CEFR, native, perfect, excellent) fire', () => {
+  for (const line of [
+    'Deutsch auf C1-Niveau',
+    'Deutsch (C1)',
+    'German (C1)',
+    'German at C1 level',
+    'German language skills at C1 level',
+    'Excellent German',
+    'Perfect German',
+    'Native German',
+    'Native German speaker',
+    'Deutsch auf Muttersprachniveau',
+    'Deutsch als Muttersprache',
+    'Einwandfreie Deutschkenntnisse in Wort und Schrift',
+    'Perfekte Deutschkenntnisse',
+    'Sehr gutes Deutsch',
+    'Exzellente Deutschkenntnisse',
+    'Ausgezeichnete Kenntnisse in Deutsch und Englisch',
+    'Deutschkenntnisse (mind. C1)',
+    'Sehr gute mündliche und schriftliche Kommunikationsfähigkeiten in Deutsch und Englisch',
+    'Excellent written and spoken German',
+    'Business-level German and English',
+    'Muttersprache Deutsch oder vergleichbar',
+  ]) {
+    assert.equal(germanHardStop(line), line, line);
+  }
+});
+
+test('germanHardStop: a hedge on ANOTHER language does not veto the German requirement, one on the German still does', () => {
+  // hedge belongs to Englisch → German stays a hard stop
+  assert.ok(germanHardStop('Verhandlungssichere Deutschkenntnisse, Englischkenntnisse wünschenswert'));
+  assert.ok(germanHardStop('Fließend Deutsch (C1); Französisch von Vorteil'));
+  assert.ok(germanHardStop('Verhandlungssicheres Deutsch, Erfahrung mit SAP wünschenswert'));
+  // hedge belongs to Deutsch → preference
+  assert.equal(germanHardStop('Sehr gute Englischkenntnisse, Deutschkenntnisse von Vorteil'), null);
+  assert.equal(germanHardStop('Englisch C1, Deutsch wünschenswert'), null);
+  assert.equal(germanHardStop('Verhandlungssichere Deutsch- und Englischkenntnisse von Vorteil'), null);
+  assert.equal(germanHardStop('Von Vorteil: Deutsch (C1)'), null);
+  assert.equal(germanHardStop('Deutsch C1, ein Plus'), null);
+  assert.equal(germanHardStop('Excellent English and preferably German'), null);
+});
+
+test('germanHardStop: 2026-09-29 sibling negatives never fire', () => {
+  for (const line of [
+    'Gute Deutschkenntnisse',
+    'Gute Deutschkenntnisse in Wort und Schrift',
+    'Deutschkenntnisse von Vorteil',
+    'Deutschkenntnisse wünschenswert',
+    'Deutschkenntnisse sind ein Plus',
+    'German is a plus',
+    'German is a nice to have',
+    'English or German',
+    'Deutsch oder Englisch',
+    'Deutsch oder Englisch auf C1-Niveau',
+    'Sehr gute Deutsch- ODER Englischkenntnisse',
+    'Fluent English; German is nice to have',
+    'Fluent English, German is a plus',
+    'Arbeitsort: Deutschland',
+    'Location: Germany, hybrid',
+    'Standort Nürnberg, Deutschland',
+    'Deutsche Bahn AG',
+    'Wir sind Teil der Deutschen Bahn und suchen Talente mit fließend Englisch',
+    'Deutsche Telekom, Englisch C1',
+    'Deutsche Bank: ausgezeichnete Kenntnisse in Python',
+    'Deutsch B2, Englisch C1',
+    'German B2, English C1',
+    'Sehr gute Kenntnisse in Python und SQL',
+    'Sehr gute Kommunikationsfähigkeiten und Teamgeist',
+    'Ausgezeichnete Kenntnisse in Python und SQL',
+    'Excellent English and German-speaking customers',
+    'Excellent communication skills and a full German-language onboarding',
+    'Confirmed live via browser (full German JD + Apply Now control)',
+    'Perfect fit for a German student visa holder',
+    'Studiengang: Informatik (mind. 3. Semester). Deutsch ist die Teamsprache.',
   ]) {
     assert.equal(germanHardStop(line), null, line);
   }
