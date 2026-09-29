@@ -718,6 +718,7 @@ test('fetchOne: a readable StepStone page is served over plain HTTP without open
       checkRobotsFn: async () => ({ retry: true }),
       checkLivenessViaApiFn: apiInconclusive,
       fetchTextFn: async () => JD_HTML,
+      isHostBlockedFn: () => null,
     });
     assert.equal(result.status, 'ok');
     assert.equal(result.liveness, 'plain_http');
@@ -748,11 +749,61 @@ test('fetchOne: when the plain rung finds nothing, the browser path runs exactly
       checkRobotsFn: async () => ({ retry: true }),
       checkLivenessViaApiFn: apiInconclusive,
       fetchTextFn: async () => { const e = new Error('HTTP 403'); e.status = 403; throw e; },
+      isHostBlockedFn: () => null,
     });
     assert.equal(opened, true);
   } finally {
     restoreDns();
   }
+});
+
+// ─── circuit breaker (lib/host-circuit.mjs) ────────────────────────────────
+//
+// A host the breaker has tripped (StepStone/Indeed after a 403, see
+// lib/host-circuit.mjs) must receive NO request at all — not the robots.txt
+// read gateUrl would otherwise make, not the plain-HTTP rung, not the
+// browser. isHostBlockedFn is injected so this is provable with no real
+// data/host-blocks.json state.
+
+test('fetchOne: a circuit-broken host is never requested — no robots.txt read, no plain HTTP, no browser', async () => {
+  let robotsCalled = false;
+  let plainCalled = false;
+  const blocked = { host: 'stepstone.de', until: '2026-10-07T00:00:00.000Z', reason: 'HTTP 403' };
+  const result = await fetchOne({ key: 's4', url: STEPSTONE, company: 'ADAC', title: 'Werkstudent' }, {
+    newPage: () => { throw new Error('a circuit-broken host must never open the browser'); },
+    checkRobotsFn: async () => { robotsCalled = true; return { retry: true }; },
+    checkLivenessViaApiFn: apiInconclusive,
+    fetchTextFn: async () => { plainCalled = true; return JD_HTML; },
+    isHostBlockedFn: (host) => (host === 'www.stepstone.de' ? blocked : null),
+  });
+  assert.equal(robotsCalled, false, 'robots.txt must not be read for a circuit-broken host');
+  assert.equal(plainCalled, false, 'the plain-HTTP rung must not run for a circuit-broken host');
+  assert.equal(result.status, 'host-blocked');
+  assert.equal(result.chars, 0);
+  assert.equal(result.text, '');
+  assert.match(result.liveness, /circuit_breaker/);
+  assert.match(result.liveness, /2026-10-07/);
+  assert.equal(result.key, 's4');
+});
+
+test('fetchOne: a host with no recorded block proceeds normally', async () => {
+  const result = await fetchOne({ key: 's5', url: STEPSTONE }, {
+    newPage: () => { throw new Error('nope'); },
+    checkRobotsFn: async () => ({ retry: true }),
+    checkLivenessViaApiFn: apiInconclusive,
+    fetchTextFn: async () => JD_HTML,
+    isHostBlockedFn: () => null,
+  });
+  assert.equal(result.status, 'ok');
+});
+
+test('splitGatedResults: host-blocked gates to a SKIP line, same as robots-blocked/unsafe-url', () => {
+  const { gatedLines, rest, counts } = splitGatedResults([
+    { key: 'k1', company: 'ADAC', title: 'Werkstudent', status: 'host-blocked' },
+  ]);
+  assert.equal(rest.length, 0);
+  assert.equal(counts.notFetchable, 1);
+  assert.match(gatedLines[0], /^k1\tTRIAGE: SKIP \| ADAC \| Werkstudent \| 0\/5 \| Not fetchable/);
 });
 
 // ─── zero-token German gate + deterministic verdicts ───────────────────────

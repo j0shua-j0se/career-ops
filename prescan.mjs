@@ -381,9 +381,14 @@ export function renderPrescanLogLine(summary) {
     return `${id} ${bits.join(' ')}`;
   };
   const jd = summary?.jd || { ok: 0, expired: 0, other: 0 };
+  const aggStep = steps['resolve-aggregator-leads'];
+  const aggExtra = aggStep && typeof aggStep.resolved === 'number' && typeof aggStep.total === 'number'
+    ? `coverage=${aggStep.resolved}/${aggStep.total}`
+    : '';
   return `- ${summary?.started_at ?? '?'} → ${summary?.finished_at ?? '?'} `
     + `| ${fmtScan('portals')} `
     + `| ${fmtScan('ats-recent')} `
+    + `| ${fmtSimple('resolve-aggregator-leads', aggExtra)} `
     + `| ${fmtSimple('triage-prefilter', `free-rejected=${summary?.free_rejected ?? '?'}`)} `
     + `| ${fmtSimple('fetch-jds', `jd-ok=${jd.ok} jd-expired=${jd.expired} jd-other=${jd.other}`)} `
     + `| pending-left=${summary?.pending_left ?? '?'}`;
@@ -422,6 +427,8 @@ function printDryRunPlan(scanSteps) {
     console.log(`  ${n}. ${s.command} ${s.args.join(' ')}   # ${s.describe}`);
     n += 1;
   }
+  console.log(`  ${n}. node resolve-aggregator-leads.mjs --write   # resolve StepStone/Indeed leads to the employer's own posting`);
+  n += 1;
   console.log(`  ${n}. node triage-prefilter.mjs --mark-skips --write`);
   n += 1;
   console.log(`  ${n}. node fetch-jds.mjs --file ${relToRoot(JD_BATCH_PATH)} --out ${relToRoot(JD_OUT_PATH)}`
@@ -468,6 +475,25 @@ function stepAtsRecentRun(step) {
     companiesScanned: summarized.companiesScanned,
     new: summarized.new,
     bySource: summarized.bySource,
+  };
+}
+
+/**
+ * Resolve any StepStone/Indeed aggregator lead already sitting in
+ * `data/pipeline.md` to the employer's own posting, before triage-prefilter
+ * or fetch-jds ever touches it — see resolve-aggregator-leads.mjs's file doc.
+ * Runs `--write` (this is the unattended pass; preview mode has no effect
+ * here) and is a true no-op when the inbox has no aggregator leads, so it
+ * costs nothing on every run where StepStone/Indeed contributed nothing new.
+ */
+function stepResolveAggregatorLeadsRun() {
+  const result = runChild('node', ['resolve-aggregator-leads.mjs', '--write'], { captureStdout: true });
+  const out = result.stdout?.toString('utf-8') || '';
+  const m = /coverage (\d+)\/(\d+) aggregator lead/.exec(out);
+  return {
+    exitCode: result.status ?? 1,
+    resolved: m ? Number(m[1]) : 0,
+    total: m ? Number(m[2]) : 0,
   };
 }
 
@@ -536,6 +562,12 @@ async function runAll(scanSteps) {
       id: s.id,
       run: async () => (s.id === 'portals' ? stepPortalsRun(s) : stepAtsRecentRun(s)),
     })),
+    // Right after the scan (portals + ats-recent), before triage-prefilter
+    // narrows the inbox down: a StepStone/Indeed lead scan.mjs or
+    // scan-ats-full.mjs just added is resolved to the employer's own posting
+    // while it is still cheap to do so, not after triage has already spent a
+    // free-rejected/pending judgement on the aggregator URL.
+    { id: 'resolve-aggregator-leads', run: async () => stepResolveAggregatorLeadsRun() },
     { id: 'triage-prefilter', run: async () => stepTriagePrefilterRun() },
     { id: 'fetch-jds', run: async () => stepFetchJdsRun() },
   ];

@@ -427,9 +427,11 @@ export function decideNextStage(state, facts = {}) {
       ...base,
       pending,
       reason: `${pending} URL(s) pending in data/pipeline.md`,
-      instructions: 'Follow `modes/pipeline.md` end to end: Gmail sweep, liveness sweep, pre-screen '
-        + 'gate, then evaluate each surviving URL into a report and a tracker TSV. Do not build CVs '
-        + 'here — the kits stage does that once every row has a score.',
+      instructions: 'Follow `modes/pipeline.md` end to end: Gmail sweep, aggregator-lead resolution '
+        + '(`node resolve-aggregator-leads.mjs --write` — rewrites any StepStone/Indeed lead to the '
+        + "employer's own posting before it is opened; a no-op when the inbox has none), liveness "
+        + 'sweep, pre-screen gate, then evaluate each surviving URL into a report and a tracker TSV. '
+        + 'Do not build CVs here — the kits stage does that once every row has a score.',
     };
   }
 

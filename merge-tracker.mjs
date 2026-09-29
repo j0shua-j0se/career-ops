@@ -21,11 +21,21 @@ import { readFileSync, readdirSync, mkdirSync, renameSync, existsSync } from 'fs
 import { join, basename, dirname, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
+import * as yaml from 'js-yaml';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { roleFuzzyMatch, roleTokens } from './role-matcher.mjs';
 import { parsePdfIndex } from './find.mjs';
 import { LEGACY_COLMAP, TSV_REQUIRED_FIELDS, detectColumns, isHeaderRow, resolveScoreStatus, looksLikeTsvHeaderRow, resolveTsvColumns, looksLikeScoreCell, normalizeVia, normalizeTextKey, SEPARATOR_ROW_RE, stripCrossReferences, REQ_NUMBER_RE, extractReqNumber, resolveUpdatedStatus } from './tracker-parse.mjs';
+// Aggregator-host detection, shared with resolve-aggregator-leads.mjs rather
+// than a second private list (stepstone.de/indeed.* is exactly the same
+// question there and here — see the merge-time guard below).
+import { isAggregatorUrl } from './resolve-aggregator-leads.mjs';
+// Zero-network tier 1 only (an already-tracked portals.yml board) — the same
+// function lib/resolve-employer-posting.mjs itself tries first, imported
+// rather than re-implemented so "is this company's board already known"
+// can never drift between the two call sites.
+import { findPortalsEntry } from './lib/resolve-employer-posting.mjs';
 // Corporate-form vocabulary, shared with invite-match.mjs rather than copied,
 // for the same reason normalizeCompany lives in tracker-utils: a second private
 // list is how company identity drifts between scripts (#2445, #3665).
@@ -68,6 +78,24 @@ const MERGED_DIR = join(ADDITIONS_DIR, 'merged');
 const BATCH_STATE_FILE = process.env.CAREER_OPS_BATCH_STATE
   ? process.env.CAREER_OPS_BATCH_STATE
   : join(DATA_ROOT, 'batch/batch-state.tsv');
+// CAREER_OPS_PORTALS overrides portals.yml's path (used by tests, mirrors
+// CAREER_OPS_TRACKER). Only read for the aggregator-URL guard below — a
+// missing/unparseable file degrades to "no board known" rather than blocking
+// every merge.
+const PORTALS_FILE = process.env.CAREER_OPS_PORTALS
+  ? process.env.CAREER_OPS_PORTALS
+  : join(DATA_ROOT, 'portals.yml');
+
+/** @returns {any} */
+function loadPortalsConfig() {
+  if (!existsSync(PORTALS_FILE)) return {};
+  try {
+    return yaml.load(readFileSync(PORTALS_FILE, 'utf-8')) ?? {};
+  } catch {
+    return {};
+  }
+}
+const PORTALS_CONFIG = loadPortalsConfig();
 
 // Cross-check against batch-state.tsv (found 2026-07-30): a worker can write
 // a well-formed tracker TSV even when its own JSON result said "failed" --
@@ -1403,6 +1431,22 @@ for (const file of tsvFiles) {
   // would populate the column while leaving Pass 0 nothing to match on, which is
   // the original bug with extra steps.
   if (!addition.url) addition.url = resolveReportUrl(addition.report).url;
+
+  // Refuse to write an aggregator (StepStone/Indeed) URL into the tracker's
+  // URL column when the employer's own board is already known — zero-network
+  // only (portals.yml's tracked_companies, the same tier
+  // lib/resolve-employer-posting.mjs tries first), so this never blocks a
+  // merge on a network call. A StepStone lead is a dead end for the user
+  // whenever lib/host-circuit.mjs's breaker is tripped for it (see
+  // providers/stepstone.mjs), and even when it isn't, the employer's own
+  // posting is the one worth keeping in the tracker.
+  if (addition.url && isAggregatorUrl(addition.url) && findPortalsEntry(addition.company, PORTALS_CONFIG)) {
+    let aggregatorHost = addition.url;
+    try { aggregatorHost = new URL(addition.url).hostname; } catch { /* keep the raw URL in the message */ }
+    console.warn(`⚠️  Skipping ${file}: URL is a ${aggregatorHost} aggregator listing for "${addition.company}", whose own board is already tracked in portals.yml — run \`node resolve-aggregator-leads.mjs --write\` to resolve it to the employer's posting first, then re-merge.`);
+    skipped++;
+    continue;
+  }
 
   // Check for duplicate by:
   // 0. Exact normalized posting URL (deterministic, authoritative)

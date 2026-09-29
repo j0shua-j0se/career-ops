@@ -987,7 +987,7 @@ search_queries:
 # field: 4dayweek, agentic-jobs, arbeitnow, arbeitsagentur, flowxtra, getonbrd, glints,
 # himalayas, ibm, jobbankca, jobicy, jobstreet, justjoin, landingjobs, mycareersfuture, nofluffjobs, remoteok, remotive, senjob,
 # manfred, thehub, vdab, weworkremotely, workingnomads, wttj, a16z-speedrun-talent,
-# telegram-channel. Examples for every built-in provider are below.
+# telegram-channel, pinloop. Examples for every built-in provider are below.
 
 # ── Built-in provider examples ────────────────────────────────────
 # One commented stanza per provider in providers/. Uncomment one and adjust.
@@ -1351,6 +1351,18 @@ search_queries:
 #   channel: jobforjunior # handle without the @ (5-32 letters, digits, underscores)
 #   since_days: 30        # optional window; pages are walked back until it (default 30)
 #   max_pages: 10         # optional page cap (20 posts/page, default 10, max 10)
+#   enabled: true
+#
+# - name: Pinloop — career sites, AI Roles  # wraps the user's own `pinloop` CLI (free tier)
+#   provider: pinloop                       # no detect() — a CLI wrapper has no careers_url/api to match
+#   pinloop:
+#     title_query: "(AI OR machine learning) AND engineer"  # required boolean title expression
+#     from: "career sites"    # required place: "career sites" or "job boards" (default "career sites")
+#     country: Germany        # optional (default Germany)
+#     words: []                # optional extra terms checked client-side vs. title+company+location
+#     lookback_days: 2         # optional recency window -> --posted-after (default 2)
+#     daily_pull_budget: 5     # optional local mirror of the account's daily pull cap (default 5, free plan)
+#     allow_job_board_urls: false  # optional: keep linkedin.com/xing.com rows too (default false, dropped)
 #   enabled: true
 #
 # -- Remote-job feeds  (→ job_boards:; set provider: plus any provider-specific fields) --

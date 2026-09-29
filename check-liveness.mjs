@@ -33,6 +33,7 @@ import {
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { checkRobots } from './robots-gate.mjs';
 import { extractPipelineUrls } from './liveness-core.mjs';
+import { isHostBlocked, describeBlock } from './lib/host-circuit.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
 const USAGE = `Usage:
@@ -141,6 +142,26 @@ async function main() {
   for (let i = 0; i < urls.length; i++) {
     const url = urls[i];
     let result, reason, usedBrowser = false;
+
+    // Circuit breaker — checked before ANY request for this URL (ahead of even
+    // the zero-token API rung, since a future ATS-API host could in principle
+    // also get tripped). A host that has already refused this machine
+    // (StepStone since 2026-09-23; see lib/host-circuit.mjs) gets no further
+    // traffic until its cooldown elapses — reported `uncertain` rather than
+    // `expired`, because the breaker says nothing about whether the posting
+    // itself is still live, only that this machine cannot currently ask.
+    let hostForBreaker = '';
+    try { hostForBreaker = new URL(url).hostname; } catch { /* falls through to the normal checks below, which handle a bad URL */ }
+    const circuitBlock = hostForBreaker ? isHostBlocked(hostForBreaker) : null;
+    if (circuitBlock) {
+      result = 'uncertain';
+      reason = `uncertain: ${describeBlock(circuitBlock)}`;
+      const icon = '⚠️';
+      console.log(`${icon} ${result.padEnd(10)}       ${url}`);
+      console.log(`           ${reason}`);
+      uncertain++;
+      continue;
+    }
 
     // Rung 1: zero-token ATS API check. A conclusive active/expired wins; otherwise fall through.
     const api = await checkLivenessViaApi(url);

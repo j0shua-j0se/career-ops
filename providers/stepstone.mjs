@@ -1,24 +1,46 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
-// StepStone provider — the largest German job board, and until now the biggest
-// hole in this scanner.
+// StepStone provider — the largest German job board.
 //
-// WHY THIS IS NOT A `ctx.fetchJson` PROVIDER
-// StepStone publishes no usable job API. `/public-api/` is explicitly
-// Disallowed in their robots.txt, the search page carries JSON-LD for the PAGE
-// (WebPage / BreadcrumbList / FAQ) but not for the postings, and a plain
-// `fetch` is refused outright by their edge. What does work is the `scrapling`
-// CLI already installed on this machine, which renders the page and returns
-// HTTP 200. So this provider shells out to that binary and parses the rendered
-// listing markup.
+// POLICY (rewritten 2026-09-24 — read this before changing the fetch path)
+// This provider used to shell out to `scrapling extract stealthy-fetch`, a
+// bot-detection-evasion CLI, to render the search page. On 2026-09-23,
+// StepStone started answering HTTP 403 to BOTH this machine AND the user's own
+// browser on the same IP — very likely triggered by that stealth traffic
+// tripping StepStone's own abuse detection and blocking the whole egress IP,
+// not just the automation. That is exactly the outcome bot-detection evasion
+// exists to prevent, achieved by using it.
+//
+// The fix is not a stealthier fetch. It is fetching the way this repo fetches
+// every other provider: a PLAIN HTTP request through `providers/_http.mjs`
+// (`fetchText`), carrying the project's honest default User-Agent
+// (`career-ops/1.0`, see user-agent.mjs) — no fingerprint spoofing, no headless
+// browser, no CAPTCHA solving, no proxy/IP rotation. If StepStone still refuses
+// the honest request (403/429, or a recognisable bot-challenge page even on a
+// 200), this provider does NOT retry harder or escalate — it returns zero jobs
+// for that request and trips `lib/host-circuit.mjs`'s circuit breaker for
+// `www.stepstone.de`, so every OTHER caller in this repo (the Indeed-style
+// PLAIN_HTTP rung in fetch-jds.mjs, the Playwright liveness rung, and
+// check-liveness.mjs) stops sending it requests too, for 14 days. That is the
+// whole point of the breaker: a job board that has started refusing this
+// machine gets left alone rather than hammered.
+//
+// Every fetch consults the breaker FIRST, before a single request goes out —
+// see `isHostBlocked` below. `node lib/host-circuit.mjs --list` shows the
+// current state; `--clear www.stepstone.de` lifts a block early once access is
+// confirmed restored (e.g. the user can load stepstone.de in their own browser
+// again).
 //
 // ROBOTS
 // Only the modern `/jobs/{query}/in-{city}` search path is used. StepStone's
-// robots.txt (checked 2026-08-11) Disallows the legacy `/5/` search endpoints,
-// `/public-api/`, `/jobagent/`, `/m/` and `/mobile/` — none of which this
-// touches — and does not Disallow `/jobs/`. Keep it that way: if a future
-// change needs a different path, re-read robots.txt first.
+// robots.txt (checked 2026-08-11, re-checked per-request via robots-gate.mjs
+// below) Disallows the legacy `/5/` search endpoints, `/public-api/`,
+// `/jobagent/`, `/m/` and `/mobile/` — none of which this touches — and does
+// not Disallow `/jobs/`. Keep it that way: if a future change needs a
+// different path, re-read robots.txt first. A disallowed path is a REFUSAL,
+// same as robots-gate.mjs treats it everywhere else in this repo — this
+// provider does not retry it with different headers.
 //
 // WHY MARKUP PARSING IS ACCEPTABLE HERE
 // StepStone annotates its listing cards with stable `data-at` hooks
@@ -36,27 +58,25 @@
 //       city: erlangen
 //       radius: 50
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import { readFileSync, unlinkSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { randomBytes } from 'crypto';
 // The shared decoder, not a private copy: five providers grew their own and the
 // weakest emitted C0 control characters. test-all.mjs fails the build if a
 // provider declares decodeEntities itself (#2902).
 import { decodeEntities } from './_html-entities.mjs';
-
-const execFileAsync = promisify(execFile);
+import { fetchText } from './_http.mjs';
+import { checkRobots } from '../robots-gate.mjs';
+import { isHostBlocked, tripHost, describeBlock } from '../lib/host-circuit.mjs';
 
 const HOST = 'www.stepstone.de';
 const DEFAULT_RADIUS = 30;
 const DEFAULT_CITY = 'erlangen';
-// A rendered search page is ~1MB and takes several seconds; a handful of
-// queries is the useful range. The cap stops a mis-typed config from turning
-// one board into a multi-hour crawl.
+// A search page over plain HTTP is a normal server-rendered response, not a
+// multi-second headless render — 20s leaves comfortable room for a slow day
+// without letting one stalled query stall a whole board.
 const MAX_QUERIES = 12;
-const FETCH_TIMEOUT_MS = 120_000;
+const FETCH_TIMEOUT_MS = 20_000;
+// A refusal earns the requesting host a two-week cooldown everywhere in this
+// repo — see lib/host-circuit.mjs's file doc for why 14 days.
+const CIRCUIT_TRIP_DAYS = 14;
 
 // A search that legitimately matches nothing still renders a full page, so
 // "no cards" alone cannot mean "the parser broke". Without this the provider
@@ -64,6 +84,13 @@ const FETCH_TIMEOUT_MS = 120_000;
 // in production, where one narrow query aborted four working ones.
 export const EMPTY_RESULT_RE = /keine\s+(?:passenden\s+)?(?:stellenangebote|jobs|treffer)|0\s+passende\s+jobs|nichts\s+gefunden|no\s+(?:matching\s+)?jobs\s+found/i;
 
+// A recognisable bot-block/challenge page, even when it answers HTTP 200 (a
+// WAF "soft block" that never reaches the origin). Matched in addition to the
+// status-code check below, because a plain `fetchText` cannot see a JS
+// challenge execute — only that the body it got back is one, not a search
+// results page. Any hit here is treated exactly like a 403: trip the breaker,
+// send no more requests this run.
+export const BOT_BLOCK_RE = /\b(access denied|pardon our interruption|attention required|are you a human|verify you are human|unusual traffic|request blocked|cf-error-details|captcha)\b/i;
 
 const stripTags = (html) => decodeEntities(String(html).replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
 
@@ -212,37 +239,34 @@ export function buildSearchUrl(query, city = DEFAULT_CITY, radius = DEFAULT_RADI
 }
 
 /**
- * Render one search URL via the scrapling CLI and return its HTML.
- * Throws with an actionable message when scrapling is absent — a missing
- * binary must not read as "no jobs found".
+ * Fetch one search URL over plain HTTP and return its HTML.
+ *
+ * Deliberately the ONLY transport this provider uses now — no headless
+ * browser, no stealth fetch. `fetchText` (providers/_http.mjs) carries the
+ * project's honest default User-Agent and enforces the shared SSRF guards; it
+ * throws with `.status` set on a non-2xx response, which is how the caller
+ * tells a refusal (403/429) apart from a network error.
+ *
+ * @param {string} url
+ * @param {{fetchTextFn?: typeof fetchText}} [deps]
+ * @returns {Promise<string>}
  */
-async function renderViaScrapling(url) {
-  const out = join(tmpdir(), `career-ops-stepstone-${randomBytes(6).toString('hex')}.html`);
-  try {
-    await execFileAsync('scrapling', ['extract', 'stealthy-fetch', url, out], {
-      timeout: FETCH_TIMEOUT_MS,
-      windowsHide: true,
-    });
-    return readFileSync(out, 'utf-8');
-  } catch (err) {
-    if (err && (err.code === 'ENOENT' || /not recognized|not found/i.test(String(err.message)))) {
-      throw new Error(
-        'stepstone: the `scrapling` CLI is not on PATH. StepStone has no usable API and a plain fetch is '
-        + 'refused, so this provider cannot run without it. Install it (pipx install scrapling && scrapling install) '
-        + 'or disable the StepStone board in portals.yml.',
-      );
-    }
-    throw new Error(`stepstone: scrapling failed for ${url} — ${err?.message ?? err}`);
-  } finally {
-    try { unlinkSync(out); } catch { /* best effort */ }
-  }
+async function fetchStepstonePage(url, { fetchTextFn = fetchText } = {}) {
+  return fetchTextFn(url, { timeoutMs: FETCH_TIMEOUT_MS });
 }
 
 /** @type {Provider} */
 export default {
   id: 'stepstone',
 
-  async fetch(entry) {
+  async fetch(entry, deps = {}) {
+    const {
+      fetchTextFn = fetchText,
+      checkRobotsFn = checkRobots,
+      isHostBlockedFn = isHostBlocked,
+      tripHostFn = tripHost,
+    } = deps;
+
     const cfg = entry?.stepstone ?? {};
     const queries = Array.isArray(cfg.queries) ? cfg.queries.filter(Boolean) : [];
     if (queries.length === 0) {
@@ -255,6 +279,16 @@ export default {
       throw new Error(`stepstone: ${queries.length} queries exceeds the cap of ${MAX_QUERIES} — split the board.`);
     }
 
+    // Circuit breaker — consulted BEFORE any request, every run. A host that
+    // has already refused this machine gets no further traffic until the
+    // cooldown elapses, no matter how many queries are configured.
+    const blocked = isHostBlockedFn(HOST);
+    if (blocked) {
+      console.error(`⚠️  stepstone: ${HOST} is circuit-broken (${describeBlock(blocked)}) — sending no requests this run. `
+        + `Once access is confirmed restored, clear it with \`node lib/host-circuit.mjs --clear ${HOST}\`.`);
+      return [];
+    }
+
     const city = cfg.city ?? DEFAULT_CITY;
     const radius = cfg.radius ?? DEFAULT_RADIUS;
     const out = [];
@@ -264,16 +298,48 @@ export default {
     // Indeed provider for the incident this prevents.
     const failures = [];
     let succeeded = 0;
+    let tripped = false;
 
     for (const query of queries) {
+      if (tripped) break; // the breaker just tripped mid-loop — stop sending requests now, not after the loop finishes.
+
       const url = buildSearchUrl(query, city, radius);
+
+      const robotsVerdict = await checkRobotsFn(url);
+      if (!robotsVerdict.retry && robotsVerdict.code === 'disallowed') {
+        failures.push(`"${query}": robots.txt disallows ${url} — ${robotsVerdict.reason}`);
+        continue;
+      }
+
       let html = '';
       let jobs = [];
       try {
-        html = await renderViaScrapling(url);
+        html = await fetchStepstonePage(url, { fetchTextFn });
         jobs = parseStepstoneHtml(html);
       } catch (err) {
+        const status = err?.status;
+        if (status === 403 || status === 429) {
+          tripHostFn(HOST, {
+            status,
+            reason: `stepstone: HTTP ${status} on ${url}`,
+            days: CIRCUIT_TRIP_DAYS,
+          });
+          failures.push(`"${query}": HTTP ${status} — circuit breaker tripped for ${HOST} (${CIRCUIT_TRIP_DAYS} days)`);
+          tripped = true;
+          continue;
+        }
         failures.push(`"${query}": ${err?.message ?? err}`);
+        continue;
+      }
+
+      if (BOT_BLOCK_RE.test(html)) {
+        tripHostFn(HOST, {
+          status: 200,
+          reason: `stepstone: bot-challenge page served for ${url}`,
+          days: CIRCUIT_TRIP_DAYS,
+        });
+        failures.push(`"${query}": bot-challenge page (HTTP 200 body) — circuit breaker tripped for ${HOST} (${CIRCUIT_TRIP_DAYS} days)`);
+        tripped = true;
         continue;
       }
 
@@ -299,7 +365,11 @@ export default {
       }
     }
 
-    if (succeeded === 0 && failures.length > 0) {
+    // A circuit trip is not a provider fault to fail the scan over — it is the
+    // provider correctly refusing to keep hammering a host that just declined
+    // it. Report zero jobs and a clear warning, same as the already-blocked
+    // early return above, rather than throwing and aborting the whole run.
+    if (succeeded === 0 && failures.length > 0 && !tripped) {
       throw new Error(`stepstone: every query failed —\n  ${failures.join('\n  ')}`);
     }
     if (failures.length > 0) {

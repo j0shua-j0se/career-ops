@@ -2,6 +2,9 @@
 /** @typedef {import('./_types.js').Provider} Provider */
 
 import { safeEncodeURIComponent } from './_safe-url.mjs';
+import { fetchText } from './_http.mjs';
+import { checkRobots } from '../robots-gate.mjs';
+import { isHostBlocked, tripHost, describeBlock } from '../lib/host-circuit.mjs';
 
 // Indeed provider.
 //
@@ -9,16 +12,39 @@ import { safeEncodeURIComponent } from './_safe-url.mjs';
 // `portals.yml` → KNOWN GAPS said Indeed "cannot get a provider", and the
 // reasoning looked sound: the Publisher API is gone, the RSS endpoint returns
 // 403, and the Indeed MCP is a tool only an agent can call. But nobody had
-// tried the ordinary search page through a rendering fetcher. It returns HTTP
-// 200 with the full result set embedded as JSON, no CAPTCHA, no credential.
+// tried the ordinary search page through an honest HTTP request. It answers a
+// plain `fetchText` with HTTP 200 and the full result set embedded as JSON, no
+// CAPTCHA, no credential, no rendering needed.
+//
+// POLICY (rewritten 2026-09-24 — read this before changing the fetch path)
+// This provider used to shell out to `scrapling extract stealthy-fetch`, a
+// bot-detection-evasion CLI, alongside providers/stepstone.mjs. It never had
+// to: the search page is plain server-rendered HTML with the job data inlined
+// as JSON, exactly the shape `fetchText` (providers/_http.mjs) already reads
+// for every other provider in this repo. Stealth fetching was strictly worse
+// here — StepStone's near-identical setup started 403ing this machine's WHOLE
+// IP on 2026-09-23, very likely because of exactly that kind of traffic — so
+// this provider now uses the same plain HTTP path, carrying the project's
+// honest default User-Agent (`career-ops/1.0`), no fingerprint spoofing, no
+// headless browser, no CAPTCHA solving, no proxy/IP rotation.
+//
+// If Indeed ever refuses the honest request (403/429, or a recognisable
+// bot-challenge page even on a 200), this provider does NOT retry harder — it
+// returns zero jobs for that request and trips `lib/host-circuit.mjs`'s
+// circuit breaker for the domain in question, so every other caller in this
+// repo stops sending it requests too, for 14 days. Every fetch consults the
+// breaker FIRST, before a single request goes out. `node lib/host-circuit.mjs
+// --list` shows current state; `--clear <domain>` lifts a block early once
+// access is confirmed restored.
 //
 // ROBOTS
 // de.indeed.com/robots.txt gives `User-agent: * → Allow: /`, and its Disallow
 // list covers country-SEGMENT paths (`/jobs/DE/`, `/jobs/CA/`, …), `/m/…`
 // mobile endpoints and various RPC paths. The search endpoint used here,
-// `/jobs?q=…&l=…`, matches none of those. Re-read robots.txt before pointing
-// this at any other path — in particular `/jobs/DE/` IS disallowed, so never
-// build a country-segment URL.
+// `/jobs?q=…&l=…`, matches none of those. Every request is checked against
+// robots.txt at fetch time (robots-gate.mjs), not just documented here — a
+// disallowed path is a refusal and this provider does not retry it. In
+// particular `/jobs/DE/` IS disallowed, so never build a country-segment URL.
 //
 // WHY THE DATA IS TRUSTWORTHY
 // Indeed ships its results as a JSON blob in
@@ -36,19 +62,16 @@ import { safeEncodeURIComponent } from './_safe-url.mjs';
 //       radius: 50
 //       queries: ["werkstudent data science", "praktikum machine learning"]
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import { readFileSync, unlinkSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { randomBytes } from 'crypto';
-
-const execFileAsync = promisify(execFile);
-
 const DEFAULT_DOMAIN = 'de.indeed.com';
 const DEFAULT_RADIUS = 50;
 const MAX_QUERIES = 12;
-const FETCH_TIMEOUT_MS = 120_000;
+// A search page over plain HTTP is a normal server-rendered response, not a
+// multi-second headless render — 20s leaves comfortable room for a slow day
+// without letting one stalled query stall a whole board.
+const FETCH_TIMEOUT_MS = 20_000;
+// A refusal earns the requesting host a two-week cooldown everywhere in this
+// repo — see lib/host-circuit.mjs's file doc for why 14 days.
+const CIRCUIT_TRIP_DAYS = 14;
 // Every Indeed host is `<cc>.indeed.com` or `indeed.com`. Anything else is a
 // misconfiguration or a redirect somewhere unexpected, and must not be fetched.
 const HOST_RE = /^([a-z]{2}\.)?indeed\.com$/i;
@@ -63,6 +86,14 @@ const HOST_RE = /^([a-z]{2}\.)?indeed\.com$/i;
 // why a German-only pattern missed it. Verified against a live empty query
 // ("praktikum data science" in Erlangen, 597 KB, no payload, no CAPTCHA).
 export const EMPTY_RESULT_RE = /no\s+jobs\s+with\s+this\s+search\s+condition|keine\s+(?:passenden\s+)?stellenanzeigen|nichts\s+gefunden|did\s+not\s+match\s+any\s+jobs|no\s+jobs\s+(?:were\s+)?found/i;
+
+// A recognisable bot-block/challenge page, even when it answers HTTP 200 (a
+// WAF "soft block" that never reaches the origin). Matched in addition to the
+// status-code check below, because a plain `fetchText` cannot see a JS
+// challenge execute — only that the body it got back is one, not a search
+// results page. Any hit here is treated exactly like a 403: trip the breaker,
+// send no more requests this run.
+export const BOT_BLOCK_RE = /\b(access denied|pardon our interruption|attention required|are you a human|verify you are human|unusual traffic|request blocked|cf-error-details|captcha)\b/i;
 
 /**
  * Pull the job-card payload out of a rendered search page.
@@ -140,34 +171,35 @@ export function buildSearchUrl(query, { domain = DEFAULT_DOMAIN, city = '', radi
   return u.toString();
 }
 
-/** Render one search URL via the scrapling CLI. */
-async function renderViaScrapling(url) {
-  const out = join(tmpdir(), `career-ops-indeed-${randomBytes(6).toString('hex')}.html`);
-  try {
-    await execFileAsync('scrapling', ['extract', 'stealthy-fetch', url, out], {
-      timeout: FETCH_TIMEOUT_MS,
-      windowsHide: true,
-    });
-    return readFileSync(out, 'utf-8');
-  } catch (err) {
-    if (err && (err.code === 'ENOENT' || /not recognized|not found/i.test(String(err.message)))) {
-      throw new Error(
-        'indeed: the `scrapling` CLI is not on PATH. Indeed has no public job API and a plain fetch is '
-        + 'refused, so this provider cannot run without it. Install it (pipx install scrapling && '
-        + 'scrapling install) or disable the Indeed board in portals.yml.',
-      );
-    }
-    throw new Error(`indeed: scrapling failed for ${url} — ${err?.message ?? err}`);
-  } finally {
-    try { unlinkSync(out); } catch { /* best effort */ }
-  }
+/**
+ * Fetch one search URL over plain HTTP and return its HTML.
+ *
+ * Deliberately the ONLY transport this provider uses now — no headless
+ * browser, no stealth fetch. `fetchText` (providers/_http.mjs) carries the
+ * project's honest default User-Agent and enforces the shared SSRF guards; it
+ * throws with `.status` set on a non-2xx response, which is how the caller
+ * tells a refusal (403/429) apart from a network error.
+ *
+ * @param {string} url
+ * @param {{fetchTextFn?: typeof fetchText}} [deps]
+ * @returns {Promise<string>}
+ */
+async function fetchIndeedPage(url, { fetchTextFn = fetchText } = {}) {
+  return fetchTextFn(url, { timeoutMs: FETCH_TIMEOUT_MS });
 }
 
 /** @type {Provider} */
 export default {
   id: 'indeed',
 
-  async fetch(entry) {
+  async fetch(entry, deps = {}) {
+    const {
+      fetchTextFn = fetchText,
+      checkRobotsFn = checkRobots,
+      isHostBlockedFn = isHostBlocked,
+      tripHostFn = tripHost,
+    } = deps;
+
     const cfg = entry?.indeed ?? {};
     const queries = Array.isArray(cfg.queries) ? cfg.queries.filter(Boolean) : [];
     if (queries.length === 0) {
@@ -185,6 +217,16 @@ export default {
     const city = cfg.city ?? '';
     const radius = cfg.radius ?? DEFAULT_RADIUS;
 
+    // Circuit breaker — consulted BEFORE any request, every run. A domain that
+    // has already refused this machine gets no further traffic until the
+    // cooldown elapses, no matter how many queries are configured.
+    const blocked = isHostBlockedFn(domain);
+    if (blocked) {
+      console.error(`⚠️  indeed: ${domain} is circuit-broken (${describeBlock(blocked)}) — sending no requests this run. `
+        + `Once access is confirmed restored, clear it with \`node lib/host-circuit.mjs --clear ${domain}\`.`);
+      return [];
+    }
+
     const out = [];
     const seen = new Set();
     // One bad query must not take the board down with it. The first version
@@ -195,16 +237,48 @@ export default {
     // zero rows while looking configured and enabled.
     const failures = [];
     let succeeded = 0;
+    let tripped = false;
 
     for (const query of queries) {
+      if (tripped) break; // the breaker just tripped mid-loop — stop sending requests now, not after the loop finishes.
+
       const url = buildSearchUrl(query, { domain, city, radius });
+
+      const robotsVerdict = await checkRobotsFn(url);
+      if (!robotsVerdict.retry && robotsVerdict.code === 'disallowed') {
+        failures.push(`"${query}": robots.txt disallows ${url} — ${robotsVerdict.reason}`);
+        continue;
+      }
+
       let jobs = [];
       let html = '';
       try {
-        html = await renderViaScrapling(url);
+        html = await fetchIndeedPage(url, { fetchTextFn });
         jobs = parseIndeedHtml(html, domain);
       } catch (err) {
+        const status = err?.status;
+        if (status === 403 || status === 429) {
+          tripHostFn(domain, {
+            status,
+            reason: `indeed: HTTP ${status} on ${url}`,
+            days: CIRCUIT_TRIP_DAYS,
+          });
+          failures.push(`"${query}": HTTP ${status} — circuit breaker tripped for ${domain} (${CIRCUIT_TRIP_DAYS} days)`);
+          tripped = true;
+          continue;
+        }
         failures.push(`"${query}": ${err?.message ?? err}`);
+        continue;
+      }
+
+      if (BOT_BLOCK_RE.test(html)) {
+        tripHostFn(domain, {
+          status: 200,
+          reason: `indeed: bot-challenge page served for ${url}`,
+          days: CIRCUIT_TRIP_DAYS,
+        });
+        failures.push(`"${query}": bot-challenge page (HTTP 200 body) — circuit breaker tripped for ${domain} (${CIRCUIT_TRIP_DAYS} days)`);
+        tripped = true;
         continue;
       }
 
@@ -230,9 +304,15 @@ export default {
       }
     }
 
-    // Only a total wipeout is a board-level fault worth failing on: that is the
-    // signal that something systemic changed, rather than one query being narrow.
-    if (succeeded === 0 && failures.length > 0) {
+    // A circuit trip is not a provider fault to fail the scan over — it is the
+    // provider correctly refusing to keep hammering a host that just declined
+    // it. Report zero jobs and a clear warning, same as the already-blocked
+    // early return above, rather than throwing and aborting the whole run.
+    //
+    // Only a total wipeout THAT IS NOT a circuit trip is a board-level fault
+    // worth failing on: that is the signal that something systemic changed,
+    // rather than one query being narrow.
+    if (succeeded === 0 && failures.length > 0 && !tripped) {
       throw new Error(`indeed: every query failed —\n  ${failures.join('\n  ')}`);
     }
     if (failures.length > 0) {

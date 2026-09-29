@@ -57,6 +57,11 @@
  *                          worker falls back to WebFetch/browser for these.
  *   'unsafe-url'         — egress guard refused the URL (private/invalid/loopback).
  *   'blocked'            — anti-bot/challenge page (Cloudflare, CAPTCHA, WAF denial).
+ *   'host-blocked'       — lib/host-circuit.mjs's breaker is tripped for this URL's
+ *                          host (StepStone, Indeed, ...): NO request was made at
+ *                          all, not even a robots.txt read — see the circuit
+ *                          breaker gate below. `liveness` carries the reason and
+ *                          the date the block lifts.
  *   'error'              — navigation/timeout/other failure, OR a classifyLiveness
  *                          `expired` code that is NOT a strong signal (e.g.
  *                          'insufficient_content' — a page that simply didn't
@@ -78,6 +83,7 @@ import {
 import { checkRobots } from './robots-gate.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { fetchText } from './providers/_http.mjs';
+import { isHostBlocked, describeBlock } from './lib/host-circuit.mjs';
 import { validateFlags, flagValue, safeIntFlag } from './lib/cli-flags.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
@@ -499,7 +505,8 @@ function triageCell(value) {
  * deterministic, or the German hard stop config/profile.yml defines — this
  * only stops paying a worker to apply them:
  *   - `expired`                     → SKIP, "Posting inaccessible or expired"
- *   - `robots-blocked` / `unsafe-url` → SKIP, "Not fetchable (robots.txt / unsafe URL)"
+ *   - `robots-blocked` / `unsafe-url` / `host-blocked` → SKIP, "Not fetchable
+ *     (robots.txt / unsafe URL / host circuit-broken)"
  *   - `ok` text with germanHardStop → FAIL 2.0/5, quoting the requirement verbatim
  * Anything else — including `blocked`, `error` and `robots-unconfirmed`, where
  * the contract still lets the worker try WebFetch — stays in `rest`.
@@ -522,8 +529,8 @@ export function splitGatedResults(results) {
       counts.expired++;
       continue;
     }
-    if (r.status === 'robots-blocked' || r.status === 'unsafe-url') {
-      gatedLines.push(`${head} SKIP | ${who} | 0/5 | Not fetchable (robots.txt / unsafe URL)`);
+    if (r.status === 'robots-blocked' || r.status === 'unsafe-url' || r.status === 'host-blocked') {
+      gatedLines.push(`${head} SKIP | ${who} | 0/5 | Not fetchable (robots.txt / unsafe URL / host circuit-broken)`);
       counts.notFetchable++;
       continue;
     }
@@ -627,6 +634,7 @@ export async function fetchOne(entry, {
   checkRobotsFn = checkRobots,
   checkLivenessViaApiFn = checkLivenessViaApi,
   fetchTextFn = fetchText,
+  isHostBlockedFn = isHostBlocked,
   maxChars = DEFAULT_MAX_CHARS,
 } = {}) {
   const base = {
@@ -636,6 +644,22 @@ export async function fetchOne(entry, {
     title: entry.title ?? '',
     location: entry.location ?? '',
   };
+
+  // Circuit breaker — checked before ANY request for this URL, including the
+  // robots.txt read gateUrl below would otherwise make. A host that has
+  // already refused this machine (StepStone since 2026-09-23; see
+  // lib/host-circuit.mjs) gets no further traffic until its cooldown elapses.
+  // Deliberately ahead of the ATS-API rung's URL parse too, even though that
+  // rung never touches StepStone/Indeed hosts in practice (they match no
+  // known ATS pattern) — the guard should not depend on that staying true.
+  let blockedHost = '';
+  try { blockedHost = new URL(entry.url).hostname; } catch { /* handled by the egress guard below */ }
+  if (blockedHost) {
+    const blocked = isHostBlockedFn(blockedHost);
+    if (blocked) {
+      return { ...base, status: 'host-blocked', liveness: `circuit_breaker: ${describeBlock(blocked)}`, chars: 0, text: '' };
+    }
+  }
 
   let api = null;
   try {
