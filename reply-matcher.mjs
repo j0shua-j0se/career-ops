@@ -331,7 +331,23 @@ const SHARED_DOMAINS = [
   'gmail.com',
   'outlook.com',
   'yahoo.com',
-  'hotmail.com'
+  'hotmail.com',
+  // More ATS platforms and job boards. The list above only had to stop a notes
+  // mention from becoming a candidate domain; sender-domain-to-company matching
+  // (domainNameMatchKind) and tracker-URL hosts (getAppDomains) make it load
+  // bearing, because a posting URL on datev.wd3.myworkdayjobs.com or
+  // stepstone.de names the VENDOR and must never claim a mail from that vendor
+  // for whichever row happens to link to it. Mirrors ATS_SENDER_DOMAINS in
+  // gmail-sweep.mjs, plus the boards a tracker URL column commonly points at.
+  'myworkdayjobs.com', 'successfactors.eu', 'csod.com', 'personio.de', 'personio.com',
+  'join.com', 'avature.net', 'softgarden.io', 'softgarden.de', 'concludis.de',
+  'hrworks.de', 'jobs2web.com', 'workable.com', 'teamtailor.com', 'recruitee.com',
+  'jobvite.com', 'bamboohr.com', 'onlyfy.jobs', 'rexx-systems.com', 'prescreen.io',
+  'breezy.hr', 'dvinci-hr.com', 'phenompeople.com', 'eightfold.ai', 'oraclecloud.com',
+  'stepstone.de', 'stepstone.com', 'indeed.com', 'xing.com', 'glassdoor.com', 'glassdoor.de',
+  'kununu.com', 'monster.de', 'jobware.de', 'meinestadt.de', 'arbeitsagentur.de',
+  'absolventa.de', 'get-in-it.de', 'jobvector.de', 'joblift.de', 'ziprecruiter.com',
+  'wellfound.com', 'welcometothejungle.com', 'github.io', 'notion.site', 'notion.so'
 ];
 
 // Dot-separated labels ending in a letters-only TLD. Rejects the shapes tracker
@@ -348,10 +364,99 @@ const FILE_EXTENSIONS = [
   'png', 'jpg', 'jpeg', 'csv', 'tsv', 'json', 'yaml', 'yml', 'mjs'
 ];
 
+function isSharedDomain(domain) {
+  return SHARED_DOMAINS.some(shared => domain === shared || domain.endsWith(`.${shared}`));
+}
+
 function isUsableDomain(domain) {
   if (!DOMAIN_SHAPE.test(domain)) return false;
   if (FILE_EXTENSIONS.includes(domain.slice(domain.lastIndexOf('.') + 1))) return false;
-  return !SHARED_DOMAINS.some(shared => domain === shared || domain.endsWith(`.${shared}`));
+  return !isSharedDomain(domain);
+}
+
+// Second-level public suffixes worth knowing about. Not the whole public suffix
+// list: this only decides which two-or-three labels form "the company's domain"
+// for a sender whose TLD is one of these, and an unlisted suffix degrades to the
+// two-label answer, which is right for every .de/.com/.io/.ai sender that
+// dominates a German-market tracker.
+const SECOND_LEVEL_SUFFIXES = new Set([
+  'co.uk', 'org.uk', 'ac.uk', 'com.au', 'co.jp', 'co.in', 'com.br', 'co.nz',
+  'com.cn', 'com.tr', 'co.za', 'com.sg', 'com.hk', 'com.mx', 'co.kr',
+]);
+
+/** "karriere.adac.de" -> "adac.de"; "jobs.example.co.uk" -> "example.co.uk". */
+export function registrableDomain(domain) {
+  const labels = String(domain || '').toLowerCase().split('.').filter(Boolean);
+  if (labels.length <= 2) return labels.join('.');
+  const lastTwo = labels.slice(-2).join('.');
+  return SECOND_LEVEL_SUFFIXES.has(lastTwo) ? labels.slice(-3).join('.') : lastTwo;
+}
+
+// Local parts that name a MAILBOX FUNCTION, not a company. "workday@datev.de" and
+// "bewerbung@adac.de" say what kind of mail this is; the employer is in the
+// domain. Left in the matched text they are worse than useless — a tracker row
+// for a company called "Workday", "Jobs" or "Talent" would claim every mail sent
+// from such a mailbox at any employer. Prefix match so "talent-acquisition" and
+// "recruiting-team" are covered without enumerating them.
+const GENERIC_LOCAL_PART_RE = /^(?:no[-_.]?reply|do[-_.]?not[-_.]?reply|bewerbung|bewerber|application|apply|recruit|career|karriere|job|hr(?![a-z])|personal|talent|workday|hiring|human[-_.]?resources|people|info|service|support|contact|kontakt|hello|hallo|mail|team|notification|notify|system|admin|office|ats)/i;
+
+export function isGenericLocalPart(local) {
+  return GENERIC_LOCAL_PART_RE.test(String(local || '').trim());
+}
+
+/** Blank out generic mailbox names in every address of a From header. */
+export function stripGenericLocalParts(from) {
+  return String(from || '').replace(/([\w.+-]+)@/g, (m, local) => (isGenericLocalPart(local) ? '@' : m));
+}
+
+/** The display-name half of a From header, addresses removed. */
+function fromDisplayName(from) {
+  return String(from || '').replace(/<[^>]*>/g, ' ').replace(/[\w.+-]+@[\w.-]+/g, ' ');
+}
+
+const LEGAL_FORM_TOKENS = new Set([
+  'gmbh', 'mbh', 'ag', 'se', 'kg', 'kgaa', 'ohg', 'eg', 'ev', 'ltd', 'limited', 'inc',
+  'corp', 'corporation', 'co', 'bv', 'nv', 'sa', 'srl', 'plc', 'oy', 'ab', 'llc', 'und', 'and',
+]);
+// Words a trading name adds after the brand ("ADAC Service GmbH" is ADAC).
+const GENERIC_COMPANY_WORDS = new Set([
+  'service', 'services', 'group', 'gruppe', 'holding', 'deutschland', 'germany', 'international',
+  'technologies', 'technology', 'solutions', 'systems', 'consulting', 'software',
+]);
+
+function foldToAscii(s) {
+  return String(s || '').normalize('NFC').toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss');
+}
+
+/**
+ * How a sender's registrable domain relates to a tracker company name.
+ *
+ *   'exact'  the domain label IS the brand: datev.de <-> "DATEV eG",
+ *            adac.de <-> "ADAC Service GmbH", moresophy.com <-> "MORESOPHY GmbH"
+ *   'lead'   the label is only the first word of a longer name:
+ *            siemens.com <-> "Siemens Energy AG"
+ *   null     no relation, or the domain is a shared ATS/board/webmail host
+ *
+ * Domains are compared as ASCII with hyphens removed, so mercedes-benz.com meets
+ * "Mercedes-Benz AG". A label under three characters is never trusted: it is an
+ * initialism, and initialisms collide.
+ */
+export function domainNameMatchKind(fromDomain, company) {
+  if (!fromDomain || !company || isPlaceholderCompany(company)) return null;
+  const registrable = registrableDomain(fromDomain);
+  if (!registrable || isSharedDomain(registrable) || isSharedDomain(fromDomain)) return null;
+  const label = registrable.split('.')[0].replace(/-/g, '');
+  if (label.length < 3) return null;
+
+  const name = foldToAscii(String(company).replace(/\([^)]*\)/g, ' '));
+  const tokens = name.split(/[^a-z0-9]+/).filter((t) => t.length > 1 && !LEGAL_FORM_TOKENS.has(t));
+  if (tokens.length === 0) return null;
+  const joined = tokens.join('');
+  const brand = tokens.filter((t) => !GENERIC_COMPANY_WORDS.has(t)).join('');
+  if (label === joined || (brand && label === brand)) return 'exact';
+  if (tokens[0].length >= 3 && label === tokens[0]) return 'lead';
+  return null;
 }
 
 function addDomain(domains, value) {
@@ -377,6 +482,22 @@ export function getAppDomains(app, followups) {
         // like "output/cv-2026-06-23.pdf" into one plausible-looking hostname.
         addDomain(domains, w.replace(/^[^A-Za-z0-9]+/, '').replace(/[^A-Za-z0-9]+$/, ''));
       }
+    }
+  }
+
+  // The posting URL's host. The tracker's URL cell is the one place a row names
+  // the employer's own site ("karriere.adac.de"), and it is what makes a rejection
+  // from an address the notes never mention still land on the right row. The
+  // REGISTRABLE domain is stored, so bewerbung.adac.de and karriere.adac.de both
+  // reach adac.de. Only cells that are exactly one URL count — notes are prose and
+  // link to other companies — and ATS/board hosts fall out in addDomain().
+  if (app.raw) {
+    for (const cell of String(app.raw).split('|')) {
+      const value = cell.trim();
+      if (!/^https?:\/\/\S+$/i.test(value)) continue;
+      try {
+        addDomain(domains, registrableDomain(new URL(value).hostname));
+      } catch { /* malformed URL cell: ignore */ }
     }
   }
 
@@ -406,28 +527,65 @@ export function getAppDomains(app, followups) {
   return Array.from(domains);
 }
 
+// Title words that do not distinguish one posting from another at the same
+// employer: the contract type, the gender tag, and connectives.
+const ROLE_OVERLAP_STOPWORDS = new Set([
+  'werkstudent', 'werkstudentin', 'working', 'student', 'studentin', 'praktikum', 'praktikant',
+  'praktikantin', 'intern', 'internship', 'thesis', 'abschlussarbeit', 'masterarbeit',
+  'bachelorarbeit', 'all', 'genders', 'gender', 'mwd', 'und', 'and', 'der', 'die', 'das',
+  'the', 'of', 'for', 'fuer', 'im', 'in', 'bei', 'at', 'with', 'mit', 'jobs', 'job',
+]);
+
+/**
+ * 0..1 bonus for how much of a role title the message repeats.
+ *
+ * Deliberately hard to earn: at least two distinguishing words AND at least half
+ * of them. One shared word ("Data") is what two different roles at the same
+ * company have in common, so it must not break a tie — that tie is the
+ * ambiguity guard, and staying ambiguous is the right answer when the message
+ * does not say which role it is about.
+ */
+export function roleOverlapBonus(text, role) {
+  if (!text || !role) return 0;
+  const words = [...new Set(
+    foldToAscii(role).replace(/\([^)]*\)/g, ' ').split(/[^a-z0-9+#]+/)
+      .filter((w) => w.length >= 2 && !ROLE_OVERLAP_STOPWORDS.has(w) && !GENERIC_ROLE_WORDS.has(w)),
+  )];
+  if (words.length < 2) return 0;
+  const haystack = foldToAscii(text);
+  const hits = words.filter((w) => {
+    const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`).test(haystack);
+  }).length;
+  const ratio = hits / words.length;
+  return hits >= 2 && ratio >= 0.5 ? Math.round(ratio * 100) / 100 : 0;
+}
+
 export function matchCandidates(candidates, apps, followups = []) {
   const results = [];
   
   for (const cand of candidates) {
-    const textContext = `${cand.from || ''} ${cand.subject || ''} ${cand.body_snippet || ''}`;
+    // The mailbox name ("workday@", "bewerbung@") is dropped from the text the
+    // company and role checks read: it names a function, and a tracker company
+    // called "Workday" or "Talent" would otherwise claim every mail sent from one.
+    const textContext = `${stripGenericLocalParts(cand.from)} ${cand.subject || ''} ${cand.body_snippet || ''}`;
+    // The same text minus the sender ADDRESS, used to tell whether a company name
+    // is corroborated by the message itself or merely restates the sender domain.
+    const contentContext = `${fromDisplayName(cand.from)} ${cand.subject || ''} ${cand.body_snippet || ''}`;
+    // Subject and body only: the words a role overlap is read from.
+    const roleContext = `${cand.subject || ''} ${cand.body_snippet || ''}`;
     const fromDomain = extractDomain(cand.from);
-    
+
     let bestMatches = [];
     let highestScore = -1;
-    
+
     for (const app of apps) {
       let score = 0;
       let signals = [];
       let companyHint = '';
       let roleHint = '';
-      
+
       const isCompanyMatch = checkCompanyMatch(textContext, app.company);
-      if (isCompanyMatch) {
-        score += 2;
-        signals.push('company-name');
-        companyHint = app.company;
-      }
 
       let hasDomainMatch = false;
       if (fromDomain) {
@@ -437,7 +595,30 @@ export function matchCandidates(candidates, apps, followups = []) {
           score += 2;
           signals.push('sender-domain');
           companyHint = companyHint || app.company;
+        } else {
+          // No address on file for this row, but the domain may still BE the
+          // company: adac.de for "ADAC Service GmbH", datev.de for "DATEV eG".
+          // An exact brand match outranks a first-word one so siemens.com prefers
+          // "Siemens AG" over "Siemens Energy AG" without needing a role to say so.
+          const kind = domainNameMatchKind(fromDomain, app.company);
+          if (kind) {
+            hasDomainMatch = true;
+            score += kind === 'exact' ? 2.5 : 2;
+            signals.push('sender-domain', 'domain-company-name');
+            companyHint = companyHint || app.company;
+          }
         }
+      }
+
+      if (isCompanyMatch) {
+        // A company name that appears ONLY inside the sender address is the same
+        // evidence as the sender domain, not a second piece of it. Counting it
+        // twice let a Discarded "ADAC" row outscore the live "ADAC Service GmbH"
+        // row on a receipt whose body never names the employer.
+        const corroboratedByContent = checkCompanyMatch(contentContext, app.company);
+        if (corroboratedByContent || !hasDomainMatch) score += 2;
+        signals.unshift('company-name');
+        companyHint = app.company;
       }
 
       // A role match on the *entire* role title is specific enough to stand on
@@ -454,6 +635,20 @@ export function matchCandidates(candidates, apps, followups = []) {
         score += 1.5;
         signals.push('role-title');
         roleHint = app.role;
+      }
+
+      // Graded overlap, so two rows of ONE employer are told apart by how much of
+      // their title the subject repeats — the boolean checks above score both
+      // "Werkstudent Data & AI Solutions" and "Werkstudent Power BI & Data
+      // Analytics" identically on a subject that only names the first. Only ever
+      // a tie-breaker: it needs the sender to be the company already.
+      if (isCompanyMatch || hasDomainMatch) {
+        const bonus = roleOverlapBonus(roleContext, app.role);
+        if (bonus > 0) {
+          score = Math.round((score + bonus) * 100) / 100;
+          signals.push('role-overlap');
+          roleHint = roleHint || app.role;
+        }
       }
 
       const postAppKeywords = ['interview', 'offer', 'rejection', '邀您面试', '简历通过', 'next steps', 'update on your application'];
@@ -524,6 +719,135 @@ export function matchCandidates(candidates, apps, followups = []) {
   }
   
   return results;
+}
+
+// ── German rejections ───────────────────────────────────────────────────────
+//
+// Observed live 2026-09-29: ADAC ("dass wir Sie für die ausgeschriebene Position
+// nicht berücksichtigen können") and DATEV ("nicht in die engere Auswahl
+// einbezogen ... keine positive Nachricht überbringen können") both classified
+// Unknown, so a mailbox sweep moved nothing while the rows sat at Applied.
+//
+// These are PHRASE patterns, not keywords, on purpose. The English list can rely
+// on substrings like 'unfortunately' because they are rare in acknowledgements;
+// German has no such luxury. "nicht berücksichtigt werden" sits in application
+// boilerplate ("unvollständige Bewerbungen können nicht berücksichtigt werden"),
+// "Absage" in "Sie erhalten eine Zusage oder Absage", and "leider ... nicht" in
+// "wir können Ihnen leider noch nicht mitteilen, wann wir uns melden" — the last
+// being a DELAY notice, and TERMINAL_STATES means a wrongly Rejected row is never
+// walked back. Each pattern therefore anchors on the candidate as its object
+// (wir Sie / Ihre Bewerbung / Dich) and the exclusions below strip the known
+// boilerplate before matching.
+//
+// Matched against umlaut-folded text (ä->ae, ö->oe, ü->ue, ß->ss), so the same
+// pattern reads "berücksichtigen" and the ASCII spelling "beruecksichtigen" that
+// German mail routinely arrives in. The Sie and Du forms share every pattern:
+// each is anchored on an object pronoun or possessive, and the alternation lists
+// both registers.
+const NOT = 'nicht\\s+(?:weiter\\s+|mehr\\s+|laenger\\s+)?';
+const CONSIDER = 'beruecksichtig(?:en|t)';
+
+export const GERMAN_REJECTION_PATTERNS = [
+  // "dass wir Sie ... nicht berücksichtigen können" / "können wir Dich nicht weiter berücksichtigen"
+  { label: 'nicht berücksichtigen',
+    re: new RegExp(`\\bwir\\b[^.!?\\n]{0,40}?\\b(?:sie|dich|euch)\\b[^.!?\\n]{0,120}?\\b${NOT}${CONSIDER}`) },
+  // "Ihre Bewerbung konnte leider nicht berücksichtigt werden" (past tense / leider only:
+  // the present-tense form is the boilerplate this must not catch)
+  { label: 'Bewerbung nicht berücksichtigt',
+    re: new RegExp(`\\b(?:ihre|deine|eure)\\s+(?:bewerbung|unterlagen)\\b[^.!?\\n]{0,60}?\\b(?:leider|konnte|konnten|wurde|wurden)\\b[^.!?\\n]{0,60}?\\b${NOT}${CONSIDER}`) },
+  { label: 'nicht in die engere Auswahl',
+    re: /\bnicht\s+in\s+die\s+(?:engere|engeren|finale|naechste|endgueltige)n?\s+(?:auswahl|wahl|runde|endauswahl)/ },
+  { label: 'keine positive Nachricht',
+    re: /\bkeine\s+positive[nr]?\s+(?:nachricht|rueckmeldung|antwort|mitteilung|neuigkeit\w*)/ },
+  { label: 'für andere Kandidaten entschieden',
+    re: /\bfuer\s+(?:einen?\s+|eine\s+)?(?:andere[nr]?\s+(?:kandidat|bewerber|mitbewerber|profil)|mitbewerber)\w*[^.!?\n]{0,60}?\bentschieden\b/ },
+  { label: 'nicht für Sie entschieden',
+    re: /\bnicht\s+fuer\s+(?:sie|dich|euch)\s+entschieden\b/ },
+  { label: 'gegen Ihre Bewerbung entschieden',
+    re: /\bgegen\s+(?:ihre|deine|eure)\s+bewerbung\s+entschieden\b|\bentschieden\b[^.!?\n]{0,40}\bgegen\s+(?:ihre|deine|eure)\s+bewerbung\b|\buns\s+gegen\s+(?:sie|dich|euch)\s+entschieden\b/ },
+  { label: 'mit anderen Kandidaten fortfahren',
+    re: /\b(?:mit|an)\s+(?:einem|einer|anderen)\s+(?:anderen\s+)?(?:kandidat|bewerber|mitbewerber)\w*\s+(?:weiter\w*|fortzufahren|fortfahren|besetzen|zu\s+besetzen|zusammenarbeiten)/ },
+  { label: 'anderweitig besetzt',
+    re: /\banderweitig\s+(?:besetzt|vergeben|entschieden)\b/ },
+  { label: 'Stelle bereits besetzt',
+    re: /\b(?:stelle|position|vakanz)\b[^.!?\n]{0,60}?\b(?:bereits|inzwischen|mittlerweile|zwischenzeitlich|leider)\s+(?:anderweitig\s+)?(?:besetzt|vergeben)\b/ },
+  { label: 'nicht weiterverfolgen',
+    re: /\bnicht\s+(?:mehr\s+)?weiter\s*(?:verfolg|fuehr)\w*/ },
+  { label: 'Bewerbung abgelehnt',
+    re: /\b(?:ihre|deine|eure)\s+bewerbung\b[^.!?\n]{0,60}?\b(?:ablehnen|abzulehnen|abgelehnt|absagen)\b/ },
+  { label: 'Bewerbung nicht erfolgreich',
+    re: /\b(?:ihre|deine|eure)\s+bewerbung\b[^.!?\n]{0,40}?\bleider\s+nicht\s+erfolgreich\b/ },
+  // "Leider müssen wir Ihnen mitteilen, dass ..." only counts once a NEGATIVE object
+  // follows; "leider können wir Ihnen noch keine Entscheidung mitteilen" has none
+  // of these objects and is a delay notice.
+  { label: 'leider mitteilen + Negation',
+    re: new RegExp(
+      '\\b(?:leider|bedauer\\w*|bedauerlicherweise)\\b[^!?\\n]{0,80}?\\b(?:mitteilen|informieren|sagen|absagen)\\b[^!?\\n]{0,200}?' +
+      '(?:\\bnicht\\s+(?:weiter|mehr|zum|zur|fuer|in\\s+die|beruecksichtig\\w*|einladen|auswaehlen|einstellen|zusagen|entsprechen)\\b' +
+      '|\\bkeine?n?\\s+(?:zusage|einladung|angebot|positive\\w*|stelle|einstellung|vertrag|moeglichkeit|weitere\\w*)\\b|\\babsage\\b)') },
+  { label: 'Ihnen absagen',
+    re: /\b(?:ihnen|dir|euch)\s+(?:leider\s+)?(?:eine\s+)?(?:absage|absagen)\b/ },
+  { label: 'Absage erteilen',
+    re: /\b(?:leider|muessen|erteilen|erhalten\s+sie|senden\s+wir\s+ihnen|schicken\s+wir\s+ihnen)\b[^.!?\n]{0,60}?\babsage\b|\babsage\s+(?:erteilen|erteilt|mitteilen|zusenden)/ },
+];
+
+// A bare "Absage" is only trusted in the SUBJECT ("Absage auf Ihre Bewerbung"),
+// where it is the message's topic rather than a word in boilerplate.
+const GERMAN_SUBJECT_REJECTION_PATTERNS = [
+  { label: 'Absage (Betreff)', re: /\babsage\b/ },
+];
+
+// A sentence that makes the phrase conditional is a rule about future
+// applications, not a decision about this one: "Falls Sie keine Unterlagen
+// einreichen, können wir Sie nicht berücksichtigen". "auch wenn" and "selbst
+// wenn" are concessions inside a real rejection ("Leider haben wir uns, auch
+// wenn Ihr Profil überzeugend war, für einen anderen Bewerber entschieden").
+const CONDITIONAL_SENTENCE_RE = /(?<!auch\s)(?<!selbst\s)\b(?:wenn|falls|sofern|soweit)\b|\b(?:andernfalls|ansonsten|bitte\s+beachten)\b/;
+
+// Wording that contains a rejection word without being one.
+const GERMAN_REJECTION_NEUTRALISERS = [
+  /\b(?:zusage|absage)\s*(?:oder|\/|bzw\.?|und)\s*(?:eine\s+)?(?:zusage|absage)\b/g,
+];
+
+function foldGerman(s) {
+  return String(s || '').normalize('NFC').toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/[‘’]/g, "'")
+    .replace(/[ \t\r\f\v ]+/g, ' ');
+}
+
+/** The sentence around a match, so a conditional clause can veto it. */
+function sentenceAround(text, index, length) {
+  let start = 0;
+  const before = /[.!?]\s|\n/g;
+  const head = text.slice(0, index);
+  for (let m = before.exec(head); m; m = before.exec(head)) start = m.index + 1;
+  const rest = text.slice(index + length);
+  const end = rest.search(/[.!?](?:\s|$)|\n/);
+  return text.slice(start, index + length + (end < 0 ? rest.length : end));
+}
+
+/**
+ * Labels of every German rejection phrase in a message; empty when none.
+ * Exported so the phrase table can be pinned by test without a full candidate.
+ */
+export function matchGermanRejection(subject, body) {
+  const neutralise = (t) => GERMAN_REJECTION_NEUTRALISERS.reduce((acc, re) => acc.replace(re, ' '), t);
+  const foldedSubject = neutralise(foldGerman(subject));
+  const text = neutralise(foldGerman(`${subject || ''}\n${body || ''}`));
+  const labels = [];
+  for (const { label, re } of GERMAN_SUBJECT_REJECTION_PATTERNS) {
+    if (re.test(foldedSubject)) labels.push(label);
+  }
+  for (const { label, re } of GERMAN_REJECTION_PATTERNS) {
+    const global = new RegExp(re.source, 'g');
+    for (const m of text.matchAll(global)) {
+      if (CONDITIONAL_SENTENCE_RE.test(sentenceAround(text, m.index, m[0].length))) continue;
+      labels.push(label);
+      break;
+    }
+  }
+  return labels;
 }
 
 export function classifyReply(cand) {
@@ -629,7 +953,10 @@ export function classifyReply(cand) {
   // which still contains the 'offer letter' phrase) must win even when offer-ish
   // phrasing is present. Deciding Offer first would type such replies as Offer and
   // push a spurious Offer tracker update.
-  const hasRejectionKeywords = check(rejectionKeywords);
+  const hasEnglishOrChineseRejection = check(rejectionKeywords);
+  const germanRejection = matchGermanRejection(subject, body);
+  for (const label of germanRejection) evidence.push(label);
+  const hasRejectionKeywords = hasEnglishOrChineseRejection || germanRejection.length > 0;
   const isRejected = signal === 'rejection' || hasRejectionKeywords;
   if (isRejected) {
     if (signal === 'rejection' && !evidence.includes('rejection')) evidence.push('rejection');

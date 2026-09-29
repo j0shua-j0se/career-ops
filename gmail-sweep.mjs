@@ -33,7 +33,10 @@ import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { spawnSync } from 'child_process';
 
-import { matchCandidates, classifyReply } from './reply-matcher.mjs';
+import {
+  matchCandidates, classifyReply, checkCompanyMatch, extractDomain, getAppDomains,
+  domainNameMatchKind, stripGenericLocalParts,
+} from './reply-matcher.mjs';
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 import { resolveTrackerPath } from './tracker-utils.mjs';
 import { appendCandidate } from './paste-reply.mjs';
@@ -333,8 +336,16 @@ export function buildGmailQuery(apps, { days = 30, maxLength = 1800 } = {}) {
  * (AGENTS.md, #1524/#2009). This applies the same rule to inbound mail.
  *
  * Bare digit runs need SIX or more, so German postcodes (five) cannot collide.
+ *
+ * A LABELLED id may be shorter, because the label is what vouches for it. German
+ * employers label theirs in German and keep them short: ADAC's rejection quotes
+ * "(ID: 16758)" and "Stellenkennziffer: 16758", and the row's URL ends in
+ * "j16758.html". Those five-digit ids are accepted only with a label, and only
+ * re-point a row when the sender also corroborates the company (see
+ * resolveByReqId) — a short id is far likelier than a long one to collide with a
+ * different employer's.
  */
-const REQ_LABELLED_RE = /\b(?:job\s*id|requisition|req|posting\s*id|ref|jr|r)[\s_#:-]*([a-z]*\d[a-z0-9_-]*)/gi;
+const REQ_LABELLED_RE = /\b(?:job\s*-?\s*id|stellen\s*-?\s*kennziffer|stellenkennziffer|kennziffer|stellen\s*-?\s*id|referenz(?:nummer|\s*nr\.?)?|requisition|req|posting\s*id|ref|jr|r|id)[\s_#:-]*([a-z]*\d[a-z0-9_-]*)/gi;
 const REQ_PREFIXED_RE = /\b([a-z]{1,3})[_-](\d{4,10})\b/gi;
 const REQ_BARE_RE = /\b(\d{6,10})\b/g;
 
@@ -374,22 +385,46 @@ export function extractReqIds(text) {
  *
  * The best tier wins, and only if exactly one row holds it.
  */
+// Digits-only and under six: the shape a postcode, a year or a phone fragment
+// also has. Only ever trusted with a label AND a corroborating sender.
+const isWeakReqId = (id) => /^\d{1,5}$/.test(id);
+
+/** The id as a whole token in a URL — "16758" in "...-j16758.html", not in "116758". */
+function urlHasReqId(url, id) {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![0-9])${escaped}(?![0-9])`, 'i').test(url);
+}
+
 function reqIdTier(app, ids) {
   const raw = String(app?.raw ?? '');
   const notes = String(app?.notes ?? '');
   const urls = raw.match(/https?:\/\/\S+/g) ?? [];
-  for (const id of ids) {
-    if (urls.some((u) => u.toUpperCase().includes(id))) return 2;
+  // Strong ids first, so a row holding both a long id and a short one is judged
+  // on the long one and never inherits the corroboration requirement.
+  const ordered = [...ids].sort((a, b) => Number(isWeakReqId(a)) - Number(isWeakReqId(b)));
+  for (const id of ordered) {
+    if (urls.some((u) => urlHasReqId(u, id))) return { tier: 2, weak: isWeakReqId(id) };
   }
   const labelled = new Set();
   for (const m of notes.matchAll(REQ_LABELLED_RE)) {
     const v = m[1].replace(/[_-]/g, '').toUpperCase();
     if (/\d/.test(v) && v.length >= 4) labelled.add(v);
   }
-  for (const id of ids) if (labelled.has(id)) return 1;
+  for (const id of ordered) if (labelled.has(id)) return { tier: 1, weak: isWeakReqId(id) };
   const bare = extractReqIds(`${notes} ${raw}`);
-  for (const id of ids) if (bare.has(id)) return 0;
-  return -1;
+  // A short id floating in prose proves nothing, so it never reaches tier 0.
+  for (const id of ordered) if (!isWeakReqId(id) && bare.has(id)) return { tier: 0, weak: false };
+  return { tier: -1, weak: false };
+}
+
+/** Does the SENDER independently point at this row's employer? */
+function senderCorroboratesApp(candidate, app, followups = []) {
+  const text = `${stripGenericLocalParts(candidate.from ?? '')} ${candidate.subject ?? ''} ${candidate.body_snippet ?? ''}`;
+  if (checkCompanyMatch(text, app.company)) return true;
+  const domain = extractDomain(candidate.from ?? '');
+  if (!domain) return false;
+  return getAppDomains(app, followups).some((d) => domain === d || domain.endsWith(`.${d}`))
+    || domainNameMatchKind(domain, app.company) !== null;
 }
 
 /**
@@ -398,13 +433,13 @@ function reqIdTier(app, ids) {
  * present, so a genuinely ambiguous id changes nothing and the fuzzy result
  * stands.
  */
-export function resolveByReqId(candidate, apps, matchedNum) {
+export function resolveByReqId(candidate, apps, matchedNum, followups = []) {
   const text = `${candidate.subject ?? ''} ${candidate.body_snippet ?? ''} ${candidate.body ?? ''}`;
   const msgIds = extractReqIds(text);
   if (msgIds.size === 0) return null;
 
   const scored = apps
-    .map((a) => ({ app: a, tier: reqIdTier(a, msgIds) }))
+    .map((a) => ({ app: a, ...reqIdTier(a, msgIds) }))
     .filter((x) => x.tier >= 0);
   if (scored.length === 0) return null;
 
@@ -412,6 +447,8 @@ export function resolveByReqId(candidate, apps, matchedNum) {
   const top = scored.filter((x) => x.tier === best);
   if (top.length !== 1) return null;
   if (matchedNum != null && top[0].app.num === matchedNum) return null;
+  // A short id can only re-point a match when the sender also names the employer.
+  if (top[0].weak && !senderCorroboratesApp(candidate, top[0].app, followups)) return null;
   return top[0].app;
 }
 
@@ -428,7 +465,7 @@ export function buildPlan(candidates, apps, followups = []) {
     // A requisition id quoted in the mail outranks the fuzzy company+role
     // guess: it is the only signal that separates two open roles at the same
     // employer. Applied whether the fuzzy pass matched the wrong row or none.
-    const byReq = resolveByReqId(candidate, apps, app ? app.num : null);
+    const byReq = resolveByReqId(candidate, apps, app ? app.num : null, followups);
     if (byReq) {
       match.signals = Array.from(new Set([...(match.signals ?? []), 'req-id']));
       match.confidence = 'high';
