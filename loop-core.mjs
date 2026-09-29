@@ -482,6 +482,50 @@ export function recordScores(state, results) {
   return { scored, qualified, unknown };
 }
 
+// ── Inbox reconciliation ────────────────────────────────────────────────────
+
+/**
+ * The loop's verdicts, expressed as `triage-prefilter.mjs --mark-file` rows.
+ *
+ * `finish` used to leave every loop-rejected candidate `- [ ]` in
+ * data/pipeline.md (112 rows on 2026-09-29), so the same postings were
+ * re-triaged by the next pass and the pending count stayed inflated until the
+ * rows were ticked by hand. This maps the verdicts onto the inbox:
+ *
+ *   rejected     -> decision: 'discard'  (ticked `- [x]` with the triage reason)
+ *   unreachable  -> status:   'unreachable' (marked `- [!]`)
+ *   qualified / pending -> no row: they stay pending, that is the point of them
+ *
+ * Matching goes through `candidateKey` against the inbox's own pending URLs, so
+ * a candidate recorded under a normalised spelling (http vs https, `www.`,
+ * tracking params, a trailing slash) still finds its row; the row carries the
+ * INBOX's URL because that is what the marker matches on exactly.
+ *
+ * @param {object} state
+ * @param {string[]} pendingUrls  URLs of the inbox rows currently `- [ ]`
+ * @returns {Array<{url:string, decision?:'discard', status?:'unreachable', reason:string}>}
+ */
+export function inboxVerdictRows(state, pendingUrls) {
+  const byKey = new Map();
+  for (const url of Array.isArray(pendingUrls) ? pendingUrls : []) {
+    const key = candidateKey(url);
+    if (key && !byKey.has(key)) byKey.set(key, url);
+  }
+  const rows = [];
+  for (const c of allCandidates(state)) {
+    if (c.verdict !== 'rejected' && c.verdict !== 'unreachable') continue;
+    const url = byKey.get(candidateKey(c.url || c.key));
+    if (!url) continue;
+    const reason = String(c.reason ?? '').trim();
+    if (c.verdict === 'rejected') {
+      rows.push({ url, decision: 'discard', reason: reason || `loop triage ${Number.isFinite(c.score) ? `${c.score}/5` : 'reject'}` });
+    } else {
+      rows.push({ url, status: 'unreachable', reason: reason || 'posting could not be fetched' });
+    }
+  }
+  return rows;
+}
+
 // ── Counting ────────────────────────────────────────────────────────────────
 
 /** All candidates as an array, newest wave last. */

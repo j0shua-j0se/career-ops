@@ -182,6 +182,12 @@ yourself. Scores below 4.0 are flagged in the shortlist because Ethical Use
 recommends against applying below 4.0/5 — `minScore: 3.8` defines the inbox,
 4.0 remains the advice.
 
+`finish` also reconciles the inbox with the loop's own verdicts, through the same
+code path as `triage-prefilter.mjs --mark-file`: loop-rejected rows in
+`data/pipeline.md` are ticked `- [x]` with the triage reason (and logged to
+`data/discard.log`), unreachable ones become `- [!]`, and qualified rows stay
+`- [ ]` for evaluation. It is idempotent — a second `finish` marks nothing.
+
 ## What this loop does not do
 
 - It does not decide a job is a good fit. A triage score is a ≤ 25-word

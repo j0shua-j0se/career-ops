@@ -39,13 +39,14 @@ import {
   DEFAULT_LOOP_CONFIG,
   resolveLoopConfig, newState, normalizeState, ingestOffers, recordScores,
   parseTriageOutput, decideNextAction, summarize, qualifiedCandidates,
-  renderShortlist, renderRunLogEntry, toHumanUrl,
+  renderShortlist, renderRunLogEntry, toHumanUrl, inboxVerdictRows,
   effectiveStrategies,
   HALT_BUDGET,
   HALT_ABORTED,
   classifyHaltReason,
 } from './loop-core.mjs';
-import { parsePipeline, rankEntry } from './triage-prefilter.mjs';
+import { parsePipeline, rankEntry, writeVerdictRowsToInbox } from './triage-prefilter.mjs';
+import { withPipelineLock } from './pipeline-lock.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
 import { loadCheckpoint, checkpointCompatible, parseArgs as parseScanAtsFullArgs, SOURCES as ATS_SOURCES } from './scan-ats-full.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
@@ -66,6 +67,7 @@ const STATE_PATH = process.env.CAREER_OPS_LOOP_STATE || join(CAREER_OPS, 'data',
 const SHORTLIST_PATH = process.env.CAREER_OPS_LOOP_SHORTLIST || join(CAREER_OPS, 'data', 'loop-shortlist.md');
 const RUN_LOG_PATH = process.env.CAREER_OPS_LOOP_RUN_LOG || join(CAREER_OPS, 'data', 'loop-run-log.md');
 const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(CAREER_OPS, 'data', 'pipeline.md');
+const DISCARD_LOG_PATH = process.env.CAREER_OPS_DISCARD_LOG || join(CAREER_OPS, 'data', 'discard.log');
 const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || join(CAREER_OPS, 'config', 'profile.yml');
 const TSV_DIR = process.env.CAREER_OPS_ADDITIONS || join(CAREER_OPS, 'batch', 'tracker-additions');
 
@@ -571,7 +573,32 @@ function writeTrackerAdditions(candidates, date) {
   return written;
 }
 
-function cmdFinish(flags) {
+/**
+ * Apply the loop's verdicts to data/pipeline.md through the same code path as
+ * `triage-prefilter.mjs --mark-file`: rejected -> `- [x]` with the triage
+ * reason (and a data/discard.log line), unreachable -> `- [!]`; qualified and
+ * unscored candidates stay pending. Idempotent — a second `finish` finds every
+ * row already marked and changes nothing.
+ *
+ * Never throws: a missing or unwritable inbox must not undo a finish that has
+ * already promoted its candidates, so the failure is returned and logged.
+ */
+async function reconcileInbox(state) {
+  if (!existsSync(PIPELINE_PATH)) return { skipped: 'no inbox file', discarded: 0, unreachable: 0, logged: 0 };
+  try {
+    return await withPipelineLock(PIPELINE_PATH, () => {
+      const pending = parsePipeline(readFileSync(PIPELINE_PATH, 'utf-8')).pending.map((e) => e.url);
+      const rows = inboxVerdictRows(state, pending);
+      if (rows.length === 0) return { discarded: 0, unreachable: 0, logged: 0 };
+      const done = writeVerdictRowsToInbox(rows, { pipelinePath: PIPELINE_PATH, discardLogPath: DISCARD_LOG_PATH });
+      return { discarded: done.discardsMarked, unreachable: done.unreachableMarked, logged: done.logLines.length };
+    });
+  } catch (err) {
+    return { error: err.message, discarded: 0, unreachable: 0, logged: 0 };
+  }
+}
+
+async function cmdFinish(flags) {
   const state = requireState();
   const decision = decideNextAction(state);
   if (decision.action === 'score' && !flags.force) {
@@ -604,14 +631,17 @@ function cmdFinish(flags) {
   releaseNumbers(ranges);
 
   writeFileSync(SHORTLIST_PATH, renderShortlist(state), 'utf-8');
+  const inbox = await reconcileInbox(state);
   state.phase = 'done';
   saveState(state);
-  log(state, 'finish', `promoted=${rows.length} tsv=${tsvCount} merged=${merged}`);
+  log(state, 'finish', `promoted=${rows.length} tsv=${tsvCount} merged=${merged} `
+    + `inbox=discarded:${inbox.discarded},unreachable:${inbox.unreachable}${inbox.error ? ` (inbox error: ${inbox.error})` : ''}`);
 
   return {
     promoted: rows.length,
     trackerRows: tsvCount,
     merged,
+    inbox,
     shortlist: 'data/loop-shortlist.md',
     haltedReason: state.halted_reason,
     reviewGate: 'Review data/loop-shortlist.md, then run `/career-ops pipeline`.',
@@ -677,7 +707,7 @@ const COMMANDS = {
   record: cmdRecord, finish: cmdFinish, status: cmdStatus, abort: cmdAbort,
 };
 
-function main() {
+async function main() {
   const argv = process.argv.slice(2);
   const command = argv[0];
   if (!command || command === '--help' || command === '-h' || command === 'help') {
@@ -692,7 +722,7 @@ function main() {
 
   const flags = parseFlags(argv.slice(1));
   try {
-    const result = handler(flags);
+    const result = await handler(flags);
     if (flags.summary) printSummary(result);
     else console.log(JSON.stringify(result, null, 2));
   } catch (err) {

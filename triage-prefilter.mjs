@@ -1435,6 +1435,55 @@ export function markUnreachable(md, entries) {
   return { text: out.join('\n'), marked };
 }
 
+// ── Verdict rows: the one write path into the inbox for decided postings ─────
+
+/** One line, no `|` (the inbox's field separator), bounded — a reason is text on a row. */
+const cleanReason = (s, fallback) => {
+  const t = String(s ?? '').replace(/\s+/g, ' ').replace(/\|/g, '/').trim().slice(0, 300);
+  return t || fallback;
+};
+
+/**
+ * Apply a list of `{url, decision, reason, status}` verdicts to inbox text.
+ * `decision: 'discard'` rows are ticked `- [x]` with the reason and returned as
+ * discard-log lines; `status: 'unreachable'` rows become `- [!]`; anything else
+ * (a qualified posting, a still-pending one) is left exactly as it is.
+ *
+ * Shared by `triage-prefilter.mjs --mark-file` and `scan-loop.mjs finish`.
+ * Idempotent: already-ticked (`[x]`) and already-marked (`[!]`) rows are never
+ * touched again, so a second run marks nothing and logs nothing.
+ *
+ * @param {string} md
+ * @param {Array<{url:string, decision?:string, reason?:string, status?:string}>} rows
+ * @returns {{text:string, discardsMarked:number, unreachableMarked:number, logLines:string[]}}
+ */
+export function applyVerdictRows(md, rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const discards = list.filter((r) => r?.url && r.decision === 'discard')
+    .map((r) => ({ url: r.url, reason: cleanReason(r.reason, 'no reason recorded') }));
+  const unreachable = list.filter((r) => r?.url && r.decision !== 'discard' && r.status === 'unreachable')
+    .map((r) => ({ url: r.url, reason: cleanReason(r.reason, 'could not fetch the posting') }));
+  const first = markPrescreenSkips(md, discards);
+  const second = markUnreachable(first.text, unreachable);
+  return { text: second.text, discardsMarked: first.marked, unreachableMarked: second.marked, logLines: first.lines };
+}
+
+/**
+ * Read the inbox, apply the verdicts, write it back and append the discard log.
+ * A no-op (no write, no log line) when nothing changed.
+ *
+ * @param {Array<object>} rows              see applyVerdictRows
+ * @param {{pipelinePath?: string, discardLogPath?: string}} [paths]
+ */
+export function writeVerdictRowsToInbox(rows, { pipelinePath = PIPELINE_PATH, discardLogPath = DISCARD_LOG_PATH } = {}) {
+  const md = existsSync(pipelinePath) ? readFileSync(pipelinePath, 'utf-8') : '';
+  const result = applyVerdictRows(md, rows);
+  if (result.discardsMarked + result.unreachableMarked === 0) return result;
+  writeFileSync(pipelinePath, result.text, 'utf-8');
+  if (result.logLines.length) appendFileSync(discardLogPath, `${result.logLines.join('\n')}\n`, 'utf-8');
+  return result;
+}
+
 // ── Self-test ───────────────────────────────────────────────────────────────
 
 function selfTest() {
@@ -2010,21 +2059,16 @@ function main() {
       console.error('triage-prefilter: --mark-file expects a JSON array.');
       process.exit(1);
     }
-    const discards = rows.filter((r) => r?.url && r.decision === 'discard')
-      .map((r) => ({ url: r.url, reason: r.reason || 'no reason recorded' }));
-    const unreachable = rows.filter((r) => r?.url && r.decision !== 'discard' && r.status === 'unreachable')
-      .map((r) => ({ url: r.url, reason: r.reason || 'could not fetch the posting' }));
-
-    const first = markPrescreenSkips(md, discards);
-    const second = markUnreachable(first.text, unreachable);
+    // One code path with `scan-loop.mjs finish`, which applies the loop's own
+    // verdicts to the inbox through the same two functions.
+    const dry = applyVerdictRows(md, rows);
 
     if (!argv.includes('--write')) {
-      console.log(`Dry run: ${first.marked} discard(s) and ${second.marked} unreachable entr(y/ies) would be marked. Re-run with --write to apply.`);
+      console.log(`Dry run: ${dry.discardsMarked} discard(s) and ${dry.unreachableMarked} unreachable entr(y/ies) would be marked. Re-run with --write to apply.`);
       process.exit(0);
     }
-    writeFileSync(PIPELINE_PATH, second.text, 'utf-8');
-    if (first.lines.length) appendFileSync(DISCARD_LOG_PATH, `${first.lines.join('\n')}\n`, 'utf-8');
-    console.log(`Marked ${first.marked} discard(s) and ${second.marked} unreachable entr(y/ies) in data/pipeline.md; logged ${first.lines.length} to data/discard.log.`);
+    const done = writeVerdictRowsToInbox(rows, { pipelinePath: PIPELINE_PATH, discardLogPath: DISCARD_LOG_PATH });
+    console.log(`Marked ${done.discardsMarked} discard(s) and ${done.unreachableMarked} unreachable entr(y/ies) in data/pipeline.md; logged ${done.logLines.length} to data/discard.log.`);
     process.exit(0);
   }
 
