@@ -128,6 +128,9 @@ in `{language.output}` per AGENTS.md § "Output Language vs Market Modes" (defau
 `en` when the key is absent). As with `triage_threshold`, the caller injects the
 resolved value; triage never reads `config/profile.yml` itself.
 
+`|` is the field separator: write `/` instead of `|` inside `{Company}` and `{Role}`
+(`Werkstudent Data (m/w/d)`, never `(m|w|d)`).
+
 **Examples** (English output; only the reason field changes with `language.output`):
 ```text
 TRIAGE: PASS | Acme Corp | Senior Program Manager | 4.3/5 | Remote, comp clears floor, archetype direct match, 3+ proof points map

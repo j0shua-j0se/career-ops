@@ -151,6 +151,28 @@ eq(parseTriageLine('TRIAGE: MAYBE | X | Y | 4.2/5 | bad verdict'), null, 'an off
 eq(parseTriageLine('this role looks like a 4.5/5 to me'), null, 'prose is not mistaken for a verdict line');
 eq(parseTriageLine(''), null, 'an empty line parses to null');
 
+// A `|` inside the title used to shift the fixed score cell onto a piece of the
+// title and drop the whole line. The score is now located by its N/5 shape.
+{
+  const p = parseTriageLine('TRIAGE: PASS | Acme GmbH | Werkstudent Data Enablement (m|w|d) | 4.2/5 | strong fit');
+  eq(p?.role, 'Werkstudent Data Enablement (m|w|d)', 'a title containing pipes is re-joined intact');
+  eq(p?.score, 4.2, 'the score is found after a pipe-bearing title');
+  eq(p?.company, 'Acme GmbH', 'the company is still the first cell');
+  eq(p?.reason, 'strong fit', 'the reason after a pipe-bearing title is still the reason');
+}
+{
+  const p = parseTriageLine('TRIAGE: FAIL | Acme | Data | AI | Analyst | 2/5 | a | b | c');
+  eq(p?.role, 'Data|AI|Analyst', 'a title of several cells is re-joined with |');
+  eq(p?.score, 2, 'an integer score is found after a multi-cell title');
+  eq(p?.reason, 'a | b | c', 'a reason with several pipes stays whole');
+}
+eq(parseTriageLine('TRIAGE: MARGINAL | X | Y | 3.4/5 | fits 4/5 of the archetype | maybe 2/5 on comp').score, 3.4,
+  'the FIRST N/5 cell after the title wins; a later one in the reason is prose');
+eq(parseTriageLine('TRIAGE: PASS | X | Y | 4.2 | no denominator | either'), null,
+  'still no score cell anywhere => null, not a guess');
+eq(parseTriageLine('TRIAGE: SKIP | Umbrella |  | 0/5 | no title').role, '', 'an empty title cell still parses (as it always did)');
+eq(parseTriageLine('TRIAGE: PASS | Acme | AI Engineer | 4.1 / 5 | spaced slash').score, 4.1, 'spaces around the slash are still accepted');
+
 {
   // Subagents wrap the verdict in prose no matter what the mode file says.
   const out = parseTriageOutput([

@@ -430,6 +430,10 @@ function cmdIngest(flags) {
  * The TSV form exists because asking a subagent for strict JSON and getting
  * prose-wrapped JSON back is the most common failure in this loop; a tab and a
  * TRIAGE line survive that.
+ *
+ * Returns `{results, unparsed}`. `unparsed` lists the TSV lines that carried a
+ * key but no parseable TRIAGE verdict — dropping those silently is how a posting
+ * whose title held a `|` stayed pending with nothing said (see parseTriageLine).
  */
 function parseScoreFile(text) {
   // PowerShell/Notepad on Windows write CRLF (and Set-Content -Encoding utf8
@@ -440,33 +444,52 @@ function parseScoreFile(text) {
   if (trimmed.startsWith('[')) {
     const parsed = JSON.parse(trimmed);
     if (!Array.isArray(parsed)) throw new Error('score file JSON must be an array.');
-    return parsed;
+    return { results: parsed, unparsed: [] };
   }
-  const out = [];
+  const results = [];
+  const unparsed = [];
   for (const line of trimmed.split(/\r?\n/)) {
     const tab = line.indexOf('\t');
     if (tab === -1) continue;
+    const key = line.slice(0, tab).trim();
     const [verdict] = parseTriageOutput(line.slice(tab + 1));
-    if (verdict) out.push({ key: line.slice(0, tab).trim(), ...verdict });
+    if (verdict) results.push({ key, ...verdict });
+    else if (key) unparsed.push({ key, line: line.slice(tab + 1).trim().slice(0, 160) });
   }
-  return out;
+  return { results, unparsed };
 }
 
 function cmdRecord(flags) {
   const state = requireState();
   if (!flags.file) throw new Error('record needs `--file <scores.json>` (JSON array, or key<TAB>TRIAGE lines).');
-  const results = parseScoreFile(readFileSync(flags.file, 'utf-8'));
-  const counts = recordScores(state, results);
+  const { results, unparsed } = parseScoreFile(readFileSync(flags.file, 'utf-8'));
+  const { unknown: unknownKeys, ...counts } = recordScores(state, results);
   saveState(state);
-  log(state, 'score', `scored=${counts.scored} qualified=${counts.qualified} unmatched=${counts.unknown.length}`);
+  log(state, 'score', `scored=${counts.scored} qualified=${counts.qualified} unmatched=${unknownKeys.length} unparsed=${unparsed.length}`);
+
+  // A line or key that lands nowhere used to vanish, leaving its posting pending
+  // with no sign of why. Say so on both streams: stderr for a human, the JSON for
+  // the agent driving this.
+  if (unparsed.length) {
+    console.error(`  record: ${unparsed.length} line(s) had a key but no parseable TRIAGE verdict — `
+      + `${unparsed.map((u) => u.key).join(', ')}. Expected \`key<TAB>TRIAGE: VERDICT | Company | Title | X.X/5 | reason\`.`);
+  }
+  if (unknownKeys.length) {
+    console.error(`  record: ${unknownKeys.length} key(s) matched no candidate in this run — ${unknownKeys.join(', ')}.`);
+  }
+  const result = { ...counts, unparsed, unknownKeys };
 
   if (counts.scored === 0) {
     // Silently recording nothing would look like a barren wave and trip the
-    // circuit breaker for the wrong reason.
-    throw new Error(`no score in ${flags.file} matched a candidate in this run `
-      + `(${counts.unknown.length} unmatched key(s)). Re-run \`next\` and use the exact \`key\` values it returned.`);
+    // circuit breaker for the wrong reason. Non-zero exit, but with the JSON
+    // still printed so the caller can see WHICH lines and keys failed.
+    console.error(`scan-loop: no score in ${flags.file} matched a candidate in this run `
+      + `(${unknownKeys.length} unmatched key(s), ${unparsed.length} unparseable line(s)). `
+      + 'Re-run `next` and use the exact `key` values it returned.');
+    process.exitCode = 1;
+    return result;
   }
-  return { ...counts, next: decideNextAction(state) };
+  return { ...result, next: decideNextAction(state) };
 }
 
 function cmdStatus() {

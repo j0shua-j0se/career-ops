@@ -1027,5 +1027,17 @@ test('splitGatedResults: every gated line parses with the real loop parser, even
     assert.equal(parsed.verdict, want[i][0]);
     assert.equal(parsed.score, want[i][1]);
   });
-  assert.equal(parseTriageLine(gatedLines[0].split('\t')[1]).company, 'Acme Holding');
+  assert.equal(parseTriageLine(gatedLines[0].split('\t')[1]).company, 'Acme / Holding');
+});
+
+test('splitGatedResults: a pipe in company/title is written as "/" so the line is unambiguous', async () => {
+  const { parseTriageLine } = await import('../loop-core.mjs');
+  const { gatedLines } = splitGatedResults([
+    { key: 'k1', company: 'Acme|Holding', title: 'Werkstudent Data Enablement (m|w|d)', status: 'expired', text: '' },
+  ]);
+  const line = gatedLines[0].split('\t')[1];
+  assert.equal(line, 'TRIAGE: SKIP | Acme/Holding | Werkstudent Data Enablement (m/w/d) | 0/5 | Posting inaccessible or expired');
+  // Exactly five cells: verdict, company, role, score, reason.
+  assert.equal(line.replace(/^TRIAGE:\s*/, '').split('|').length, 5);
+  assert.equal(parseTriageLine(line).role, 'Werkstudent Data Enablement (m/w/d)');
 });

@@ -540,11 +540,13 @@ export function germanHardStop(text) {
 
 // ─── zero-token verdicts ────────────────────────────────────────────────────
 
-// One TRIAGE cell. parseTriageLine (loop-core.mjs) splits on `|` and reads the
-// score from the third cell, so a pipe inside a company or role would shift the
-// score and the line would be dropped silently — flatten them first.
+// One TRIAGE cell. `|` is the line's field separator, so a pipe inside a company,
+// role or quoted reason makes the line ambiguous — `(m|w|d)` reads as three
+// cells. parseTriageLine (loop-core.mjs) now tolerates it by locating the score by
+// shape, but a writer must not depend on that: `|` becomes `/`, the same
+// character the tracker and inbox writers use for it.
 function triageCell(value) {
-  return String(value ?? '').replace(/[|\t\r\n]+/g, ' ').replace(/\s+/g, ' ').trim() || '?';
+  return String(value ?? '').replace(/\|/g, '/').replace(/[\t\r\n]+/g, ' ').replace(/\s+/g, ' ').trim() || '?';
 }
 
 /**

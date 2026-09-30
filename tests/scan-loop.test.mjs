@@ -222,6 +222,37 @@ try {
     readState().candidates[crlfKey]?.score === 3.6,
     JSON.stringify(readState().candidates[crlfKey]));
 
+  // A `|` inside a title (`(m|w|d)`) used to shift the score cell, so the line
+  // was dropped and `record` skipped the posting without a word. The score is now
+  // found by shape, and anything that still cannot be recorded is REPORTED.
+  const pipeFile = join(box, 'scores-pipe.txt');
+  writeFileSync(pipeFile, [
+    `${keys[3]}\tTRIAGE: MARGINAL | Delta | Werkstudent Data Enablement (m|w|d) | 3.6/5 | pipes | in the reason`,
+    `${keys[2]}\tTRIAGE: PASS | Gamma | Backend Engineer | four out of five`,
+    'https://example.com/gone\tTRIAGE: FAIL | Nobody | Nothing | 1.0/5 | stale key',
+    'a prose line with no tab is not a keyed line',
+  ].join('\n') + '\n', 'utf-8');
+  const recordedPipe = loopJson('record', '--file', pipeFile);
+  check('record scores a line whose title contains pipes',
+    recordedPipe.status === 0 && recordedPipe.json?.scored === 1 && readState().candidates[keys[3]].score === 3.6,
+    `${recordedPipe.json?.scored} scored ${recordedPipe.stderr.trim()}`);
+  check('a keyed line with no parseable verdict is reported as unparsed',
+    recordedPipe.json?.unparsed?.length === 1 && recordedPipe.json.unparsed[0].key === keys[2]
+    && /four out of five/.test(recordedPipe.json.unparsed[0].line), JSON.stringify(recordedPipe.json?.unparsed));
+  check('a key that matches no candidate is reported as unknownKeys',
+    JSON.stringify(recordedPipe.json?.unknownKeys) === JSON.stringify(['https://example.com/gone']), JSON.stringify(recordedPipe.json?.unknownKeys));
+  check('the warning also reaches stderr, so a human running it sees it',
+    /no parseable TRIAGE verdict/.test(recordedPipe.stderr) && /matched no candidate/.test(recordedPipe.stderr), recordedPipe.stderr.trim());
+  check('a partly-recorded file exits 0 (something WAS recorded)', recordedPipe.status === 0);
+
+  const onlyBad = join(box, 'scores-bad.txt');
+  writeFileSync(onlyBad, `${keys[2]}\tTRIAGE: PASS | Gamma | Backend Engineer | four out of five\n`, 'utf-8');
+  const recordedBad = loopJson('record', '--file', onlyBad);
+  check('a file that records nothing exits non-zero',
+    recordedBad.status === 1 && /matched a candidate/.test(recordedBad.stderr), recordedBad.stderr.trim());
+  check('...and still prints the unparsed list as JSON so the caller can see why',
+    recordedBad.json?.scored === 0 && recordedBad.json?.unparsed?.[0]?.key === keys[2], JSON.stringify(recordedBad.json));
+
   // ── status / wave guard ────────────────────────────────────────────────────
   const summary = loop('status', '--summary');
   check('status --summary prints the qualified/target line',

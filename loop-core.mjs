@@ -384,6 +384,9 @@ export function ingestOffers(state, offers, wave) {
  *
  *   TRIAGE: {PASS|MARGINAL|FAIL|SKIP} | {Company} | {Role} | {Score}/5 | {reason}
  *
+ * Writers replace `|` inside company/title with `/` (a `|` there is ambiguous
+ * with the field separator), but the parser still tolerates one in the title:
+ * the score is located by its `N/5` shape and the title is what sits before it.
  * Only the verdict keyword and the `{Score}/5` cell are load-bearing here — the
  * loop's own `minScore` decides qualification for MARGINAL/FAIL, not triage's
  * band, because the two thresholds are configured independently (`pipeline
@@ -400,15 +403,28 @@ export function parseTriageLine(line) {
   const m = /TRIAGE:\s*(PASS|MARGINAL|FAIL|SKIP)\s*\|(.*)$/i.exec(String(line ?? '').replace(/\r$/, ''));
   if (!m) return null;
   const cells = m[2].split('|').map((s) => s.trim());
-  const scoreCell = cells[2] ?? '';
-  const scoreMatch = /^(\d+(?:\.\d+)?)\s*\/\s*5$/.exec(scoreCell);
+  // The score cell is found by its shape, not its position. A title such as
+  // `Werkstudent Data Enablement (m|w|d)` carries pipes of its own, which shifted
+  // a fixed cells[2] onto a piece of the title and dropped the whole line — and
+  // `record` then silently skipped the posting and left it pending. The first
+  // `N/5` cell at or after the third cell wins: cell 0 is the company, cell 1 the
+  // start of the title, so a score can never be either (this is also exactly the
+  // set of lines the fixed-position reader accepted).
+  let scoreIdx = -1;
+  let scoreMatch = null;
+  for (let i = 2; i < cells.length; i++) {
+    scoreMatch = /^(\d+(?:\.\d+)?)\s*\/\s*5$/.exec(cells[i]);
+    if (scoreMatch) { scoreIdx = i; break; }
+  }
   if (!scoreMatch) return null;
   return {
     verdict: m[1].toUpperCase(),
     company: cells[0] ?? '',
-    role: cells[1] ?? '',
+    // Everything between company and score is the title, pipes restored. The
+    // reason after the score may contain pipes too and is kept whole.
+    role: cells.slice(1, scoreIdx).join('|'),
     score: Number(scoreMatch[1]),
-    reason: cells.slice(3).join(' | ').trim(),
+    reason: cells.slice(scoreIdx + 1).join(' | ').trim(),
   };
 }
 
