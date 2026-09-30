@@ -542,3 +542,68 @@ console.log('\nrun-core — the scan stage accounts for agent-driven sources');
       : fail('the report guard swallowed a real candidate');
   }
 }
+
+// ---------------------------------------------------------------------------
+// A triage-only tracker row keeps the pipeline stage open.
+//
+// `scan-loop.mjs finish` promotes each qualifier as an `Evaluated` row noted
+// "triage-only from loop wave N — full evaluation pending". The inbox is what
+// normally carries that evaluation, but an `ingest`ed qualifier used to reach the
+// tracker with no inbox line: the pipeline stage saw 0 pending, completed, and
+// the posting was never evaluated (row #201, pass run-20260929T193517). The stage
+// now also reads the tracker, and run-core stays pure — the rows arrive as a fact.
+console.log('\nrun-core — triage-only rows block pipeline completion');
+
+{
+  const { triageOnlyRows, decideNextStage, normalizeRun, newRun, DEFAULT_RUN_CONFIG } = await import('../run-core.mjs');
+  const NOTE = 'triage-only from loop wave 2 — full evaluation pending';
+  const rows = [
+    { num: 201, company: 'Delta', role: 'Werkstudent Data', score: '4.3/5', status: 'Evaluated', pdf: '❌', report: '—', notes: NOTE },
+    { num: 202, company: 'Echo', role: 'r', score: '4.1/5', status: 'Evaluated', pdf: '❌', report: '', notes: `Job ID 77. ${NOTE}` },
+    // Evaluated for real: the report link is the proof, even if the note lingers.
+    { num: 203, company: 'Foxtrot', role: 'r', score: '4.5/5', status: 'Evaluated', pdf: '❌', report: '[203](reports/203-foxtrot.md)', notes: NOTE },
+    // The user closed it: no evaluation is owed for a dropped role.
+    { num: 204, company: 'Golf', role: 'r', score: '4.0/5', status: 'Discarded', pdf: '❌', report: '—', notes: NOTE },
+    // A plain row with no placeholder is not a triage-only row.
+    { num: 205, company: 'Hotel', role: 'r', score: '4.0/5', status: 'Evaluated', pdf: '❌', report: '—', notes: 'manual add' },
+  ];
+  JSON.stringify(triageOnlyRows(rows).map((r) => r.num)) === '[201,202]'
+    ? pass('only rows with the placeholder note, no report link and an open status are triage-only')
+    : fail(`triageOnlyRows returned ${JSON.stringify(triageOnlyRows(rows).map((r) => r.num))}, expected [201,202]`);
+  triageOnlyRows(undefined).length === 0 && triageOnlyRows([null]).length === 0
+    ? pass('triageOnlyRows tolerates missing input')
+    : fail('triageOnlyRows threw or returned rows for empty input');
+
+  const atPipeline = normalizeRun({ ...newRun(), completed: ['scan'] }, DEFAULT_RUN_CONFIG);
+  const owed = triageOnlyRows(rows).slice(0, 1);
+
+  const held = decideNextStage(atPipeline, { pendingUrls: 0, triageOnly: owed });
+  held.action === 'evaluate' && held.stage === 'pipeline' && held.agent === true
+    ? pass('an empty inbox with a triage-only row is `evaluate`, not stage-complete')
+    : fail(`empty inbox + triage-only row decided ${JSON.stringify(held)}`);
+  JSON.stringify(held.triageOnly?.map((r) => r.num)) === '[201]' && held.pending === 0
+    ? pass('the decision lists the triage-only rows (and the empty inbox count)')
+    : fail(`triageOnly/pending were ${JSON.stringify(held.triageOnly)} / ${held.pending}`);
+  /#201/.test(held.reason) && /#201/.test(held.instructions) && /evaluate/i.test(held.instructions)
+    ? pass('the reason and instructions name the row and say to evaluate it')
+    : fail(`reason/instructions did not name the row: ${held.reason} | ${held.instructions}`);
+
+  const mixed = decideNextStage(atPipeline, { pendingUrls: 2, triageOnly: owed });
+  mixed.action === 'evaluate' && mixed.pending === 2 && mixed.triageOnly.length === 1
+    ? pass('pending URLs and triage-only rows are reported together')
+    : fail(`mixed decision was ${JSON.stringify(mixed)}`);
+
+  decideNextStage(atPipeline, { pendingUrls: 0, triageOnly: [] }).action === 'stage-complete'
+    ? pass('an empty inbox with no triage-only row still completes the stage')
+    : fail('an empty inbox and no owed rows no longer completes the pipeline stage');
+  decideNextStage(atPipeline, { pendingUrls: 0 }).action === 'stage-complete'
+    ? pass('callers that pass no triageOnly fact behave exactly as before')
+    : fail('a missing triageOnly fact changed the decision');
+
+  // The circuit breaker still bounds it: a row that can never be evaluated must
+  // halt the pass with a way out, not loop forever.
+  const stuck = normalizeRun({ ...newRun(), completed: ['scan'], attempts: { pipeline: DEFAULT_RUN_CONFIG.maxStageAttempts } }, DEFAULT_RUN_CONFIG);
+  decideNextStage(stuck, { pendingUrls: 0, triageOnly: owed }).action === 'halt'
+    ? pass('a triage-only row that never clears is bounded by the attempt budget')
+    : fail('a permanently owed row is not covered by the circuit breaker');
+}

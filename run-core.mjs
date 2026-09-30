@@ -273,6 +273,37 @@ export function kitCandidates(rows = [], kitThreshold = DEFAULT_RUN_CONFIG.kitTh
 }
 
 /**
+ * Tracker rows that were promoted on a triage score and still owe their
+ * evaluation.
+ *
+ * `scan-loop.mjs finish` writes each qualifier as an `Evaluated` row whose note
+ * says "triage-only from loop wave N — full evaluation pending" and whose report
+ * cell is empty. The note is the only thing marking the promise, and the inbox is
+ * the only thing that keeps it: if the posting has no pending `- [ ]` line, the
+ * pipeline stage sees an empty inbox and completes over a row nobody will ever
+ * evaluate (observed on pass run-20260929T193517, tracker row #201). So the stage
+ * also reads the tracker, not just the inbox.
+ *
+ * A row stops counting once it has a report link (the evaluation arrived) or its
+ * status is closed (SKIP/Discarded/... — the user decided, and no evaluation is
+ * owed for a role that is being dropped).
+ *
+ * @param {Array<object>} rows - Parsed tracker rows (see tracker-parse.mjs).
+ * @returns {Array<{num:number, company:string, role:string, score:string, notes:string}>}
+ */
+export function triageOnlyRows(rows = []) {
+  const out = [];
+  for (const row of rows) {
+    if (!row || CLOSED_STATUSES.has(row.status)) continue;
+    if (/\[.*\]\(.*\)/.test(String(row.report ?? ''))) continue;
+    const notes = String(row.notes ?? '');
+    if (!/triage[- ]only/i.test(notes) || !/full evaluation pending/i.test(notes)) continue;
+    out.push({ num: row.num, company: row.company, role: row.role, score: row.score, notes });
+  }
+  return out;
+}
+
+/**
  * Did this completed loop run belong to an earlier pass?
  *
  * `scan-loop.mjs` stamps its run_id with the ISO timestamp it started at, so a
@@ -304,6 +335,7 @@ export function isStaleLoop(loopRunId, runStartedAt) {
  * @param {object} facts
  * @param {{done: boolean, phase?: string, qualified?: number}} [facts.loop] - scan-loop status.
  * @param {number} [facts.pendingUrls] - `- [ ]` rows in data/pipeline.md.
+ * @param {Array<object>} [facts.triageOnly] - Output of triageOnlyRows().
  * @param {Array<object>} [facts.kitCandidates] - Output of kitCandidates().
  * @returns {{stage: string|null, action: string, reason: string, agent: boolean, [k: string]: any}}
  */
@@ -420,18 +452,35 @@ export function decideNextStage(state, facts = {}) {
 
   if (stage === 'pipeline') {
     const pending = facts.pendingUrls ?? 0;
-    if (pending === 0) {
-      return { ...base, action: 'stage-complete', agent: false, reason: 'the URL inbox is empty' };
+    // An empty inbox is not enough: a tracker row still marked "triage-only …
+    // full evaluation pending" is evaluation this stage owes, whether or not an
+    // inbox line for it survives (an `ingest`ed qualifier used to be promoted
+    // with no line at all, and the stage completed over it).
+    const triageOnly = facts.triageOnly ?? [];
+    if (pending === 0 && triageOnly.length === 0) {
+      return { ...base, action: 'stage-complete', agent: false, reason: 'the URL inbox is empty and no tracker row is awaiting its evaluation' };
     }
+    const owed = triageOnly.length
+      ? ` Tracker row(s) ${triageOnly.map((r) => `#${r.num}`).join(', ')} were promoted on a triage score alone `
+        + '("triage-only … full evaluation pending", no report): fully evaluate each one too — from its inbox line '
+        + "when it has one, otherwise from the row's posting — so `merge-tracker.mjs` replaces the placeholder with a "
+        + 'report link. If a row should not be evaluated, close it with `node set-status.mjs <#> Discarded --note "..."`.'
+      : '';
     return {
       ...base,
       pending,
-      reason: `${pending} URL(s) pending in data/pipeline.md`,
+      triageOnly,
+      reason: [
+        pending ? `${pending} URL(s) pending in data/pipeline.md` : '',
+        triageOnly.length
+          ? `${triageOnly.length} tracker row(s) (${triageOnly.map((r) => `#${r.num}`).join(', ')}) are triage-only and still owe a full evaluation`
+          : '',
+      ].filter(Boolean).join('; '),
       instructions: 'Follow `modes/pipeline.md` end to end: Gmail sweep, aggregator-lead resolution '
         + '(`node resolve-aggregator-leads.mjs --write` — rewrites any StepStone/Indeed lead to the '
         + "employer's own posting before it is opened; a no-op when the inbox has none), liveness "
         + 'sweep, pre-screen gate, then evaluate each surviving URL into a report and a tracker TSV. '
-        + 'Do not build CVs here — the kits stage does that once every row has a score.',
+        + 'Do not build CVs here — the kits stage does that once every row has a score.' + owed,
     };
   }
 

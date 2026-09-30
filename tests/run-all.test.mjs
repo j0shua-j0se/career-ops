@@ -363,6 +363,43 @@ try {
     cli(['start', '--skip-scan', '--reset']);
   }
 
+  // ── a triage-only tracker row keeps the pipeline stage open ────────────────
+  // `scan-loop finish` promotes a qualifier as "triage-only … full evaluation
+  // pending". With no inbox line behind it (an `ingest`ed offer used to have
+  // none) the empty inbox completed the stage, and `next` walked straight on to
+  // kits and sync over a posting that was never evaluated (row #201, 2026-09-29).
+  {
+    const TRIAGE_ROW = '| 4 | 2026-08-02 | Delta | Werkstudent Data | 4.3/5 | Evaluated | ❌ | — | triage-only from loop wave 2 — full evaluation pending |\n';
+    writeFileSync(pipelinePath, inbox([]), 'utf-8');
+    writeFileSync(trackerPath, TRACKER + TRIAGE_ROW, 'utf-8');
+    cli(['start', '--skip-scan', '--reset']);
+    const held = cli(['next']);
+    if (held.json?.stage === 'pipeline' && held.json?.action === 'evaluate' && held.json?.pending === 0) {
+      pass('an empty inbox does not complete the pipeline stage while a triage-only row is owed an evaluation');
+    } else {
+      fail(`empty inbox + triage-only row decided ${JSON.stringify(held.json)?.slice(0, 250)}`);
+    }
+    if (JSON.stringify((held.json?.triageOnly ?? []).map((r) => r.num)) === '[4]' && /full(ly)? evaluat/i.test(held.json?.instructions ?? '')) {
+      pass('next lists the triage-only row and tells the agent to evaluate it');
+    } else {
+      fail(`triageOnly/instructions were ${JSON.stringify(held.json?.triageOnly)} / ${String(held.json?.instructions).slice(0, 120)}`);
+    }
+    if (!JSON.parse(readFileSync(statePath, 'utf-8')).completed.includes('pipeline')) {
+      pass('the pipeline stage is not recorded as complete');
+    } else {
+      fail('the pipeline stage was auto-completed over a triage-only row');
+    }
+
+    // Once the evaluation lands (report link in the row) the stage rolls on.
+    writeFileSync(trackerPath, `${TRACKER}| 4 | 2026-08-02 | Delta | Werkstudent Data | 4.3/5 | Evaluated | ❌ | [4](reports/004-delta-2026-08-02.md) | strong fit |\n`, 'utf-8');
+    const released = cli(['next']);
+    if (released.json?.stage === 'kits') pass('a row with a report link no longer blocks the pipeline stage');
+    else fail(`after the report landed, next returned stage ${released.json?.stage}`);
+
+    writeFileSync(trackerPath, TRACKER, 'utf-8');
+    cli(['start', '--skip-scan', '--reset']);
+  }
+
   // ── abort ──────────────────────────────────────────────────────────────────
   const aborted = cli(['abort', '--note', 'stopping here']);
   if (aborted.json?.aborted === true && aborted.json?.reason === 'stopping here') {

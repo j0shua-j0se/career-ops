@@ -45,7 +45,7 @@ import * as yaml from 'js-yaml';
 import {
   STAGES, STAGE_INFO, DEFAULT_RUN_CONFIG,
   resolveRunConfig, newRun, normalizeRun, decideNextStage,
-  currentStage, isFinished, kitCandidates, summarize, renderRunLogEntry,
+  currentStage, isFinished, kitCandidates, triageOnlyRows, summarize, renderRunLogEntry,
 } from './run-core.mjs';
 import { parsePipeline } from './triage-prefilter.mjs';
 import { HALT_ABORTED, classifyHaltReason } from './loop-core.mjs';
@@ -204,7 +204,12 @@ function gatherFacts(state) {
     // an ingest that found nothing looks identical to one that never ran.
     facts.agentSourcesSwept = Boolean(state.agent_sources_swept);
   }
-  if (stage === 'pipeline') facts.pendingUrls = pendingUrlCount();
+  if (stage === 'pipeline') {
+    facts.pendingUrls = pendingUrlCount();
+    // The inbox alone cannot say the stage is done: a tracker row still marked
+    // "triage-only … full evaluation pending" is an evaluation nobody has done.
+    facts.triageOnly = triageOnlyRows(trackerRows());
+  }
   if (stage === 'kits') facts.kitCandidates = kitCandidates(trackerRows(), state.config.kitThreshold);
   return facts;
 }
