@@ -188,6 +188,41 @@ try {
   if (reset.code === 0 && reset.json?.started === true) pass('--reset discards the in-flight pass and starts fresh');
   else fail(`start --reset exited ${reset.code}`);
 
+  // ── next: the Gmail sweep gate, ahead of the pipeline stage's evaluation ────
+  // The fixture tracker has an Applied row (Gamma), so a sweep could change
+  // something and the gate must be raised — even though URLs are pending.
+  const gate = cli(['next']);
+  if (gate.json?.stage === 'pipeline' && gate.json?.action === 'gmail-sweep' && gate.json?.agent === true) {
+    pass('next asks for the Gmail sweep first, before any evaluation, while an application is in flight');
+  } else {
+    fail(`next returned ${JSON.stringify(gate.json)?.slice(0, 200)}`);
+  }
+  if (/note-gmail/.test(gate.json?.instructions ?? '') && /gmail-sweep\.mjs query/.test(gate.json?.instructions ?? '')) {
+    pass('the gate names gmail-sweep.mjs query and how to record the sweep');
+  } else {
+    fail('the gmail-sweep instructions do not name query / note-gmail');
+  }
+  const noNote = cli(['note-gmail']);
+  if (noNote.code === 1 && /note-gmail needs --note/.test(noNote.stderr ?? '')) {
+    pass('note-gmail without a note is refused — the note is the audit trail');
+  } else {
+    fail(`note-gmail with no note exited ${noNote.code}`);
+  }
+  const noted = cli(['note-gmail', '--note', 'swept: 0 messages, 0 moved']);
+  if (noted.code === 0 && noted.json?.recorded === true && noted.json?.next?.action === 'evaluate') {
+    pass('note-gmail records the sweep and releases the pipeline stage to evaluation');
+  } else {
+    fail(`note-gmail returned ${JSON.stringify(noted.json)?.slice(0, 200)}`);
+  }
+  const notedState = JSON.parse(readFileSync(statePath, 'utf-8'));
+  if (notedState.gmail_swept === true && notedState.gmail_note === 'swept: 0 messages, 0 moved' && notedState.gmail_by === 'agent') {
+    pass('the sweep record (flag, note, who) is persisted in the state file');
+  } else {
+    fail(`gmail state was ${JSON.stringify({ s: notedState.gmail_swept, n: notedState.gmail_note, b: notedState.gmail_by })}`);
+  }
+  if (/note-gmail/.test(readFileSync(logPath, 'utf-8'))) pass('the run log records the sweep');
+  else fail('note-gmail left no run-log entry');
+
   // ── next: the pipeline stage ───────────────────────────────────────────────
   const evaluate = cli(['next']);
   if (evaluate.json?.stage === 'pipeline' && evaluate.json?.action === 'evaluate') {
@@ -373,6 +408,7 @@ try {
     writeFileSync(pipelinePath, inbox([]), 'utf-8');
     writeFileSync(trackerPath, TRACKER + TRIAGE_ROW, 'utf-8');
     cli(['start', '--skip-scan', '--reset']);
+    cli(['note-gmail', '--note', 'swept: nothing new']);
     const held = cli(['next']);
     if (held.json?.stage === 'pipeline' && held.json?.action === 'evaluate' && held.json?.pending === 0) {
       pass('an empty inbox does not complete the pipeline stage while a triage-only row is owed an evaluation');
@@ -395,6 +431,101 @@ try {
     const released = cli(['next']);
     if (released.json?.stage === 'kits') pass('a row with a report link no longer blocks the pipeline stage');
     else fail(`after the report landed, next returned stage ${released.json?.stage}`);
+
+    writeFileSync(trackerPath, TRACKER, 'utf-8');
+    cli(['start', '--skip-scan', '--reset']);
+  }
+
+  // ── the Gmail gate: empty inbox, nothing-in-flight shortcut, skip, legacy ───
+  // The gate used to live only in the evaluate instructions, so an EMPTY inbox
+  // completed the stage with no agent ever told to sweep the mailbox.
+  {
+    const IN_FLIGHT = TRACKER;   // Gamma is Applied
+    const NOTHING_IN_FLIGHT = TRACKER.replace('| Applied | ✅ |', '| Rejected | ✅ |');
+    writeFileSync(pipelinePath, inbox([]), 'utf-8');
+
+    // 1. empty inbox + an application in flight + not swept => asked, not completed
+    writeFileSync(trackerPath, IN_FLIGHT, 'utf-8');
+    cli(['start', '--skip-scan', '--reset']);
+    const asked = cli(['next']);
+    if (asked.json?.stage === 'pipeline' && asked.json?.action === 'gmail-sweep') {
+      pass('an EMPTY inbox no longer completes the pipeline stage: the Gmail sweep is asked for');
+    } else {
+      fail(`empty inbox + in flight decided ${JSON.stringify(asked.json)?.slice(0, 250)}`);
+    }
+    if (!JSON.parse(readFileSync(statePath, 'utf-8')).completed.includes('pipeline')) {
+      pass('the pipeline stage is not recorded as complete before the sweep is noted');
+    } else {
+      fail('the pipeline stage auto-completed over an unswept mailbox');
+    }
+    // asking again does not double up: still one gate, then it clears once
+    cli(['note-gmail', '--note', 'swept: 3 messages, 1 moved']);
+    const cleared = cli(['next']);
+    if (cleared.json?.stage === 'kits') pass('once noted, the empty-inbox stage completes and the pass moves on');
+    else fail(`after note-gmail, next returned ${JSON.stringify(cleared.json)?.slice(0, 200)}`);
+    const again = cli(['next']);
+    if (again.json?.action !== 'gmail-sweep') pass('the sweep is asked for exactly once per pass');
+    else fail('the sweep was asked for a second time');
+
+    // 2. nothing in flight => the driver records the gate itself, no agent step
+    writeFileSync(trackerPath, NOTHING_IN_FLIGHT, 'utf-8');
+    cli(['start', '--skip-scan', '--reset']);
+    const auto = cli(['next']);
+    if (auto.json?.stage === 'kits' && auto.json?.action !== 'gmail-sweep') {
+      pass('nothing in flight: next rolls past the pipeline stage without asking for a sweep');
+    } else {
+      fail(`nothing-in-flight decided ${JSON.stringify(auto.json)?.slice(0, 250)}`);
+    }
+    const autoState = JSON.parse(readFileSync(statePath, 'utf-8'));
+    if (autoState.gmail_swept === true && autoState.gmail_by === 'auto' && /nothing in flight/.test(autoState.gmail_note ?? '')) {
+      pass('the shortcut is recorded visibly (state note + who), not skipped silently');
+    } else {
+      fail(`auto record was ${JSON.stringify({ s: autoState.gmail_swept, b: autoState.gmail_by, n: autoState.gmail_note })}`);
+    }
+    if (/note-gmail · stage=pipeline · auto: nothing in flight/.test(readFileSync(logPath, 'utf-8'))) {
+      pass('the shortcut is in the run log');
+    } else {
+      fail('the nothing-in-flight shortcut left no run-log line');
+    }
+    // status is read-only: on a fresh pass it must not record anything
+    cli(['start', '--skip-scan', '--reset']);
+    cli(['status']);
+    if (JSON.parse(readFileSync(statePath, 'utf-8')).gmail_swept === undefined) {
+      pass('status does not record the gate (only next does)');
+    } else {
+      fail('status wrote the gmail gate');
+    }
+
+    // 3. --skip-pipeline never needs the gate
+    writeFileSync(trackerPath, IN_FLIGHT, 'utf-8');
+    cli(['start', '--skip-scan', '--skip-pipeline', '--reset']);
+    const skipped = cli(['next']);
+    if (skipped.json?.stage === 'kits' && skipped.json?.action !== 'gmail-sweep') {
+      pass('a pass started with --skip-pipeline does not require the sweep');
+    } else {
+      fail(`--skip-pipeline decided ${JSON.stringify(skipped.json)?.slice(0, 200)}`);
+    }
+
+    // 4. legacy state: written before the gate, so no gmail_* keys at all
+    cli(['start', '--skip-scan', '--reset']);
+    const legacyDone = JSON.parse(readFileSync(statePath, 'utf-8'));
+    for (const k of Object.keys(legacyDone)) if (k.startsWith('gmail_')) delete legacyDone[k];
+    legacyDone.completed = ['scan', 'pipeline'];
+    writeFileSync(statePath, JSON.stringify(legacyDone), 'utf-8');
+    const legacyNext = cli(['next']);
+    if (legacyNext.code === 0 && legacyNext.json?.stage === 'kits' && legacyNext.json?.action !== 'gmail-sweep') {
+      pass('a legacy pass whose pipeline stage is already complete loads and stays complete');
+    } else {
+      fail(`legacy (pipeline done) decided ${JSON.stringify(legacyNext.json)?.slice(0, 200)}`);
+    }
+    legacyDone.completed = ['scan'];
+    writeFileSync(statePath, JSON.stringify(legacyDone), 'utf-8');
+    const legacyOpen = cli(['next']);
+    if (legacyOpen.code === 0 && legacyOpen.json?.action === 'gmail-sweep') {
+      pass('a legacy pass still at the pipeline stage is asked for the sweep, once');
+    } else {
+      fail(`legacy (pipeline open) decided ${JSON.stringify(legacyOpen.json)?.slice(0, 200)}`);
+    }
 
     writeFileSync(trackerPath, TRACKER, 'utf-8');
     cli(['start', '--skip-scan', '--reset']);

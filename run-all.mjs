@@ -20,7 +20,8 @@
  *   node run-all.mjs start [--skip-scan] [--reset]
  *   node run-all.mjs next               # {stage, action, reason, instructions}
  *   node run-all.mjs advance            # mark the current stage complete
- *   node run-all.mjs sync               # perform stage 4 (zero tokens)
+ *   node run-all.mjs note-gmail --note "..."   # record the Gmail reply sweep
+ *   node run-all.mjs sync              # perform stage 4 (zero tokens)
  *   node run-all.mjs status [--summary]
  *   node run-all.mjs abort [--note "..."]
  *
@@ -48,6 +49,7 @@ import {
   currentStage, isFinished, kitCandidates, triageOnlyRows, summarize, renderRunLogEntry,
 } from './run-core.mjs';
 import { parsePipeline } from './triage-prefilter.mjs';
+import { buildGmailQuery } from './gmail-sweep.mjs';
 import { HALT_ABORTED, classifyHaltReason } from './loop-core.mjs';
 import { parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
 import { getCareerOpsRoot, resolveTrackerPathForWrite } from './path-resolver.mjs';
@@ -208,7 +210,15 @@ function gatherFacts(state) {
     facts.pendingUrls = pendingUrlCount();
     // The inbox alone cannot say the stage is done: a tracker row still marked
     // "triage-only … full evaluation pending" is an evaluation nobody has done.
-    facts.triageOnly = triageOnlyRows(trackerRows());
+    const rows = trackerRows();
+    facts.triageOnly = triageOnlyRows(rows);
+    // Recorded by `note-gmail`, kept in run state for the same reason as
+    // `agentSourcesSwept`: an empty mailbox sweep leaves no trace on disk.
+    facts.gmailSwept = Boolean(state.gmail_swept);
+    // `gmail-sweep.mjs query` prints `"query": null` when no row is in flight.
+    // buildGmailQuery is the function behind it and is pure local parsing of the
+    // rows already read above — no mailbox, no network.
+    facts.gmailInFlight = buildGmailQuery(rows) !== null;
   }
   if (stage === 'kits') facts.kitCandidates = kitCandidates(trackerRows(), state.config.kitThreshold);
   return facts;
@@ -249,7 +259,17 @@ function cmdNext() {
   const state = requireState();
 
   for (let guard = 0; guard <= STAGES.length; guard++) {
-    const decision = decideNextStage(state, gatherFacts(state));
+    const facts = gatherFacts(state);
+
+    // The deterministic shortcut for the Gmail gate: nothing in flight means
+    // there is no reply a sweep could act on, so record the gate as satisfied
+    // — visibly, in state and log — instead of asking the agent. Done here and
+    // not in gatherFacts, which `status` also calls and must not write.
+    if (currentStage(state) === 'pipeline' && !state.gmail_swept && facts.gmailInFlight === false) {
+      recordGmail(state, 'nothing in flight — no sweep needed', 'auto');
+      facts.gmailSwept = true;
+    }
+    const decision = decideNextStage(state, facts);
 
     if (decision.action === 'stage-complete') {
       state.completed.push(decision.stage);
@@ -421,6 +441,7 @@ const HELP = `run-all.mjs — end-to-end driver for /career-ops run
         [--target N] [--min-score X] [--kit-threshold X]   begin a pass
   next                                    what to do next (JSON)
   advance [--stage NAME] [--note "..."]   mark the current stage complete
+  note-gmail --note "..."                 record the Gmail reply sweep (or why it was skipped)
   sync [--dry-run] [--skip-dashboard]     run stage 4 (zero tokens)
   status [--summary]                      current pass state
   abort [--note "..."]                    stop a pass
@@ -481,8 +502,43 @@ function cmdNoteSources(flags) {
   return { recorded: true, note, next: decideNextStage(state, gatherFacts(state)) };
 }
 
+/**
+ * Store the Gmail-sweep gate as satisfied, with who satisfied it and why.
+ * `by` is 'agent' for `note-gmail` and 'auto' for the nothing-in-flight shortcut.
+ */
+function recordGmail(state, note, by) {
+  state.gmail_swept = true;
+  state.gmail_note = note;
+  state.gmail_by = by;
+  state.gmail_at = new Date().toISOString();
+  // The sweep spent attempts of its own before it was recorded; the evaluation
+  // that follows gets the stage's full budget, not what was left over.
+  if (currentStage(state) === 'pipeline') delete state.attempts.pipeline;
+  saveState(state);
+  log(state, 'note-gmail', `${by}: ${note}`);
+}
+
+/**
+ * Record that the Gmail reply sweep (modes/pipeline.md Step 0) was run this
+ * pass — or deliberately skipped, with a reason.
+ *
+ * The pipeline stage will not complete without it: with an empty inbox nothing
+ * else ever asks for the sweep, and a mailbox read that found nothing leaves the
+ * same trace as one that never happened. The note is that trace.
+ */
+function cmdNoteGmail(flags) {
+  const state = requireState();
+  const note = typeof flags.note === 'string' ? flags.note.trim() : '';
+  if (!note) {
+    throw new Error('note-gmail needs --note "what you swept, or why you skipped it" — the note is the '
+      + 'audit trail for a step that cannot otherwise be verified.');
+  }
+  recordGmail(state, note, 'agent');
+  return { recorded: true, note, next: decideNextStage(state, gatherFacts(state)) };
+}
+
 const COMMANDS = {
-  start: cmdStart, next: cmdNext, advance: cmdAdvance, 'note-sources': cmdNoteSources,
+  start: cmdStart, next: cmdNext, advance: cmdAdvance, 'note-sources': cmdNoteSources, 'note-gmail': cmdNoteGmail,
   sync: cmdSync, status: cmdStatus, abort: cmdAbort,
 };
 

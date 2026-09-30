@@ -257,7 +257,9 @@ try {
   }
 
   const atPipeline = normalizeRun({ ...run, completed: ['scan'] }, DEFAULT_RUN_CONFIG);
-  const evaluate = decideNextStage(atPipeline, { pendingUrls: 3 });
+  // gmailSwept: the Gmail sweep is its own gate ahead of evaluation (see the
+  // "Gmail sweep gate" block at the end of this file).
+  const evaluate = decideNextStage(atPipeline, { pendingUrls: 3, gmailSwept: true });
   if (evaluate.stage === 'pipeline' && evaluate.action === 'evaluate' && evaluate.pending === 3) {
     pass('a non-empty inbox puts the run on the pipeline stage with a pending count');
   } else {
@@ -269,7 +271,7 @@ try {
     fail('the pipeline stage did not hand back instructions');
   }
 
-  const drained = decideNextStage(atPipeline, { pendingUrls: 0 });
+  const drained = decideNextStage(atPipeline, { pendingUrls: 0, gmailSwept: true });
   if (drained.action === 'stage-complete') pass('an empty inbox reports the pipeline stage complete');
   else fail(`empty inbox decided ${JSON.stringify(drained)}`);
 
@@ -331,7 +333,7 @@ try {
     { ...run, completed: ['scan'], attempts: { pipeline: DEFAULT_RUN_CONFIG.maxStageAttempts - 1 } },
     DEFAULT_RUN_CONFIG
   );
-  if (decideNextStage(nearlyStuck, { pendingUrls: 5 }).action === 'evaluate') {
+  if (decideNextStage(nearlyStuck, { pendingUrls: 5, gmailSwept: true }).action === 'evaluate') {
     pass('a stage one attempt below the limit still runs');
   } else {
     fail('the attempt budget is off by one — the final allowed attempt was refused');
@@ -577,7 +579,7 @@ console.log('\nrun-core — triage-only rows block pipeline completion');
   const atPipeline = normalizeRun({ ...newRun(), completed: ['scan'] }, DEFAULT_RUN_CONFIG);
   const owed = triageOnlyRows(rows).slice(0, 1);
 
-  const held = decideNextStage(atPipeline, { pendingUrls: 0, triageOnly: owed });
+  const held = decideNextStage(atPipeline, { pendingUrls: 0, triageOnly: owed, gmailSwept: true });
   held.action === 'evaluate' && held.stage === 'pipeline' && held.agent === true
     ? pass('an empty inbox with a triage-only row is `evaluate`, not stage-complete')
     : fail(`empty inbox + triage-only row decided ${JSON.stringify(held)}`);
@@ -588,22 +590,100 @@ console.log('\nrun-core — triage-only rows block pipeline completion');
     ? pass('the reason and instructions name the row and say to evaluate it')
     : fail(`reason/instructions did not name the row: ${held.reason} | ${held.instructions}`);
 
-  const mixed = decideNextStage(atPipeline, { pendingUrls: 2, triageOnly: owed });
+  const mixed = decideNextStage(atPipeline, { pendingUrls: 2, triageOnly: owed, gmailSwept: true });
   mixed.action === 'evaluate' && mixed.pending === 2 && mixed.triageOnly.length === 1
     ? pass('pending URLs and triage-only rows are reported together')
     : fail(`mixed decision was ${JSON.stringify(mixed)}`);
 
-  decideNextStage(atPipeline, { pendingUrls: 0, triageOnly: [] }).action === 'stage-complete'
+  decideNextStage(atPipeline, { pendingUrls: 0, triageOnly: [], gmailSwept: true }).action === 'stage-complete'
     ? pass('an empty inbox with no triage-only row still completes the stage')
     : fail('an empty inbox and no owed rows no longer completes the pipeline stage');
-  decideNextStage(atPipeline, { pendingUrls: 0 }).action === 'stage-complete'
+  decideNextStage(atPipeline, { pendingUrls: 0, gmailSwept: true }).action === 'stage-complete'
     ? pass('callers that pass no triageOnly fact behave exactly as before')
     : fail('a missing triageOnly fact changed the decision');
 
   // The circuit breaker still bounds it: a row that can never be evaluated must
   // halt the pass with a way out, not loop forever.
   const stuck = normalizeRun({ ...newRun(), completed: ['scan'], attempts: { pipeline: DEFAULT_RUN_CONFIG.maxStageAttempts } }, DEFAULT_RUN_CONFIG);
-  decideNextStage(stuck, { pendingUrls: 0, triageOnly: owed }).action === 'halt'
+  decideNextStage(stuck, { pendingUrls: 0, triageOnly: owed, gmailSwept: true }).action === 'halt'
     ? pass('a triage-only row that never clears is bounded by the attempt budget')
     : fail('a permanently owed row is not covered by the circuit breaker');
+}
+
+// ---------------------------------------------------------------------------
+// The Gmail reply sweep is a gate of its own.
+//
+// modes/pipeline.md Step 0 sweeps the mailbox before the inbox is touched, but
+// the only thing that ever told an agent to run it was the evaluate instruction —
+// so a pass that reached the pipeline stage with an empty inbox completed it
+// without any agent being asked, and the tracker was reconciled against nothing.
+// Mirrors Stage 1b's `agentSourcesSwept`: an explicit record (`note-gmail`), fail
+// closed when the fact is absent, one deterministic exemption when no
+// application is in flight.
+console.log('\nrun-core — the Gmail sweep gate on the pipeline stage');
+
+{
+  const { decideNextStage, normalizeRun, newRun, DEFAULT_RUN_CONFIG } = await import('../run-core.mjs');
+  const atPipeline = normalizeRun({ ...newRun(), completed: ['scan'] }, DEFAULT_RUN_CONFIG);
+
+  const empty = decideNextStage(atPipeline, { pendingUrls: 0, gmailSwept: false, gmailInFlight: true });
+  empty.action === 'gmail-sweep' && empty.stage === 'pipeline' && empty.agent === true
+    ? pass('an empty inbox with the sweep not recorded is a gmail-sweep agent action, not stage-complete')
+    : fail(`empty inbox + unswept decided ${JSON.stringify(empty)}`);
+  /modes\/pipeline\.md/.test(empty.instructions) && /gmail-sweep\.mjs query/.test(empty.instructions)
+    && /plan/.test(empty.instructions) && /apply/.test(empty.instructions) && /note-gmail/.test(empty.instructions)
+    ? pass('the instructions point at modes/pipeline.md, query -> plan -> apply, and finish with note-gmail')
+    : fail(`gmail-sweep instructions incomplete: ${empty.instructions}`);
+  /never silent/.test(empty.instructions) && /skipped/.test(empty.instructions)
+    ? pass('the instructions offer a visible, recorded skip rather than a silent one')
+    : fail('no explicit skip route in the gmail-sweep instructions');
+
+  decideNextStage(atPipeline, { pendingUrls: 4, gmailSwept: false, gmailInFlight: true }).action === 'gmail-sweep'
+    ? pass('with URLs pending, the sweep still comes FIRST — ahead of evaluation')
+    : fail('a non-empty inbox skipped past the sweep gate');
+
+  // Once recorded, the stage carries on exactly as before — and never asks again.
+  decideNextStage(atPipeline, { pendingUrls: 0, gmailSwept: true, gmailInFlight: true }).action === 'stage-complete'
+    ? pass('swept + empty inbox completes the stage')
+    : fail('a recorded sweep did not release the empty-inbox completion');
+  const after = decideNextStage(atPipeline, { pendingUrls: 4, gmailSwept: true, gmailInFlight: true });
+  after.action === 'evaluate' && !/Gmail sweep,/.test(after.instructions) && /already recorded/.test(after.instructions)
+    ? pass('swept + pending URLs is evaluate, and its instructions no longer ask for the sweep a second time')
+    : fail(`swept + pending decided ${JSON.stringify(after).slice(0, 300)}`);
+
+  // Fail closed: a caller that does not know the fact gets the gate, not a pass.
+  decideNextStage(atPipeline, { pendingUrls: 0 }).action === 'gmail-sweep'
+    ? pass('an absent gmailSwept fact fails closed (not swept)')
+    : fail('an unknown sweep state let the pipeline stage complete');
+
+  // The deterministic shortcut: nothing in flight => nothing a sweep could change.
+  decideNextStage(atPipeline, { pendingUrls: 0, gmailSwept: false, gmailInFlight: false }).action === 'stage-complete'
+    ? pass('nothing in flight needs no sweep: the empty-inbox stage completes')
+    : fail('nothing-in-flight did not release the gate');
+  decideNextStage(atPipeline, { pendingUrls: 2, gmailSwept: false, gmailInFlight: false }).action === 'evaluate'
+    ? pass('nothing in flight + pending URLs goes straight to evaluate')
+    : fail('nothing-in-flight did not release the gate for a non-empty inbox');
+
+  // --skip-pipeline never reaches the stage, so it never needs the gate.
+  const skipped = newRun(DEFAULT_RUN_CONFIG, { skip: ['scan', 'pipeline'] });
+  const s = decideNextStage(skipped, { kitCandidates: [] });
+  s.stage === 'kits' && s.action !== 'gmail-sweep'
+    ? pass('a pass started with --skip-pipeline does not require the sweep')
+    : fail(`--skip-pipeline decided ${JSON.stringify(s)}`);
+
+  // States written before the gate existed have no gmail_swept key at all.
+  const legacyDone = normalizeRun({ ...newRun(), completed: ['scan', 'pipeline'] }, DEFAULT_RUN_CONFIG);
+  legacyDone.gmail_swept === undefined && decideNextStage(legacyDone, { kitCandidates: [] }).stage === 'kits'
+    ? pass('a legacy pass whose pipeline stage is already complete stays complete')
+    : fail('a legacy state was pushed back through the gate');
+  const legacyOpen = normalizeRun({ ...newRun(), completed: ['scan'] }, DEFAULT_RUN_CONFIG);
+  decideNextStage(legacyOpen, { pendingUrls: 0, gmailSwept: Boolean(legacyOpen.gmail_swept), gmailInFlight: true }).action === 'gmail-sweep'
+    ? pass('a legacy pass still AT the pipeline stage is asked for the sweep once')
+    : fail('a legacy state at the pipeline stage bypassed the gate');
+
+  // The circuit breaker is checked first, so the gate cannot loop forever either.
+  const stuck = normalizeRun({ ...newRun(), completed: ['scan'], attempts: { pipeline: DEFAULT_RUN_CONFIG.maxStageAttempts } }, DEFAULT_RUN_CONFIG);
+  decideNextStage(stuck, { pendingUrls: 0, gmailSwept: false, gmailInFlight: true }).action === 'halt'
+    ? pass('an unrecorded sweep is still bounded by the attempt budget')
+    : fail('the gate escaped the circuit breaker');
 }

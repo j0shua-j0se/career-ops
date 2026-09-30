@@ -336,6 +336,9 @@ export function isStaleLoop(loopRunId, runStartedAt) {
  * @param {{done: boolean, phase?: string, qualified?: number}} [facts.loop] - scan-loop status.
  * @param {number} [facts.pendingUrls] - `- [ ]` rows in data/pipeline.md.
  * @param {Array<object>} [facts.triageOnly] - Output of triageOnlyRows().
+ * @param {boolean} [facts.gmailSwept] - `note-gmail` was recorded this pass.
+ * @param {boolean} [facts.gmailInFlight] - false when no tracker row is
+ *   Applied/Responded/Interview/Offer, so no sweep is needed.
  * @param {Array<object>} [facts.kitCandidates] - Output of kitCandidates().
  * @returns {{stage: string|null, action: string, reason: string, agent: boolean, [k: string]: any}}
  */
@@ -451,6 +454,39 @@ export function decideNextStage(state, facts = {}) {
   }
 
   if (stage === 'pipeline') {
+    // The Gmail reply sweep (modes/pipeline.md → Gmail sweep, Step 0) comes
+    // first and is a gate of its own. It used to live only inside the evaluate
+    // instructions, so a pass that reached this stage with an empty inbox
+    // completed it below without any agent ever being told to run it — the
+    // tracker was then reconciled against nothing. Same shape as Stage 1b's
+    // `agentSourcesSwept`: not observable from any file, hence an explicit record
+    // (`run-all.mjs note-gmail`), and asked for exactly once per pass, ahead of
+    // the evaluation rather than again after it.
+    //
+    // Fail closed: an absent `gmailSwept` fact means "not swept". The one
+    // deterministic exemption is `gmailInFlight === false` — no tracker row is
+    // Applied/Responded/Interview/Offer, so there is no reply the mailbox could
+    // change (`gmail-sweep.mjs query` reports `"query": null` for exactly this).
+    // States written before this gate existed have no `gmail_swept` key: one that
+    // is already past this stage stays past it, and one still at it is asked once.
+    if (!facts.gmailSwept && facts.gmailInFlight !== false) {
+      return {
+        ...base,
+        action: 'gmail-sweep',
+        agent: true,
+        reason: 'the Gmail reply sweep (modes/pipeline.md Step 0) has not been recorded this pass',
+        instructions: 'Reconcile the tracker with the mailbox BEFORE touching the inbox. Follow the "Gmail '
+          + 'sweep" section of `modes/pipeline.md`: `node gmail-sweep.mjs query` prints the Gmail search '
+          + '(`"query": null` means nothing is in flight — just record that); run it through the Gmail '
+          + 'connector/MCP or `node plugins.mjs run gmail`, reading ONLY what the query asks and never '
+          + 'sending, archiving, labelling or deleting; write the messages to a JSON array; '
+          + '`node gmail-sweep.mjs plan --file <messages.json>`, then `apply --file <messages.json>`. '
+          + 'Show the user what moved and what needs review. Then finish with '
+          + '`node run-all.mjs note-gmail --note "swept: <n> message(s), <m> moved"`. If no mailbox access '
+          + 'exists, record that instead — `note-gmail --note "skipped: <why>"` — the skip is kept in the '
+          + 'run state and log; it is never silent.',
+      };
+    }
     const pending = facts.pendingUrls ?? 0;
     // An empty inbox is not enough: a tracker row still marked "triage-only …
     // full evaluation pending" is evaluation this stage owes, whether or not an
@@ -476,7 +512,7 @@ export function decideNextStage(state, facts = {}) {
           ? `${triageOnly.length} tracker row(s) (${triageOnly.map((r) => `#${r.num}`).join(', ')}) are triage-only and still owe a full evaluation`
           : '',
       ].filter(Boolean).join('; '),
-      instructions: 'Follow `modes/pipeline.md` end to end: Gmail sweep, aggregator-lead resolution '
+      instructions: 'Follow `modes/pipeline.md` from the aggregator step on (the Gmail sweep is its own gate and is already recorded): aggregator-lead resolution '
         + '(`node resolve-aggregator-leads.mjs --write` — rewrites any StepStone/Indeed lead to the '
         + "employer's own posting before it is opened; a no-op when the inbox has none), liveness "
         + 'sweep, pre-screen gate, then evaluate each surviving URL into a report and a tracker TSV. '
