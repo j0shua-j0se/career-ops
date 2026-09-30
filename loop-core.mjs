@@ -526,6 +526,58 @@ export function inboxVerdictRows(state, pendingUrls) {
   return rows;
 }
 
+/**
+ * Qualified candidates the inbox does not hold yet — the ones `finish` must
+ * queue so the pipeline stage can evaluate them.
+ *
+ * A candidate that came from a scanner wave is already an inbox row (`diffPipeline`
+ * read it from data/pipeline.md), but one handed in through `ingest` never was:
+ * `ingest` writes only loop state. On pass run-20260929T193517 an agent-sourced
+ * qualifier was promoted to tracker row #201 as "triage-only … full evaluation
+ * pending" with no `- [ ]` line anywhere, so the pipeline stage saw an empty
+ * inbox, completed, and the posting was never fully evaluated.
+ *
+ * "Holds" means ANY checkbox line, not just pending ones: a `- [x]` row was
+ * already evaluated or discarded and a `- [!]` row was already found unreadable,
+ * and re-queuing either would undo a decision — so only a URL absent from the
+ * inbox entirely is returned. Matching goes through `candidateKey`, the same
+ * normalisation the loop dedups on.
+ *
+ * @param {object} state
+ * @param {string} inboxMd  contents of data/pipeline.md ('' when the file is absent)
+ * @returns {Array<{url:string, company:string, title:string, location:string, postedAt:number|undefined}>}
+ *   in `formatPipelineOffer`'s shape, `postedAt` as epoch ms when it parses
+ */
+export function inboxQualifierRows(state, inboxMd) {
+  const present = new Set();
+  for (const line of String(inboxMd ?? '').split(/\r?\n/)) {
+    const m = /^\s*[-*]\s*\[.\]\s*(.+)$/.exec(line);
+    if (!m) continue;
+    // Every URL-shaped cell, not just the first: a processed row leads with its
+    // report number (`- [x] #12 | https://… | Co | Role | 4.0/5`, the shape
+    // modes/pipeline.md prescribes), so the URL is the second cell there.
+    for (const cell of m[1].split('|')) {
+      const t = cell.trim();
+      if (/^(https?:\/\/|local:)\S+$/i.test(t)) present.add(candidateKey(t));
+    }
+  }
+  const rows = [];
+  for (const c of qualifiedCandidates(state)) {
+    const key = candidateKey(c.url || c.key);
+    if (!key || present.has(key)) continue;
+    present.add(key);   // two qualifiers can share one normalised URL
+    const posted = /^\d{10,}$/.test(String(c.postedAt ?? '')) ? Number(c.postedAt) : Date.parse(c.postedAt ?? '');
+    rows.push({
+      url: c.url || c.key,
+      company: c.company,
+      title: c.title,
+      location: c.location,
+      postedAt: Number.isFinite(posted) ? posted : undefined,
+    });
+  }
+  return rows;
+}
+
 // ── Counting ────────────────────────────────────────────────────────────────
 
 /** All candidates as an array, newest wave last. */

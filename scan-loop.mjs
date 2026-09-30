@@ -39,7 +39,7 @@ import {
   DEFAULT_LOOP_CONFIG,
   resolveLoopConfig, newState, normalizeState, ingestOffers, recordScores,
   parseTriageOutput, decideNextAction, summarize, qualifiedCandidates,
-  renderShortlist, renderRunLogEntry, toHumanUrl, inboxVerdictRows,
+  renderShortlist, renderRunLogEntry, toHumanUrl, inboxVerdictRows, inboxQualifierRows,
   effectiveStrategies,
   HALT_BUDGET,
   HALT_ABORTED,
@@ -47,6 +47,7 @@ import {
 } from './loop-core.mjs';
 import { parsePipeline, rankEntry, writeVerdictRowsToInbox } from './triage-prefilter.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
+import { appendToPipeline } from './scan.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
 import { loadCheckpoint, checkpointCompatible, parseArgs as parseScanAtsFullArgs, SOURCES as ATS_SOURCES } from './scan-ats-full.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
@@ -577,24 +578,57 @@ function writeTrackerAdditions(candidates, date) {
  * Apply the loop's verdicts to data/pipeline.md through the same code path as
  * `triage-prefilter.mjs --mark-file`: rejected -> `- [x]` with the triage
  * reason (and a data/discard.log line), unreachable -> `- [!]`; qualified and
- * unscored candidates stay pending. Idempotent — a second `finish` finds every
+ * unscored candidates stay pending, and a qualifier the inbox has no line for
+ * (an `ingest`ed one) is queued pending by `queueQualifiers`. Idempotent — a second `finish` finds every
  * row already marked and changes nothing.
  *
  * Never throws: a missing or unwritable inbox must not undo a finish that has
  * already promoted its candidates, so the failure is returned and logged.
  */
 async function reconcileInbox(state) {
-  if (!existsSync(PIPELINE_PATH)) return { skipped: 'no inbox file', discarded: 0, unreachable: 0, logged: 0 };
+  // Queue first — it may create the inbox — but say the inbox was absent when
+  // `finish` started: with none, there were no verdict rows to apply either.
+  const hadInbox = existsSync(PIPELINE_PATH);
+  const queued = await queueQualifiers(state);
+  if (!hadInbox) return { skipped: 'no inbox file', discarded: 0, unreachable: 0, logged: 0, ...queued };
   try {
     return await withPipelineLock(PIPELINE_PATH, () => {
       const pending = parsePipeline(readFileSync(PIPELINE_PATH, 'utf-8')).pending.map((e) => e.url);
       const rows = inboxVerdictRows(state, pending);
-      if (rows.length === 0) return { discarded: 0, unreachable: 0, logged: 0 };
+      if (rows.length === 0) return { discarded: 0, unreachable: 0, logged: 0, ...queued };
       const done = writeVerdictRowsToInbox(rows, { pipelinePath: PIPELINE_PATH, discardLogPath: DISCARD_LOG_PATH });
-      return { discarded: done.discardsMarked, unreachable: done.unreachableMarked, logged: done.logLines.length };
+      return { discarded: done.discardsMarked, unreachable: done.unreachableMarked, logged: done.logLines.length, ...queued };
     });
   } catch (err) {
-    return { error: err.message, discarded: 0, unreachable: 0, logged: 0 };
+    return { error: err.message, discarded: 0, unreachable: 0, logged: 0, ...queued };
+  }
+}
+
+/**
+ * Put every promoted qualifier that is not in the inbox into it, pending.
+ *
+ * `finish` writes each qualifier a tracker row that says "full evaluation
+ * pending", and the only thing that ever performs that evaluation is the
+ * pipeline stage draining `- [ ]` rows from data/pipeline.md. A candidate that
+ * arrived through a scanner wave is already such a row; one that arrived through
+ * `ingest` (the agent-sourced rung: Indeed/Apify, WebSearch) never was, so it got
+ * the promise and not the queue entry — run-all then saw an empty inbox and
+ * completed the stage over it. Written through scan.mjs's own `appendToPipeline`
+ * (locked, same line shape as a scanned row), and only for a URL the inbox has no
+ * line for at all, so a re-run or an already-processed `- [x]` row is left alone.
+ *
+ * Never throws, for the same reason `reconcileInbox` does not: the candidates are
+ * already promoted, and a failure here is reported, not fatal.
+ */
+async function queueQualifiers(state) {
+  try {
+    const md = existsSync(PIPELINE_PATH) ? readFileSync(PIPELINE_PATH, 'utf-8') : '';
+    const missing = inboxQualifierRows(state, md);
+    if (missing.length === 0) return { queued: 0 };
+    await appendToPipeline(missing, { pipelinePath: PIPELINE_PATH });
+    return { queued: missing.length };
+  } catch (err) {
+    return { queued: 0, queueError: err.message };
   }
 }
 
@@ -635,7 +669,8 @@ async function cmdFinish(flags) {
   state.phase = 'done';
   saveState(state);
   log(state, 'finish', `promoted=${rows.length} tsv=${tsvCount} merged=${merged} `
-    + `inbox=discarded:${inbox.discarded},unreachable:${inbox.unreachable}${inbox.error ? ` (inbox error: ${inbox.error})` : ''}`);
+    + `inbox=discarded:${inbox.discarded},unreachable:${inbox.unreachable},queued:${inbox.queued}`
+    + `${inbox.error ? ` (inbox error: ${inbox.error})` : ''}${inbox.queueError ? ` (queue error: ${inbox.queueError})` : ''}`);
 
   return {
     promoted: rows.length,

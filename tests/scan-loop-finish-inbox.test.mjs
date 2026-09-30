@@ -69,6 +69,47 @@ try {
       again.discardsMarked === 0 && again.unreachableMarked === 0 && again.logLines.length === 0 && again.text === applied.text);
   }
 
+  // ── pure layer: inboxQualifierRows ─────────────────────────────────────────
+  // A qualifier that came in through `ingest` was never an inbox row, so `finish`
+  // promoted it to the tracker as "full evaluation pending" while nothing queued
+  // that evaluation (pass run-20260929T193517, tracker row #201).
+  {
+    const s = loopCore.newState({ ...loopCore.DEFAULT_LOOP_CONFIG, minScore: 3.8, target: 5 }, '2026-09-29T00:00:00.000Z');
+    loopCore.ingestOffers(s, [
+      { url: 'https://agent.example/jobs/1', company: 'Agent Co', title: 'Werkstudent Data', location: 'Nürnberg', postedAt: '2026-09-20' },
+      { url: 'https://www.pending.example/jobs/2?utm_source=x', company: 'Pending Co', title: 'B' },
+      { url: 'https://done.example/jobs/3', company: 'Done Co', title: 'C' },
+      { url: 'https://wall.example/jobs/4', company: 'Wall Co', title: 'D' },
+      { url: 'https://low.example/jobs/5', company: 'Low Co', title: 'E' },
+    ], 2);
+    const k = (u) => loopCore.candidateKey(u);
+    loopCore.recordScores(s, [
+      { key: k('https://agent.example/jobs/1'), score: 4.4, verdict: 'PASS' },
+      { key: k('https://www.pending.example/jobs/2?utm_source=x'), score: 4.1, verdict: 'PASS' },
+      { key: k('https://done.example/jobs/3'), score: 4.0, verdict: 'PASS' },
+      { key: k('https://wall.example/jobs/4'), score: 4.0, verdict: 'PASS' },
+      { key: k('https://low.example/jobs/5'), score: 2.0, verdict: 'FAIL' },
+    ]);
+    const md = [
+      '## Pending', '- [ ] http://pending.example/jobs/2 | Pending Co | B | Berlin',
+      '## Processed', '- [x] #12 | https://done.example/jobs/3 | Done Co | C | 4.0/5 | PDF ❌',
+      '- [!] https://wall.example/jobs/4 | Wall Co | D | unreachable (WAF)', '',
+    ].join('\n');
+    const missing = loopCore.inboxQualifierRows(s, md);
+    check('an ingested qualifier the inbox lacks is returned for queuing',
+      missing.length === 1 && missing[0].url === 'https://agent.example/jobs/1' && missing[0].company === 'Agent Co', JSON.stringify(missing));
+    check('its posted date rides along as epoch ms for the scanner line format',
+      missing[0]?.postedAt === Date.parse('2026-09-20'), String(missing[0]?.postedAt));
+    check('a qualifier already pending (under a different URL spelling) is not queued twice',
+      !missing.some((r) => r.url.includes('pending.example')));
+    check('a qualifier whose line is already processed - [x] is not resurrected',
+      !missing.some((r) => r.url.includes('done.example')));
+    check('a qualifier already marked - [!] is not re-queued either', !missing.some((r) => r.url.includes('wall.example')));
+    check('a rejected candidate is never queued', !missing.some((r) => r.url.includes('low.example')));
+    check('with an absent inbox every qualifier is queued',
+      loopCore.inboxQualifierRows(s, '').length === 4);
+  }
+
   // ── end to end: a real `finish` against a temp inbox ───────────────────────
   const box = mkdtempSync(join(tmpdir(), 'cops-finish-inbox-'));
   const paths = {
@@ -190,6 +231,87 @@ try {
   let j2 = null; try { j2 = JSON.parse(r2.stdout); } catch { /* */ }
   check('finish with no inbox file still succeeds and says why it skipped the inbox',
     r2.status === 0 && j2?.inbox?.skipped === 'no inbox file', `${r2.status} ${r2.stderr.trim()} ${r2.stdout.slice(0, 200)}`);
+  check('finish with no inbox file queues its qualifiers into a fresh one',
+    j2?.inbox?.queued === 2 && existsSync(join(box2, 'data', 'nope.md'))
+    && /^- \[ \] .*\/acme\/jobs\/1 \| keep \| Engineer \| Berlin$/m.test(readFileSync(join(box2, 'data', 'nope.md'), 'utf-8')),
+    existsSync(join(box2, 'data', 'nope.md')) ? readFileSync(join(box2, 'data', 'nope.md'), 'utf-8') : 'no file');
+
+  // ── ingest-sourced qualifiers reach the inbox ──────────────────────────────
+  // Same shape as the 2026-09-29 pass: an agent-sourced offer arrives through
+  // `ingest`, is triaged PASS, and `finish` must leave a PENDING inbox line for it
+  // so the pipeline stage evaluates it — without duplicating a row that is already
+  // there or resurrecting one already processed.
+  const box3 = mkdtempSync(join(tmpdir(), 'cops-finish-queue-'));
+  const p3 = {
+    state: join(box3, 'data', 'loop-state.json'), shortlist: join(box3, 'data', 'loop-shortlist.md'),
+    runLog: join(box3, 'data', 'loop-run-log.md'), pipeline: join(box3, 'data', 'pipeline.md'),
+    discardLog: join(box3, 'data', 'discard.log'), profile: join(box3, 'config', 'profile.yml'),
+    tracker: join(box3, 'data', 'applications.md'), additions: join(box3, 'batch', 'tracker-additions'),
+    batchState: join(box3, 'batch', 'batch-state.tsv'), reports: join(box3, 'reports'),
+  };
+  for (const d of ['data', 'config', join('batch', 'tracker-additions'), 'reports']) mkdirSync(join(box3, d), { recursive: true });
+  writeFileSync(p3.profile, 'loop:\n  target: 1\n  min_score: 3.8\n  score_batch: 12\n', 'utf-8');
+  writeFileSync(p3.tracker, [
+    '# Applications Tracker', '',
+    '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |',
+    '|---|------|---------|------|-------|--------|-----|--------|-------|', '',
+  ].join('\n'), 'utf-8');
+  const u3 = {
+    agent: 'https://apply.example.com/indeed/4711',
+    pending: 'https://boards.greenhouse.io/pending/jobs/2',
+    done: 'https://boards.greenhouse.io/done/jobs/3',
+  };
+  const inbox3 = [
+    '# Pipeline', '', '## Pending',
+    `- [ ] ${u3.pending} | pending | Engineer | Berlin`,
+    '', '## Processed',
+    `- [x] #12 | ${u3.done} | done | Engineer | 4.0/5 | PDF ❌`, '',
+  ].join('\n');
+  writeFileSync(p3.pipeline, inbox3, 'utf-8');
+  const env3 = {
+    ...process.env,
+    CAREER_OPS_LOOP_STATE: p3.state, CAREER_OPS_LOOP_SHORTLIST: p3.shortlist, CAREER_OPS_LOOP_RUN_LOG: p3.runLog,
+    CAREER_OPS_PIPELINE_FILE: p3.pipeline, CAREER_OPS_DISCARD_LOG: p3.discardLog, CAREER_OPS_PROFILE: p3.profile,
+    CAREER_OPS_TRACKER: p3.tracker, CAREER_OPS_ADDITIONS: p3.additions, CAREER_OPS_BATCH_STATE: p3.batchState,
+    CAREER_OPS_REPORTS_DIR: p3.reports,
+  };
+  const loop3 = (...args) => {
+    const r = spawnSync(NODE, [join(ROOT, 'scan-loop.mjs'), ...args], { env: env3, encoding: 'utf-8' });
+    let json = null;
+    try { json = JSON.parse(r.stdout); } catch { /* not JSON */ }
+    return { status: r.status, stderr: r.stderr ?? '', json };
+  };
+  const offers3 = join(box3, 'offers.json');
+  writeFileSync(offers3, JSON.stringify([
+    { url: u3.agent, company: 'Agent Co', title: 'Werkstudent Data | Analytics', location: 'Nürnberg', postedAt: '2026-09-20' },
+    { url: u3.pending, company: 'pending', title: 'Engineer', location: 'Berlin' },
+    { url: u3.done, company: 'done', title: 'Engineer', location: 'Berlin' },
+  ]), 'utf-8');
+  check('queue suite: start succeeds', loop3('start').status === 0);
+  check('queue suite: ingest adds the three offers', loop3('ingest', '--file', offers3).json?.added === 3);
+  const state3 = JSON.parse(readFileSync(p3.state, 'utf-8'));
+  writeFileSync(join(box3, 'scores.json'), JSON.stringify(Object.keys(state3.candidates).map((key) => (
+    { key, score: 4.5, verdict: 'PASS', reason: 'fits' }))), 'utf-8');
+  check('queue suite: all three qualify', loop3('record', '--file', join(box3, 'scores.json')).json?.qualified === 3);
+
+  const fin3 = loop3('finish');
+  check('queue suite: finish exits 0 and reports one queued row',
+    fin3.status === 0 && fin3.json?.inbox?.queued === 1, `${fin3.status} ${fin3.stderr.trim()} ${JSON.stringify(fin3.json?.inbox)}`);
+  const after3 = readFileSync(p3.pipeline, 'utf-8');
+  const count3 = (needle) => after3.split('\n').filter((l) => l.includes(needle)).length;
+  const agentLine = after3.split('\n').find((l) => l.includes(u3.agent)) ?? '';
+  check('the ingested qualifier is a pending line in the shape scan.mjs writes',
+    agentLine === `- [ ] ${u3.agent} | Agent Co | Werkstudent Data / Analytics | Nürnberg | posted: 2026-09-20`, agentLine);
+  check('it sits in the Pending section, above Processed', after3.indexOf(u3.agent) < after3.indexOf('## Processed'));
+  check('an already-pending qualifier is not duplicated', count3(u3.pending) === 1);
+  check('an already-processed - [x] qualifier is not resurrected',
+    count3(u3.done) === 1 && /^- \[x\] #12 \| /m.test(after3), after3);
+  const prefilter3 = await import(pathToFileURL(join(ROOT, 'triage-prefilter.mjs')).href);
+  check('parsePipeline sees the ingested qualifier as pending',
+    prefilter3.parsePipeline(after3).pending.some((e) => e.url === u3.agent));
+  const again3 = loop3('finish');
+  check('a second finish queues nothing and leaves the inbox byte-identical',
+    again3.status === 0 && again3.json?.inbox?.queued === 0 && readFileSync(p3.pipeline, 'utf-8') === after3, JSON.stringify(again3.json?.inbox));
 } catch (err) {
   fail(`scan-loop finish/inbox suite crashed: ${err.message}`);
 }
