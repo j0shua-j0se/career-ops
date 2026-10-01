@@ -54,6 +54,7 @@ import {
   rewriteResolvedLine, rewriteUnresolvedLine, applyPipelineChanges,
 } from './resolve-aggregator-leads.mjs';
 import { normalizeUrl } from './url-key.mjs';
+import { localToday } from './lib/local-today.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
 import { loadCheckpoint, checkpointCompatible, parseArgs as parseScanAtsFullArgs, SOURCES as ATS_SOURCES } from './scan-ats-full.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
@@ -455,7 +456,9 @@ async function recordSourcesInScanHistory(candidates) {
       });
     }
     if (rows.length === 0) return 0;
-    await appendToScanHistory(rows, new Date().toISOString().slice(0, 10), 'added');
+    // The LOCAL day, like every other scan-history writer (tests/local-today-gates).
+    const today = localToday();
+    await appendToScanHistory(rows, today, 'added');
     return rows.length;
   } catch (err) {
     console.error(`  scan-history: could not record the source of the ingested offers — ${err.message}`);
