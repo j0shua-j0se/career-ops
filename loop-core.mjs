@@ -348,6 +348,7 @@ export function normalizeState(state, config = DEFAULT_LOOP_CONFIG) {
  * never re-scored. Returns the split so the wave record can show whether the
  * rung actually widened the search or just re-found what wave 1 had.
  *
+ * @param {object} state
  * `offer.source` (e.g. `indeed`, `apify-linkedin`) is where an agent-sourced offer
  * came from. It is kept on the candidate — and only when present, so an offer
  * without one stays exactly what it was — because a scanner wave's postings are
@@ -598,18 +599,48 @@ export function inboxQualifierRows(state, inboxMd) {
   const rows = [];
   for (const c of qualifiedCandidates(state)) {
     const key = candidateKey(c.url || c.key);
-    if (!key || present.has(key)) continue;
+    // A candidate `finish` resolved to the employer's own posting is held by the
+    // inbox under EITHER spelling: the employer URL (it was rewritten, or queued
+    // that way) or the aggregator URL it arrived as (an earlier run queued it
+    // before it could be resolved). Counting only the first would queue it twice.
+    const spellings = [key, candidateKey(c.key), c.resolvedFrom ? candidateKey(c.resolvedFrom) : ''].filter(Boolean);
+    if (!key || spellings.some((k) => present.has(k))) continue;
     present.add(key);   // two qualifiers can share one normalised URL
     const posted = /^\d{10,}$/.test(String(c.postedAt ?? '')) ? Number(c.postedAt) : Date.parse(c.postedAt ?? '');
+    const note = aggregatorNote(c);
     rows.push({
       url: c.url || c.key,
       company: c.company,
       title: c.title,
       location: c.location,
       postedAt: Number.isFinite(posted) ? posted : undefined,
+      ...(note ? { note } : {}),
     });
   }
   return rows;
+}
+
+/** The marker `resolve-aggregator-leads.mjs` writes on a lead it could not resolve. */
+export const AGGREGATOR_UNRESOLVED_NOTE = 'aggregator-only, unresolved';
+
+/** `host` of an aggregator lead as resolve-aggregator-leads.mjs prints it (no `www.`). */
+export function aggregatorHost(url) {
+  try { return new URL(String(url ?? '').trim()).hostname.replace(/^www\./i, ''); } catch { return ''; }
+}
+
+/**
+ * The inbox `note:` an aggregator-sourced qualifier carries, in the same words
+ * `resolve-aggregator-leads.mjs` uses so a later run of it reads the line as
+ * already handled (its upsertNote is idempotent on this text):
+ *   resolved   -> `resolved from <host> lead: <aggregator url>` (provenance; the
+ *                 URL cell already holds the employer's posting)
+ *   unresolved -> `aggregator-only, unresolved`
+ * '' for an ordinary candidate.
+ */
+export function aggregatorNote(c) {
+  if (c?.resolvedFrom) return `resolved from ${aggregatorHost(c.resolvedFrom) || 'aggregator'} lead: ${c.resolvedFrom}`;
+  if (c?.aggregatorUnresolved) return AGGREGATOR_UNRESOLVED_NOTE;
+  return '';
 }
 
 // ── Counting ────────────────────────────────────────────────────────────────

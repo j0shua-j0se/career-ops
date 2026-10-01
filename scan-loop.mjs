@@ -29,7 +29,8 @@
  * Audit trail: data/loop-run-log.md · Loop definition: LOOP.md
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, renameSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, appendFileSync, renameSync } from 'fs';
+import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { spawnSync } from 'child_process';
@@ -40,7 +41,7 @@ import {
   resolveLoopConfig, newState, normalizeState, ingestOffers, recordScores,
   parseTriageOutput, decideNextAction, summarize, qualifiedCandidates,
   renderShortlist, renderRunLogEntry, toHumanUrl, inboxVerdictRows, inboxQualifierRows,
-  effectiveStrategies,
+  effectiveStrategies, aggregatorNote, aggregatorHost, candidateKey,
   HALT_BUDGET,
   HALT_ABORTED,
   classifyHaltReason,
@@ -48,6 +49,10 @@ import {
 import { parsePipeline, rankEntry, writeVerdictRowsToInbox } from './triage-prefilter.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
 import { appendToPipeline, appendToScanHistory, SCAN_HISTORY_PATH } from './scan.mjs';
+import {
+  DEFAULT_AGGREGATOR_HOSTS, isAggregatorUrl, resolveAggregatorLeads,
+  rewriteResolvedLine, rewriteUnresolvedLine, applyPipelineChanges,
+} from './resolve-aggregator-leads.mjs';
 import { normalizeUrl } from './url-key.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
 import { loadCheckpoint, checkpointCompatible, parseArgs as parseScanAtsFullArgs, SOURCES as ATS_SOURCES } from './scan-ats-full.mjs';
@@ -72,6 +77,10 @@ const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(CAREER_OPS, '
 const DISCARD_LOG_PATH = process.env.CAREER_OPS_DISCARD_LOG || join(CAREER_OPS, 'data', 'discard.log');
 const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || join(CAREER_OPS, 'config', 'profile.yml');
 const TSV_DIR = process.env.CAREER_OPS_ADDITIONS || join(CAREER_OPS, 'batch', 'tracker-additions');
+// The same file merge-tracker.mjs reads for its aggregator-URL guard (it honours
+// CAREER_OPS_PORTALS too), so `finish` resolves aggregator leads against exactly
+// the boards the merge will later check them against.
+const PORTALS_PATH = process.env.CAREER_OPS_PORTALS || join(CAREER_OPS, 'portals.yml');
 
 // The authoritative ATS source ids, passed into resolveLoopConfig so
 // `loop.ats_sources` is validated against scan-ats-full.mjs's real SOURCES
@@ -87,6 +96,18 @@ function loadProfile() {
     return yaml.load(readFileSync(PROFILE_PATH, 'utf-8')) || {};
   } catch (err) {
     console.error(`scan-loop: could not parse ${PROFILE_PATH} — ${err.message}`);
+    return {};
+  }
+}
+
+/** portals.yml, or `{}` when it is absent or unreadable — resolution then simply
+ * finds no tracked board, the same degradation merge-tracker.mjs applies. */
+function loadPortals() {
+  if (!existsSync(PORTALS_PATH)) return {};
+  try {
+    return yaml.load(readFileSync(PORTALS_PATH, 'utf-8')) || {};
+  } catch (err) {
+    console.error(`scan-loop: could not parse ${PORTALS_PATH} — ${err.message}`);
     return {};
   }
 }
@@ -627,11 +648,15 @@ function releaseNumbers(ranges) {
 function writeTrackerAdditions(candidates, date) {
   mkdirSync(TSV_DIR, { recursive: true });
   const cell = (v) => String(v ?? '').replace(/[\t\r\n]+/g, ' ').trim();
-  let written = 0;
+  /** @type {string[]} the TSV file names written, so `finish` can ask the merge about each one */
+  const written = [];
   for (const c of candidates) {
     if (!c.reportNum) continue;
     const slug = (cell(c.company) || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const note = `triage-only from loop wave ${c.wave} — full evaluation pending`;
+    // An aggregator-sourced qualifier carries its provenance (resolved from, or
+    // still aggregator-only) into the tracker's notes, same wording as the inbox.
+    const provenance = aggregatorNote(c);
+    const note = `triage-only from loop wave ${c.wave} — full evaluation pending${provenance ? `; ${provenance}` : ''}`;
     // Canonicalised on the way in: the tracker's URL column is what the user
     // clicks, and a provider's stored href is not always clickable.
     const url = toHumanUrl(cell(c.url));
@@ -643,10 +668,163 @@ function writeTrackerAdditions(candidates, date) {
       // than written empty, which would read as a confirmed-blank URL.
       ...(/^https?:\/\//i.test(url) ? [url] : []),
     ].join('\t');
-    writeFileSync(join(TSV_DIR, `${String(c.reportNum).padStart(3, '0')}-${slug}.tsv`), `${row}\n`, 'utf-8');
-    written++;
+    const file = `${String(c.reportNum).padStart(3, '0')}-${slug}.tsv`;
+    writeFileSync(join(TSV_DIR, file), `${row}\n`, 'utf-8');
+    written.push(file);
   }
   return written;
+}
+
+// ── aggregator leads: resolve before anything is written ────────────────────
+
+/**
+ * Point every aggregator-sourced qualifier at the employer's own posting, when
+ * the zero-network tiers can find it.
+ *
+ * An agent-ingested offer arrives with whatever URL the agent saw — often a
+ * `to.indeed.com`/`indeed.com`/`stepstone.de` listing. merge-tracker.mjs refuses
+ * to write such a URL for a company whose own board is already in portals.yml
+ * ("resolve it to the employer's posting first"), and `finish` used to write the
+ * TSV, run the merge, and report the row as merged without ever resolving it
+ * (pass run-20261001T142311, Siemens: no tracker row 202). The resolution
+ * `resolve-aggregator-leads.mjs` performs on the inbox now happens here first, by
+ * calling the same code: lib/resolve-employer-posting.mjs's tiers, zero-network
+ * by default (`probe` stays off — a live discover-ats probe is something the user
+ * opts into with that script's `--probe`, not something `finish` does).
+ *
+ * Mutates the candidates in place and returns the tally:
+ *   resolved   `url` becomes the employer's posting; `resolvedFrom` keeps the
+ *              aggregator URL as provenance (the inbox/tracker note reads it)
+ *   unresolved `aggregatorUnresolved` is set; the URL is left alone, and the
+ *              inbox line carries `note: aggregator-only, unresolved` so a later
+ *              `resolve-aggregator-leads.mjs --write` can finish the job
+ * A candidate whose `resolvedFrom` is already set was handled by an earlier
+ * `finish` and is not looked at again; an unresolved one is retried every time.
+ *
+ * @param {Array<object>} candidates qualified loop candidates
+ * @param {{resolveFn?: Function, portals?: any, aggregatorHosts?: string[]}} [opts]
+ * @returns {Promise<{resolved: number, unresolved: number, details: Array<{company:string, from:string, to?:string}>}>}
+ */
+export async function resolveAggregatorQualifiers(candidates, {
+  resolveFn, portals, aggregatorHosts = DEFAULT_AGGREGATOR_HOSTS,
+} = {}) {
+  const leads = candidates.filter((c) => c && !c.resolvedFrom && isAggregatorUrl(c.url, aggregatorHosts));
+  if (leads.length === 0) return { resolved: 0, unresolved: 0, details: [] };
+  const { results } = await resolveAggregatorLeads(
+    leads.map((c) => ({ company: c.company, title: c.title, location: c.location, url: c.url, raw: null, candidate: c })),
+    { ...(resolveFn ? { resolveFn } : {}), aggregatorHosts, probe: false, portals: portals ?? loadPortals() },
+  );
+  const details = [];
+  let resolved = 0;
+  for (const r of results) {
+    const c = r.entry.candidate;
+    if (r.resolved && r.employerUrl) {
+      details.push({ company: c.company, from: c.url, to: r.employerUrl });
+      c.resolvedFrom = c.url;
+      c.url = r.employerUrl;
+      delete c.aggregatorUnresolved;
+      resolved += 1;
+    } else {
+      details.push({ company: c.company, from: c.url });
+      c.aggregatorUnresolved = true;
+    }
+  }
+  return { resolved, unresolved: results.length - resolved, details };
+}
+
+/**
+ * Bring inbox lines for aggregator-sourced qualifiers in line with the
+ * resolution: a pending line still carrying the aggregator URL is rewritten to the
+ * employer's posting (aggregator URL kept in `note:`) when it resolved, or marked
+ * `aggregator-only, unresolved` when it did not — the exact rewrites
+ * `resolve-aggregator-leads.mjs --write` applies. Matched by `candidateKey`, so an
+ * inbox spelling that differs from the candidate's (`http`, `www.`, tracking
+ * params) is still found. Idempotent. Never throws, like the rest of the inbox
+ * work: the candidates are already promoted.
+ *
+ * @returns {Promise<{rewritten: number, error?: string}>}
+ */
+async function rewriteAggregatorInbox(state) {
+  const qualifiers = qualifiedCandidates(state).filter((c) => c.resolvedFrom || c.aggregatorUnresolved);
+  if (qualifiers.length === 0 || !existsSync(PIPELINE_PATH)) return { rewritten: 0 };
+  try {
+    return await withPipelineLock(PIPELINE_PATH, () => {
+      const md = readFileSync(PIPELINE_PATH, 'utf-8');
+      const transforms = new Map();
+      for (const entry of parsePipeline(md).pending) {
+        const entryKey = candidateKey(entry.url);
+        const c = qualifiers.find((q) => candidateKey(q.resolvedFrom || q.url || q.key) === entryKey);
+        if (!c) continue;
+        if (c.resolvedFrom) {
+          transforms.set(entry.url, (line) => rewriteResolvedLine(line, {
+            employerUrl: c.url, aggregatorUrl: entry.url, host: aggregatorHost(entry.url) || 'aggregator',
+          }));
+        } else {
+          transforms.set(entry.url, (line) => rewriteUnresolvedLine(line));
+        }
+      }
+      const { text, applied } = applyPipelineChanges(md, transforms);
+      if (applied > 0) writeFileSync(PIPELINE_PATH, text, 'utf-8');
+      return { rewritten: applied };
+    });
+  } catch (err) {
+    return { rewritten: 0, error: err.message };
+  }
+}
+
+// ── merge: say what the merge actually did ──────────────────────────────────
+
+/**
+ * Run merge-tracker.mjs and read back what it did to each TSV `finish` wrote.
+ *
+ * merge-tracker's exit code says only that it did not crash: it exits 0 after
+ * SKIPPING a TSV (an aggregator URL to resolve first, a malformed row, a
+ * batch-failed report). `finish` read that as "merged" and reported a tracker row
+ * for every TSV written. The merge now writes a per-TSV outcome file
+ * (CAREER_OPS_MERGE_RESULT) and refused TSVs stay in the additions dir; this reads
+ * it and answers per TSV `finish` wrote — added/updated count as tracker rows,
+ * anything else (skipped, failed, or not mentioned at all) is reported with its
+ * reason rather than assumed.
+ *
+ * @param {string[]} files TSV names `finish` wrote
+ * @returns {{merged: boolean, mergeStatus: 'complete'|'partial'|'failed', trackerRows: number,
+ *   trackerSkipped: Array<{tsv: string, reason: string}>, exitCode: number|null}}
+ */
+function runMergeTracker(files) {
+  const dir = mkdtempSync(join(tmpdir(), 'career-ops-merge-'));
+  const resultPath = join(dir, 'merge-result.json');
+  let outcome = null;
+  let merge;
+  try {
+    // Same split as `wave`: merge-tracker's report stays visible, but on stderr,
+    // so `finish` keeps emitting exactly one JSON object on stdout.
+    merge = spawnSync('node', ['merge-tracker.mjs'], {
+      cwd: ROOT, stdio: ['ignore', 2, 'inherit'], env: { ...process.env, CAREER_OPS_MERGE_RESULT: resultPath },
+    });
+    try { outcome = JSON.parse(readFileSync(resultPath, 'utf-8')); } catch { outcome = null; }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const exitedClean = !merge.error && merge.status === 0;
+  const byFile = new Map((outcome?.results ?? []).map((r) => [r.file, r]));
+  let trackerRows = 0;
+  const trackerSkipped = [];
+  for (const file of files) {
+    const r = byFile.get(file);
+    if (r && (r.outcome === 'added' || r.outcome === 'updated')) { trackerRows += 1; continue; }
+    trackerSkipped.push({
+      tsv: file,
+      reason: r?.reason || (r ? `merge-tracker ${r.outcome} it` : (exitedClean
+        ? 'merge-tracker reported no outcome for this TSV'
+        : `merge-tracker did not complete (${merge.error ? merge.error.message : `exit ${merge.status}`})`)),
+    });
+  }
+  const merged = exitedClean && trackerSkipped.length === 0;
+  return {
+    merged,
+    mergeStatus: merged ? 'complete' : (trackerRows > 0 ? 'partial' : 'failed'),
+    trackerRows, trackerSkipped, exitCode: merge.status ?? null,
+  };
 }
 
 /**
@@ -664,7 +842,12 @@ async function reconcileInbox(state) {
   // Queue first — it may create the inbox — but say the inbox was absent when
   // `finish` started: with none, there were no verdict rows to apply either.
   const hadInbox = existsSync(PIPELINE_PATH);
-  const queued = await queueQualifiers(state);
+  // Bring any aggregator line already in the inbox in line with the resolution
+  // before queuing, so a resolved candidate is recognised as already queued
+  // instead of being added a second time under its employer URL.
+  const aggregator = await rewriteAggregatorInbox(state);
+  const queued = { ...(await queueQualifiers(state)), ...(aggregator.rewritten ? { aggregatorRewritten: aggregator.rewritten } : {}),
+    ...(aggregator.error ? { aggregatorError: aggregator.error } : {}) };
   if (!hadInbox) return { skipped: 'no inbox file', discarded: 0, unreachable: 0, logged: 0, ...queued };
   try {
     return await withPipelineLock(PIPELINE_PATH, () => {
@@ -707,7 +890,17 @@ async function queueQualifiers(state) {
   }
 }
 
-async function cmdFinish(flags) {
+/** One line of a skipped TSV for the run log: file name plus a bounded reason. */
+function describeSkips(skipped) {
+  return skipped.map((s) => `${s.tsv} (${String(s.reason).replace(/\s+/g, ' ').slice(0, 140)})`).join('; ');
+}
+
+/**
+ * @param {object} flags
+ * @param {{resolveFn?: Function, portals?: any}} [deps] injection point for tests:
+ *   a fake resolver keeps the aggregator step off the network.
+ */
+export async function cmdFinish(flags, deps = {}) {
   const state = requireState();
   const decision = decideNextAction(state);
   if (decision.action === 'score' && !flags.force) {
@@ -716,6 +909,9 @@ async function cmdFinish(flags) {
   }
 
   const rows = qualifiedCandidates(state);
+  // Resolve aggregator URLs BEFORE any TSV is written or qualifier queued, so the
+  // tracker row and the inbox line both carry the employer's posting.
+  const aggregators = await resolveAggregatorQualifiers(rows, { resolveFn: deps.resolveFn, portals: deps.portals });
   const unnumbered = rows.filter((c) => !c.reportNum);
   // Destructure: reserveNumbers returns {numbers, ranges}, and indexing the
   // object itself handed every candidate `undefined ?? null`, so
@@ -725,14 +921,21 @@ async function cmdFinish(flags) {
   unnumbered.forEach((c, i) => { c.reportNum = numbers[i] ?? null; });
 
   const date = new Date().toISOString().slice(0, 10);
-  const tsvCount = writeTrackerAdditions(rows, date);
+  const tsvFiles = writeTrackerAdditions(rows, date);
+  const tsvCount = tsvFiles.length;
 
   // merge-tracker is the only sanctioned writer of data/applications.md, and
-  // data/applications.md is what the dashboard reads.
-  // Same split as `wave`: merge-tracker's report stays visible, but on stderr,
-  // so `finish` keeps emitting exactly one JSON object on stdout.
-  const merge = spawnSync('node', ['merge-tracker.mjs'], { cwd: ROOT, stdio: ['ignore', 2, 'inherit'] });
-  const merged = !merge.error && merge.status === 0;
+  // data/applications.md is what the dashboard reads. Its exit code is not an
+  // answer to "did every row land": it exits 0 after skipping a TSV, so `finish`
+  // reads the per-TSV outcome instead and reports only the rows that exist.
+  const { merged, mergeStatus, trackerRows, trackerSkipped } = runMergeTracker(tsvFiles);
+  if (trackerSkipped.length > 0) {
+    console.error(`  finish: ${trackerSkipped.length} of ${tsvCount} tracker TSV(s) were NOT merged and stay in ${TSV_DIR} `
+      + `for a later \`node merge-tracker.mjs\`: ${describeSkips(trackerSkipped)}`);
+  }
+  // Candidates that now point at the employer's posting need the same URL in the
+  // scan-history, or run-retro cannot attribute their reports and kits to a source.
+  await recordSourcesInScanHistory(rows.filter((c) => c.resolvedFrom));
   // The tracker rows hold the numbers from here on, so the sentinels have done
   // their job. reserveNumbers' own docblock says the release happens after the
   // merge; it never did, and every finished run left its reservations sitting
@@ -743,14 +946,21 @@ async function cmdFinish(flags) {
   const inbox = await reconcileInbox(state);
   state.phase = 'done';
   saveState(state);
-  log(state, 'finish', `promoted=${rows.length} tsv=${tsvCount} merged=${merged} `
+  log(state, 'finish', `promoted=${rows.length} tsv=${tsvCount} trackerRows=${trackerRows} merged=${merged} mergeStatus=${mergeStatus} `
+    + `${aggregators.details.length ? `aggregators=resolved:${aggregators.resolved},unresolved:${aggregators.unresolved} ` : ''}`
     + `inbox=discarded:${inbox.discarded},unreachable:${inbox.unreachable},queued:${inbox.queued}`
-    + `${inbox.error ? ` (inbox error: ${inbox.error})` : ''}${inbox.queueError ? ` (queue error: ${inbox.queueError})` : ''}`);
+    + `${inbox.error ? ` (inbox error: ${inbox.error})` : ''}${inbox.queueError ? ` (queue error: ${inbox.queueError})` : ''}`
+    + `${trackerSkipped.length ? ` trackerSkipped=${trackerSkipped.length}: ${describeSkips(trackerSkipped)}` : ''}`);
 
   return {
     promoted: rows.length,
-    trackerRows: tsvCount,
+    // Rows that actually landed in data/applications.md (added or updated) — not
+    // the number of TSVs written. A skipped TSV is listed in trackerSkipped.
+    trackerRows,
+    trackerSkipped,
     merged,
+    mergeStatus,
+    ...(aggregators.details.length ? { aggregators } : {}),
     inbox,
     shortlist: 'data/loop-shortlist.md',
     haltedReason: state.halted_reason,

@@ -82,7 +82,8 @@ const USAGE = `Usage:
   --in <path>     resolve leads from this JSON file instead of data/pipeline.md
                    ([{"company","title","url","location"}]) — reporting only
   --aggregators   comma-separated aggregator hosts to resolve (default:
-                   ${''}stepstone.de,indeed.com)`;
+                   ${''}stepstone.de,indeed.com). A listed host also matches its
+                   subdomains — indeed.com covers to.indeed.com and de.indeed.com.`;
 
 /** Every host this script treats as "a lead, not a destination" by default. */
 export const DEFAULT_AGGREGATOR_HOSTS = ['stepstone.de', 'indeed.com'];
@@ -109,6 +110,9 @@ export function isAggregatorUrl(url, aggregatorHosts = DEFAULT_AGGREGATOR_HOSTS)
 }
 
 // ── pipeline line rewriting (pure — no fs) ──────────────────────────────────
+
+/** The `note:` clause marking a lead no zero-network tier could resolve. */
+const UNRESOLVED_NOTE = 'aggregator-only, unresolved';
 
 /** @param {string} line @returns {{prefix: string, cells: string[]}|null} */
 function splitPipelineLine(line) {
@@ -148,8 +152,30 @@ export function rewriteResolvedLine(line, { employerUrl, aggregatorUrl, host }) 
   if (!parsed) return line;
   const cells = [...parsed.cells];
   cells[0] = employerUrl;
-  const noted = upsertNote(cells, `resolved from ${host} lead: ${aggregatorUrl}`);
+  // A line an earlier pass marked `aggregator-only, unresolved` is resolved now:
+  // leaving the marker would tell the next reader the opposite of the URL cell.
+  const noted = dropNoteText(upsertNote(cells, `resolved from ${host} lead: ${aggregatorUrl}`), UNRESOLVED_NOTE);
   return `${parsed.prefix}${noted.join(' | ')}`;
+}
+
+/**
+ * Remove one `;`-separated clause from the line's `note:` segment. The segment
+ * disappears altogether if that was all it held. A line without the clause is
+ * returned unchanged.
+ * @param {string[]} cells
+ * @param {string} text
+ * @returns {string[]}
+ */
+function dropNoteText(cells, text) {
+  const idx = cells.findIndex((c) => /^note:/i.test(c));
+  if (idx === -1) return cells;
+  const clauses = cells[idx].replace(/^note:\s*/i, '').split(';').map((s) => s.trim());
+  if (!clauses.includes(text)) return cells;
+  const kept = clauses.filter((s) => s && s !== text);
+  const out = [...cells];
+  if (kept.length) out[idx] = `note: ${kept.join('; ')}`;
+  else out.splice(idx, 1);
+  return out;
 }
 
 /**
@@ -162,7 +188,7 @@ export function rewriteResolvedLine(line, { employerUrl, aggregatorUrl, host }) 
 export function rewriteUnresolvedLine(line) {
   const parsed = splitPipelineLine(line);
   if (!parsed) return line;
-  const noted = upsertNote(parsed.cells, 'aggregator-only, unresolved');
+  const noted = upsertNote(parsed.cells, UNRESOLVED_NOTE);
   return `${parsed.prefix}${noted.join(' | ')}`;
 }
 

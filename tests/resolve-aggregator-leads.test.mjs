@@ -35,6 +35,39 @@ test('isAggregatorUrl honours a custom host list', () => {
   assert.equal(isAggregatorUrl('https://www.stepstone.de/x', ['otherboard.example']), false);
 });
 
+// Pass run-20261001T142311: the agent passed `--aggregators to.indeed.com,indeed.com,stepstone.de`
+// by hand. The DEFAULT list (`stepstone.de,indeed.com`) already covers every subdomain of a
+// listed host, `to.indeed.com` (Indeed's link shortener) included — these pin that, so a
+// future change to the matcher cannot quietly reopen the gap.
+test('the DEFAULT aggregator list matches subdomains of a listed host, to.indeed.com included', () => {
+  assert.deepEqual(mod.DEFAULT_AGGREGATOR_HOSTS, ['stepstone.de', 'indeed.com']);
+  for (const url of [
+    'https://to.indeed.com/aamflg7vhdvk', 'https://de.indeed.com/viewjob?jk=abc', 'https://uk.indeed.com/viewjob?jk=abc',
+    'https://indeed.com/viewjob?jk=abc', 'https://www.stepstone.de/stellenangebote--x--1.html', 'https://TO.INDEED.COM/Abc',
+  ]) {
+    assert.equal(isAggregatorUrl(url), true, `${url} must match the default list`);
+  }
+  for (const url of [
+    'https://notindeed.com/x', 'https://indeed.com.evil.example/x', 'https://to.indeed.example/x', 'https://jobs.siemens.com/en_US/externaljobs/JobDetail/524303',
+  ]) {
+    assert.equal(isAggregatorUrl(url), false, `${url} must NOT match the default list`);
+  }
+});
+
+test('resolveAggregatorLeads with the default list picks up a to.indeed.com lead', async () => {
+  const seen = [];
+  const { results, resolvedCount, total } = await resolveAggregatorLeads(
+    [
+      { company: 'Siemens', title: 'Working Student', url: 'https://to.indeed.com/aamflg7vhdvk' },
+      { company: 'Siemens', title: 'Other', url: 'https://jobs.siemens.com/en_US/externaljobs/JobDetail/1' },
+    ],
+    { resolveFn: async (target) => { seen.push(target.urls[0]); return { url: 'https://jobs.siemens.com/en_US/externaljobs/JobDetail/524303', title: 'Working Student', score: 1 }; } },
+  );
+  assert.deepEqual([total, resolvedCount], [1, 1], 'only the aggregator lead is a candidate for resolution');
+  assert.deepEqual(seen, ['https://to.indeed.com/aamflg7vhdvk']);
+  assert.equal(results[0].host, 'to.indeed.com');
+});
+
 // ── line rewriting (pure) ───────────────────────────────────────────────────
 
 test('rewriteResolvedLine replaces the URL cell and keeps the aggregator URL as provenance in note:', () => {
@@ -62,6 +95,19 @@ test('rewriteUnresolvedLine marks the line, is idempotent, and never touches the
   assert.match(once, /note: aggregator-only, unresolved/);
   const twice = rewriteUnresolvedLine(once);
   assert.equal(twice, once, 're-marking an already-marked line must be a no-op, not a growing note');
+});
+
+test('resolving a line an earlier pass marked unresolved clears that marker (and keeps other notes)', () => {
+  const marked = '- [ ] https://to.indeed.com/aamflg7vhdvk | Siemens | Working Student | Erlangen | note: aggregator-only, unresolved';
+  const out = rewriteResolvedLine(marked, {
+    employerUrl: 'https://jobs.siemens.com/en_US/externaljobs/JobDetail/524303', aggregatorUrl: 'https://to.indeed.com/aamflg7vhdvk', host: 'to.indeed.com',
+  });
+  assert.doesNotMatch(out, /aggregator-only/);
+  assert.match(out, /note: resolved from to\.indeed\.com lead: https:\/\/to\.indeed\.com\/aamflg7vhdvk$/);
+  const withOther = rewriteResolvedLine('- [ ] https://de.indeed.com/x | Acme | Role | note: curated; aggregator-only, unresolved', {
+    employerUrl: 'https://jobs.ashbyhq.com/acme/1', aggregatorUrl: 'https://de.indeed.com/x', host: 'de.indeed.com',
+  });
+  assert.match(withOther, /note: curated; resolved from de\.indeed\.com lead: https:\/\/de\.indeed\.com\/x$/);
 });
 
 test('a line that does not parse is returned unchanged', () => {

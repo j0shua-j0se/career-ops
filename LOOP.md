@@ -188,6 +188,24 @@ code path as `triage-prefilter.mjs --mark-file`: loop-rejected rows in
 `data/discard.log`), unreachable ones become `- [!]`, and qualified rows stay
 `- [ ]` for evaluation. It is idempotent — a second `finish` marks nothing.
 
+Before it writes anything, `finish` resolves aggregator URLs (`to.indeed.com`,
+`indeed.com`, `stepstone.de`) on the qualified set to the employer's own posting,
+using the same zero-network tiers as `resolve-aggregator-leads.mjs` (no live
+probe). A resolved qualifier gets the employer URL in its tracker TSV and its
+inbox line, with the aggregator URL kept as provenance in the note; an unresolved
+one is still queued, marked `note: aggregator-only, unresolved`. `finish` then
+reads what `merge-tracker.mjs` actually did per TSV: `trackerRows` counts only rows
+added or updated in `data/applications.md`, `trackerSkipped` lists each TSV the
+merge refused with its reason, and a refused TSV stays in
+`batch/tracker-additions/` (not `merged/`) so a later merge picks it up. `merged`
+is `true` only when every TSV landed; `mergeStatus` is `complete`, `partial` or
+`failed`.
+
+`ingest` offers may carry a `source` (`indeed`, `apify-linkedin`, ...). It is kept
+on the loop candidate and recorded in `data/scan-history.tsv`'s `portal` column
+(for a URL it has no row for), which is how `run-retro.mjs` attributes
+agent-sourced leads instead of listing them as "(unattributed)".
+
 ## What this loop does not do
 
 - It does not decide a job is a good fit. A triage score is a ≤ 25-word
