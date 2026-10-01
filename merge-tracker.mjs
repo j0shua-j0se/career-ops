@@ -17,7 +17,7 @@
  * Run: node merge-tracker.mjs [--dry-run] [--verify]
  */
 
-import { readFileSync, readdirSync, mkdirSync, renameSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, renameSync, existsSync } from 'fs';
 import { join, basename, dirname, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
@@ -130,6 +130,30 @@ const MIGRATE_VIA = process.argv.includes('--migrate-via');
 const BACKFILL_URLS = process.argv.includes('--backfill-urls');
 const MERGE_HOLD_MS = Number(process.env.CAREER_OPS_MERGE_HOLD_MS) || 0;
 const MERGE_READY_IPC = process.env.CAREER_OPS_MERGE_READY_IPC === '1';
+
+// Machine-readable outcome per TSV, for a caller that must not guess from the
+// human report. `CAREER_OPS_MERGE_RESULT` names a JSON file this run writes just
+// before it exits: `{ok, added, updated, skipped, results: [{file, outcome,
+// reason?, num?, kept?}]}` where outcome is added | updated | skipped | failed.
+// scan-loop.mjs `finish` reads it so a TSV that was skipped (an aggregator URL it
+// must resolve first, a malformed row, a batch-failed report) is reported as
+// skipped instead of being counted as a tracker row it never became. `kept` marks
+// a TSV left in the additions dir for a later re-merge rather than archived. Unset
+// = nothing written; the human output is unchanged either way.
+const MERGE_RESULT_PATH = process.env.CAREER_OPS_MERGE_RESULT || '';
+const mergeResults = [];
+function writeMergeResult(ok = true) {
+  if (!MERGE_RESULT_PATH) return;
+  try {
+    const count = (outcome) => mergeResults.filter((r) => r.outcome === outcome).length;
+    writeFileSync(MERGE_RESULT_PATH, JSON.stringify({
+      ok, added: count('added'), updated: count('updated'),
+      skipped: count('skipped'), failed: count('failed'), results: mergeResults,
+    }, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn(`⚠️  Could not write the merge result file ${MERGE_RESULT_PATH}: ${err.message}`);
+  }
+}
 
 const TRACKER_LOCK_DIR = trackerLockDirFor(APPS_FILE);
 
@@ -1334,6 +1358,7 @@ if (!existsSync(ADDITIONS_DIR)) {
   if (moved > 0) console.log(`🔢 Sorted tracker by # ascending (${moved} row(s) repositioned).`);
   if ((pdfSynced > 0 || moved > 0) && !DRY_RUN) writeFileAtomic(APPS_FILE, appLines.join('\n'));
   if (DRY_RUN) console.log('(dry-run — no changes written)');
+  writeMergeResult();
   trackerLock.release();
   process.exit(0);
 }
@@ -1348,6 +1373,7 @@ if (tsvFiles.length === 0) {
   if (moved > 0) console.log(`🔢 Sorted tracker by # ascending (${moved} row(s) repositioned).`);
   if ((pdfSynced > 0 || moved > 0) && !DRY_RUN) writeFileAtomic(APPS_FILE, appLines.join('\n'));
   if (DRY_RUN) console.log('(dry-run — no changes written)');
+  writeMergeResult();
   trackerLock.release();
   process.exit(0);
 }
@@ -1368,6 +1394,20 @@ const newLines = [];
 // of merged/ so a re-run picks them up, and they make the process exit non-zero
 // instead of reporting a success that did not happen.
 const failedAdditions = [];
+// TSVs refused outright (rejected by the parser, an aggregator URL the employer's
+// own posting should replace, a batch-failed report). Like failedAdditions they
+// stay in the additions dir — archiving a TSV whose row never reached the tracker
+// is what hides the loss — but they are a skip, not a failed run: exit code 0.
+const keptSkipped = new Set();
+
+/** The text after "Skipping <file>: " in a parser warning, minus the leading emoji. */
+function skipReason(warning, file) {
+  if (!warning) return '';
+  const text = String(warning).replace(/^\s*⚠️\s*/u, '');
+  const marker = `${file}: `;
+  const at = text.indexOf(marker);
+  return (at >= 0 ? text.slice(at + marker.length) : text).trim();
+}
 
 /**
  * Replace one tracker row line wherever it currently lives.
@@ -1399,8 +1439,23 @@ for (const file of tsvFiles) {
   // NOT trimmed here: a trailing tab is the row's final empty cell, and
   // parseTsvContent needs to see it. It trims internally for the legacy path.
   const content = readFileSync(join(ADDITIONS_DIR, file), 'utf-8');
-  const addition = parseTsvContent(content, file);
-  if (!addition) { skipped++; continue; }
+  // The parser explains a rejection through console.warn; keep the first line as
+  // the machine-readable reason (the warning itself still reaches the human).
+  const parseWarnings = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => { parseWarnings.push(args.join(' ')); realWarn(...args); };
+  let addition;
+  try { addition = parseTsvContent(content, file); } finally { console.warn = realWarn; }
+  if (!addition) {
+    skipped++;
+    keptSkipped.add(file);
+    mergeResults.push({
+      file, outcome: 'skipped', kept: true,
+      reason: skipReason(parseWarnings.find((w) => /Skipping/.test(w)) ?? parseWarnings[0], file)
+        || 'could not be parsed as a tracker addition',
+    });
+    continue;
+  }
 
   // A via= tag can only be stored if the tracker has a Via column — warn
   // instead of dropping the channel silently (#1596). Clear the value too:
@@ -1443,8 +1498,11 @@ for (const file of tsvFiles) {
   if (addition.url && isAggregatorUrl(addition.url) && findPortalsEntry(addition.company, PORTALS_CONFIG)) {
     let aggregatorHost = addition.url;
     try { aggregatorHost = new URL(addition.url).hostname; } catch { /* keep the raw URL in the message */ }
-    console.warn(`⚠️  Skipping ${file}: URL is a ${aggregatorHost} aggregator listing for "${addition.company}", whose own board is already tracked in portals.yml — run \`node resolve-aggregator-leads.mjs --write\` to resolve it to the employer's posting first, then re-merge.`);
+    const aggregatorMessage = `URL is a ${aggregatorHost} aggregator listing for "${addition.company}", whose own board is already tracked in portals.yml — run \`node resolve-aggregator-leads.mjs --write\` to resolve it to the employer's posting first, then re-merge.`;
+    console.warn(`⚠️  Skipping ${file}: ${aggregatorMessage}`);
     skipped++;
+    keptSkipped.add(file);
+    mergeResults.push({ file, outcome: 'skipped', kept: true, reason: aggregatorMessage });
     continue;
   }
 
@@ -1455,8 +1513,11 @@ for (const file of tsvFiles) {
   const reportNum = extractReportNum(addition.report, addition.notes);
 
   if (reportNum && FAILED_REPORT_NUMBERS.has(reportNum)) {
-    console.warn(`⚠️  Skipping ${file}: report #${reportNum} is marked "failed" in batch-state.tsv — refusing to merge a tracker line for an offer the batch runner itself recorded as failed (possible fabricated result)`);
+    const failedBatchMessage = `report #${reportNum} is marked "failed" in batch-state.tsv — refusing to merge a tracker line for an offer the batch runner itself recorded as failed (possible fabricated result)`;
+    console.warn(`⚠️  Skipping ${file}: ${failedBatchMessage}`);
     skipped++;
+    keptSkipped.add(file);
+    mergeResults.push({ file, outcome: 'skipped', kept: true, reason: failedBatchMessage });
     continue;
   }
 
@@ -1672,6 +1733,12 @@ for (const file of tsvFiles) {
         + `keeping ${duplicate.score}`,
       );
       skipped++;
+      // Not kept: the tracker already holds this evaluation, so archiving the
+      // no-score re-eval loses nothing.
+      mergeResults.push({
+        file, outcome: 'skipped', kept: false, num: duplicate.num,
+        reason: `re-eval of #${duplicate.num} produced no score (${String(addition.score).trim()}); kept ${duplicate.score}`,
+      });
       continue;
     }
     const newScore = parseScore(addition.score);
@@ -1764,6 +1831,7 @@ for (const file of tsvFiles) {
       if (refreshed) Object.assign(duplicate, refreshed);
       else duplicate.raw = updatedLine;
       updated++;
+      mergeResults.push({ file, outcome: 'updated', num: duplicate.num });
     } else {
       // Unreachable once `raw` is refreshed above, but never silent again: a
       // row we cannot locate means the addition was NOT applied, so say so,
@@ -1773,6 +1841,10 @@ for (const file of tsvFiles) {
         `(${duplicate.company} — ${duplicate.role}) to update; this evaluation was NOT merged.`,
       );
       failedAdditions.push(file);
+      mergeResults.push({
+        file, outcome: 'failed', kept: true,
+        reason: `could not locate tracker row #${duplicate.num} (${duplicate.company} — ${duplicate.role}) to update`,
+      });
     }
   } else {
     // New entry - preserve the TSV's reserved ID whenever it is actually
@@ -1826,6 +1898,7 @@ for (const file of tsvFiles) {
       existingApps.push(parsedNew);
     }
     added++;
+    mergeResults.push({ file, outcome: 'added', num: entryNum });
     console.log(`➕ Add #${entryNum}: ${addition.company} — ${addition.role} (${addition.score})`);
   }
 }
@@ -1862,6 +1935,13 @@ if (newLines.length > 0) {
     console.error(`     ${header}`);
     console.error(`     ${separator}`);
     for (const line of newLines) console.error(`   not merged: ${line}`);
+    for (const r of mergeResults) {
+      if (r.outcome !== 'added') continue;
+      r.outcome = 'failed';
+      r.kept = true;
+      r.reason = 'the tracker has no table separator row to insert after';
+    }
+    writeMergeResult(false);
     trackerLock.release();
     process.exit(1);
   }
@@ -1879,15 +1959,19 @@ if (!DRY_RUN) {
   // into permanent data loss, since applications.md is gitignored and no backup
   // is written.
   if (!existsSync(MERGED_DIR)) mkdirSync(MERGED_DIR, { recursive: true });
-  const archivable = tsvFiles.filter(f => !failedAdditions.includes(f));
+  const archivable = tsvFiles.filter(f => !failedAdditions.includes(f) && !keptSkipped.has(f));
   for (const file of archivable) {
     renameSync(join(ADDITIONS_DIR, file), join(MERGED_DIR, file));
   }
   console.log(`\n✅ Moved ${archivable.length} TSVs to merged/`);
+  if (keptSkipped.size > 0) {
+    console.log(`⏸️  Left ${keptSkipped.size} skipped TSV(s) in ${ADDITIONS_DIR} for a later re-merge: ${[...keptSkipped].join(', ')}`);
+  }
 }
 
 console.log(`\n📊 Summary: +${added} added, 🔄${updated} updated, ⏭️${skipped} skipped${failedAdditions.length ? `, ❌${failedAdditions.length} NOT merged` : ''}`);
 if (DRY_RUN) console.log('(dry-run — no changes written)');
+writeMergeResult(failedAdditions.length === 0);
 trackerLock.release();
 
 // Sync PDF flags (idempotent; uses its own lock/transaction)
