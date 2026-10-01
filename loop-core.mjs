@@ -348,8 +348,15 @@ export function normalizeState(state, config = DEFAULT_LOOP_CONFIG) {
  * never re-scored. Returns the split so the wave record can show whether the
  * rung actually widened the search or just re-found what wave 1 had.
  *
+ * `offer.source` (e.g. `indeed`, `apify-linkedin`) is where an agent-sourced offer
+ * came from. It is kept on the candidate — and only when present, so an offer
+ * without one stays exactly what it was — because a scanner wave's postings are
+ * attributable through data/scan-history.tsv (its `portal` column) and an
+ * ingested one was not, which is how every agent-ingested lead reached
+ * run-retro.mjs as "(unattributed)".
+ *
  * @param {object} state
- * @param {Array<{url:string, company?:string, title?:string, location?:string, postedAt?:string}>} offers
+ * @param {Array<{url:string, company?:string, title?:string, location?:string, postedAt?:string, source?:string}>} offers
  * @param {number} wave
  * @returns {{added: number, duplicate: number, invalid: number}}
  */
@@ -359,6 +366,7 @@ export function ingestOffers(state, offers, wave) {
     const key = candidateKey(offer?.url);
     if (!key) { invalid++; continue; }
     if (state.candidates[key]) { duplicate++; continue; }
+    const source = cleanSource(offer.source);
     state.candidates[key] = {
       key,
       url: String(offer.url).trim(),
@@ -366,6 +374,7 @@ export function ingestOffers(state, offers, wave) {
       title: String(offer.title ?? '').trim(),
       location: String(offer.location ?? '').trim(),
       postedAt: offer.postedAt ? String(offer.postedAt).trim() : null,
+      ...(source ? { source } : {}),
       wave,
       score: null,
       verdict: 'pending',
@@ -375,6 +384,15 @@ export function ingestOffers(state, offers, wave) {
     added++;
   }
   return { added, duplicate, invalid };
+}
+
+/**
+ * A source label as scan-history.tsv's `portal` column can hold it: one line, no
+ * tab, bounded. Anything that is not a non-empty string is "no source".
+ */
+export function cleanSource(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/[\s\x00-\x1f\x7f]+/g, ' ').trim().slice(0, 64);
 }
 
 // ── Triage parsing ──────────────────────────────────────────────────────────

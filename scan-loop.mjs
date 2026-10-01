@@ -47,7 +47,8 @@ import {
 } from './loop-core.mjs';
 import { parsePipeline, rankEntry, writeVerdictRowsToInbox } from './triage-prefilter.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
-import { appendToPipeline } from './scan.mjs';
+import { appendToPipeline, appendToScanHistory, SCAN_HISTORY_PATH } from './scan.mjs';
+import { normalizeUrl } from './url-key.mjs';
 import { assessLatestRun, degradedWarning } from './scan-run-health.mjs';
 import { loadCheckpoint, checkpointCompatible, parseArgs as parseScanAtsFullArgs, SOURCES as ATS_SOURCES } from './scan-ats-full.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
@@ -393,9 +394,57 @@ ${degradedWarning(health)}
     degraded, ...(degraded ? { degradedReasons: health.reasons } : {}), next: decideNextAction(state) };
 }
 
-function cmdIngest(flags) {
+/**
+ * Give agent-ingested offers the attribution a scanner wave's postings get for
+ * free. A wave's rows land in data/scan-history.tsv with the provider's
+ * `<id>-api` label in the `portal` column, and run-retro.mjs joins everything
+ * downstream (discards, reports, kits, tracker status) back to that column by
+ * URL. `ingest` wrote only loop state, so every agent-sourced lead — Indeed,
+ * Apify LinkedIn/Xing/StepStone/HiringCafe — surfaced as "(unattributed)".
+ *
+ * Only offers that carry a `source` are written (an offer without one stays
+ * unattributed, as before), and only for a URL scan-history has no row for yet:
+ * run-retro keeps the FIRST row per URL, and a second would double-count the
+ * sighting in that source's found/new totals. Never throws — the loop state
+ * already holds the offers, and a failed history append must not undo an ingest.
+ *
+ * @param {Array<{url:string, company?:string, title?:string, location?:string, postedAt?:string|null, source?:string}>} candidates
+ * @returns {Promise<number>} rows appended
+ */
+async function recordSourcesInScanHistory(candidates) {
+  try {
+    const withSource = candidates.filter((c) => c?.source && c.url);
+    if (withSource.length === 0) return 0;
+    const known = new Set();
+    if (existsSync(SCAN_HISTORY_PATH)) {
+      for (const line of readFileSync(SCAN_HISTORY_PATH, 'utf-8').split(/\r?\n/)) {
+        const key = normalizeUrl(line.split('\t')[0] ?? '');
+        if (key) known.add(key);
+      }
+    }
+    const rows = [];
+    for (const c of withSource) {
+      const key = normalizeUrl(c.url);
+      if (!key || known.has(key)) continue;
+      known.add(key);
+      const posted = Date.parse(c.postedAt ?? '');
+      rows.push({
+        url: c.url, title: c.title, company: c.company, location: c.location, source: c.source,
+        postedAt: Number.isFinite(posted) ? posted : undefined,
+      });
+    }
+    if (rows.length === 0) return 0;
+    await appendToScanHistory(rows, new Date().toISOString().slice(0, 10), 'added');
+    return rows.length;
+  } catch (err) {
+    console.error(`  scan-history: could not record the source of the ingested offers — ${err.message}`);
+    return 0;
+  }
+}
+
+export async function cmdIngest(flags) {
   const state = requireState();
-  if (!flags.file) throw new Error('ingest needs `--file <offers.json>` (a JSON array of {url, company, title, location}).');
+  if (!flags.file) throw new Error('ingest needs `--file <offers.json>` (a JSON array of {url, company, title, location, source?}).');
   const offers = JSON.parse(readFileSync(flags.file, 'utf-8'));
   if (!Array.isArray(offers)) throw new Error(`${flags.file} must contain a JSON array of offers.`);
 
@@ -404,7 +453,10 @@ function cmdIngest(flags) {
   // config, the strategy actually due at this wave index shifts, and this
   // must label the ingested wave the same way decideNextAction would have.
   const strategy = effectiveStrategies(state.config)[state.waves.length];
+  const knownBefore = new Set(Object.keys(state.candidates));
   const counts = ingestOffers(state, offers, wave);
+  const attributed = await recordSourcesInScanHistory(
+    Object.values(state.candidates).filter((c) => !knownBefore.has(c.key)));
   const prefiltered = prefilterReject(state);
   if (prefiltered) console.error(`  pre-triage: ${prefiltered} posting(s) rejected on title + location alone (zero tokens).`);
   state.waves.push({
@@ -418,8 +470,8 @@ function cmdIngest(flags) {
     duplicate: counts.duplicate,
   });
   saveState(state);
-  log(state, 'ingest', `wave=${wave} found=${offers.length} new=${counts.added}`);
-  return { wave, ...counts, next: decideNextAction(state) };
+  log(state, 'ingest', `wave=${wave} found=${offers.length} new=${counts.added}${attributed ? ` sourced=${attributed}` : ''}`);
+  return { wave, ...counts, ...(attributed ? { sourced: attributed } : {}), next: decideNextAction(state) };
 }
 
 /**

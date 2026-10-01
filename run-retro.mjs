@@ -550,7 +550,15 @@ export function buildPassRetro(inputs) {
       loopStateCoversThisPass = true;
       minScore = loopState.config?.minScore ?? null;
       for (const cand of Object.values(loopState.candidates || {})) {
-        const source = attributeSource(cand.url, scanHistoryIndex);
+        // scan-history first (what a scanner wave's rows are attributed by), then
+        // the `source` an agent-ingested offer carried through `scan-loop.mjs
+        // ingest` — a lead with neither stays unattributed. The candidate's own
+        // `url` can be the employer's posting after `finish` resolved an
+        // aggregator lead, so the aggregator URL it arrived as (`resolvedFrom`) is
+        // tried too.
+        const source = attributeSource(cand.url, scanHistoryIndex)
+          || attributeSource(cand.resolvedFrom, scanHistoryIndex)
+          || cand.source || null;
         if (cand.prefiltered) bump(source, 'freeRejected');
         else bump(source, 'llmTriaged');
         if (minScore != null && typeof cand.score === 'number' && cand.score >= minScore) bump(source, 'qualified');
