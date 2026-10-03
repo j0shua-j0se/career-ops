@@ -78,7 +78,7 @@ ok('isQualifyingSighting: Munich commuter ring passes', isQualifyingSighting({ l
 ok('isQualifyingSighting: a bare "Munich" location passes', isQualifyingSighting({ location: 'Munich' }));
 ok('isQualifyingSighting: blank location from an ordinary portal does NOT qualify', !isQualifyingSighting({ location: '', portal: 'greenhouse-api' }));
 ok('isQualifyingSighting: blank location with no portal at all does NOT qualify', !isQualifyingSighting({ location: '' }));
-ok('isQualifyingSighting: elsewhere-in-Germany with no DE-only portal does NOT qualify', !isQualifyingSighting({ location: 'Berlin', portal: 'arbeitnow-api' }));
+ok('isQualifyingSighting: elsewhere-in-Germany qualifies with no DE-only portal (any German location is in scope since 2026-10-03)', isQualifyingSighting({ location: 'Berlin', portal: 'arbeitnow-api' }));
 ok('isQualifyingSighting: "Remote, US" is abroad, rejected', !isQualifyingSighting({ location: 'Remote, US' }));
 ok('isQualifyingSighting: abroad rejected outright', !isQualifyingSighting({ location: 'New York, USA' }));
 ok('isQualifyingSighting: blank location from arbeitsagentur-api (DE-only) qualifies', isQualifyingSighting({ location: '', portal: 'arbeitsagentur-api' }));

@@ -650,9 +650,9 @@ export function classifyReach(location, title = '', url = '') {
   // up). Same rule, cheaper signal: a code present, no foreign marker, and NOT
   // inside NEAR_HOME_PLZ_RANGES is elsewhere in Germany.
   //
-  // 'germany' and 'abroad' are both hard Stage-1 rejections in rankEntry
-  // (`if (reach === 'abroad') return drop(...)`; `if (reach === 'germany')
-  // return drop(...)`, both before Stage 2 fit checks run) — so misreading a
+  // 'abroad' is a hard Stage-1 rejection in rankEntry; 'germany' was one too
+  // until 2026-10-03 and is now in scope (location is not scored inside
+  // Germany) — so misreading a
   // foreign ZIP as a German one still only rejects the posting, never lets a
   // distant one through. The only real risk is the opposite direction: a
   // commutable town whose code merely starts with the right digits getting
@@ -685,7 +685,13 @@ export function classifyReach(location, title = '', url = '') {
 // Scopes that make a remote posting reachable from Erlangen. Anchored the same
 // way as the other reach regexes: "eu" must not match inside a word, and the
 // two-letter "de" only counts in capitals ("Ciudad de México" is not Germany).
-const REMOTE_REACHABLE_SCOPE_RE = /(?<![a-zäöüß])(germany|deutschland|deu|dach|emea|europe|europa|eu|eea)(?![a-zäöüß])/i;
+// Since 2026-10-03 the user disregards remote roles based in the US, UK or
+// elsewhere. An EU / EMEA / Europe scope is still KEPT at this zero-token gate:
+// a location string cannot tell a German employer's "Remote (EU)" (Camunda,
+// Berlin) from a London one's, and dropping it would lose German employers.
+// Triage reads the JD and drops it unless the posting places the role in
+// Germany (modes/_brief.md -> Hard DQ "Outside Germany").
+const REMOTE_REACHABLE_SCOPE_RE = /(?<![a-zäöüß])(germany|deutschland|deu|dach|deutschlandweit|bundesweit|emea|europe|europa|eu|eea)(?![a-zäöüß])/i;
 const REMOTE_DE_CODE_RE = /(?<![A-Za-z0-9])DE(?![A-Za-z0-9])/;
 
 function explicitReachableScope(text) {
@@ -715,16 +721,17 @@ export function sweepReach(job) {
   const segment = locationSegment.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (UNINFORMATIVE_LOCATION_RE.test(loc) && segment) {
     const fromUrl = classifyReach(segment);
-    if (fromUrl === 'home' || fromUrl === 'munich') return { reach: fromUrl, via: 'url', segment };
+    if (fromUrl === 'home' || fromUrl === 'munich' || fromUrl === 'germany') return { reach: fromUrl, via: 'url', segment };
   }
   return { reach, via: 'location', segment };
 }
 
 /**
- * Should the reverse-ATS sweep keep this posting? Home and Munich always;
+ * Should the reverse-ATS sweep keep this posting? Any German location always
+ * (home, Munich, elsewhere in Germany — the user's rule since 2026-10-03);
  * remote only when explicitly scoped to Germany/EU/Europe/DACH/EMEA or a German
- * place; everything else — abroad, elsewhere-in-Germany on-site, bare "Remote",
- * "N Locations" with no German evidence — is dropped.
+ * place; everything else — abroad, bare "Remote", "N Locations" with no German
+ * evidence — is dropped.
  *
  * `alwaysAllow` (portals.yml location_filter.always_allow) rescues an 'unknown'
  * verdict whose location names one of the user's own home regions ("Bayern",
@@ -737,10 +744,10 @@ export function sweepReach(job) {
 export function sweepReachGate(job, { alwaysAllow = [] } = {}) {
   const { reach, segment } = sweepReach(job);
   const loc = typeof job?.location === 'string' ? job.location : '';
-  if (reach === 'home' || reach === 'munich') return { keep: true, reach, reason: `${reach}` };
+  if (reach === 'home' || reach === 'munich' || reach === 'germany') return { keep: true, reach, reason: `${reach}` };
   if (reach === 'remote') {
     if (explicitReachableScope(`${loc} ${segment}`)) return { keep: true, reach, reason: 'remote scoped to Germany/EU/Europe/DACH/EMEA or a German place' };
-    return { keep: false, reach, reason: 'bare remote with no German/EU scope' };
+    return { keep: false, reach, reason: 'remote with no German scope' };
   }
   if (reach === 'unknown') {
     const lowered = loc.toLowerCase();
@@ -761,11 +768,16 @@ export function sweepReachGate(job, { alwaysAllow = [] } = {}) {
     }
     return { keep: false, reach, reason: 'no German location evidence' };
   }
-  return { keep: false, reach, reason: reach === 'germany' ? 'elsewhere in Germany, not remote' : 'outside Germany' };
+  return { keep: false, reach, reason: 'outside Germany' };
 }
 
-/** Location score from modes/_brief.md "Location Scoring". Remote-in-Germany is 4.5. */
-export const REACH_SCORE = { home: 5.0, remote: 4.5, munich: 4.0, unknown: 2.5, germany: 1.5, abroad: 1.0 };
+/**
+ * Location score from modes/_brief.md "Location Scoring". Since 2026-10-03 the
+ * user's rule is that location is not scored inside Germany: home, Munich,
+ * elsewhere-in-Germany and German remote are all 5.0; outside Germany is a hard
+ * DQ. `unknown` stays neutral-low because it carries no evidence either way.
+ */
+export const REACH_SCORE = { home: 5.0, remote: 5.0, munich: 5.0, unknown: 2.5, germany: 5.0, abroad: 1.0 };
 
 // ── Stage 2: fit ────────────────────────────────────────────────────────────
 
@@ -1030,7 +1042,8 @@ export function rankEntry(entry) {
 
   // Stage 1 — reach. Cheapest and most decisive cut.
   if (reach === 'abroad') return drop('outside Germany');
-  if (reach === 'germany') return drop('elsewhere in Germany, no remote signal');
+  // 'germany' (elsewhere in Germany, on-site) is in scope since 2026-10-03 —
+  // the user's rule: any location in Germany, no location penalty.
 
   // Stage 2 — fit.
   for (const rule of HARD_DQ) {
@@ -1357,10 +1370,9 @@ export function renderShortlist(report, { now = Date.now() } = {}) {
     '',
     '### What this pass cannot see',
     '',
-    'Title-and-location ranking cannot detect a remote-friendly role whose title',
-    'and location say nothing about remote. A share of the "elsewhere in Germany"',
-    'drops are probably remote or hybrid. If the top tier runs out, re-rank that',
-    'group by opening JDs rather than trusting this file.',
+    'Title-and-location ranking cannot see the JD. A role whose location string',
+    'names no place at all lands in the unknown tier; if the top tier runs out,',
+    're-rank that group by opening JDs rather than trusting this file.',
     '',
   ];
 
@@ -1858,7 +1870,9 @@ function selfTest() {
   check(rank('Ausbildung Fachinformatiker Anwendungsentwicklung (m/w/d), ab 09/2027', 'Nuremberg').bucket === 'skip', 'Ausbildung is a hard drop even with a technical title');
   check(rank('AI Research Intern (PhD) – 3D Computer Vision', 'Munich').bucket === 'skip', 'a PhD-only intern posting is a hard drop');
   check(rank('Senior Data Scientist', 'Erlangen').bucket === 'skip', 'seniority is a hard drop even at home base');
-  check(rank('Junior Kotlin / Java Software Engineer', 'Berlin').bucket === 'skip', 'Berlin is out of reach before fit is even considered');
+  // 2026-10-03: any location in Germany is in scope — Berlin is ranked on fit, not dropped on location.
+  check(rank('Werkstudent Data Science', 'Berlin').bucket !== 'skip' && rank('Werkstudent Data Science', 'Berlin').score === 5.0,
+    'Berlin is in scope and carries no location penalty');
   check(rank('Bachelorarbeit Machine Learning', 'Erlangen').bucket === 'skip', 'a Bachelor thesis is the wrong degree level');
   check(rank('Werkstudent (m/w/d) iOS Entwicklung', 'Erlangen').bucket === 'skip', 'an off-stack core is dropped');
   check(rank('Werkstudent (m/w/d) ASP.NET Entwickler', 'Erlangen').bucket === 'skip', 'ASP.NET is off-stack — a preceding letter must not defeat the .NET term');
@@ -2055,7 +2069,7 @@ function selfTest() {
   // Dropped: the 2026-09-29 sweep's actual shapes.
   check(gate('Remote MO', wd('Remote-MO')).keep === false, 'sweep gate drops "Remote MO" (US state)');
   check(gate('Other Remote NY', wd('Other-Remote-NY')).keep === false, 'sweep gate drops "Other Remote NY"');
-  check(gate('Remote', wd('Remote')).keep === false && gate('Remote').reason === 'bare remote with no German/EU scope',
+  check(gate('Remote', wd('Remote')).keep === false && gate('Remote').reason === 'remote with no German scope',
     'sweep gate drops a bare "Remote" — no evidence of where the seat is');
   check(gate('Remote Job Posting', wd('Remote-Job-Posting')).keep === false, 'sweep gate drops "Remote Job Posting"');
   check(gate('Remote Location', wd('Remote-Location')).keep === false, 'sweep gate drops "Remote Location" (US university)');
@@ -2064,8 +2078,8 @@ function selfTest() {
     'sweep gate drops "N Locations" with no German evidence');
   check(gate('Taiwan (Remote)').keep === false && gate('United Arab Emirates (remote)').keep === false, 'sweep gate drops foreign-qualified remote');
   check(gate('Toronto, Canada').keep === false && gate('Palo Alto - Hybrid').keep === false, 'sweep gate drops abroad and unrecognised-foreign places');
-  check(gate('Berlin, Germany').keep === false && gate('Berlin, Germany').reason === 'elsewhere in Germany, not remote',
-    'sweep gate drops on-site elsewhere-in-Germany (the prefilter would skip it anyway)');
+  check(gate('Berlin, Germany').keep === true && gate('Hamburg').keep === true,
+    'sweep gate keeps on-site elsewhere-in-Germany (any German location is in scope since 2026-10-03)');
   check(gate('Worldwide').keep === false && gate('Anywhere').keep === false, 'sweep gate drops a bare Worldwide/Anywhere');
   // Kept.
   check(gate('Erlangen').keep === true && gate('Nürnberg').keep === true, 'sweep gate keeps home');
@@ -2074,10 +2088,10 @@ function selfTest() {
   check(gate('Parsdorf, Bavaria, Germany').keep === true, 'Parsdorf (Isar Aerospace) is a Munich-ring town');
   check(gate('Germany · Remote').keep === true && gate('Remote, Germany').keep === true, 'sweep gate keeps remote scoped to Germany');
   check(gate('Remote (EU)').keep === true && gate('Remote - Europe').keep === true && gate('Remote, DACH').keep === true && gate('Remote EMEA').keep === true,
-    'sweep gate keeps remote scoped to EU/Europe/DACH/EMEA');
+    'sweep gate keeps remote scoped to EU/Europe/DACH/EMEA — triage decides whether the posting is German');
   check(gate('Remote DE').keep === true, 'sweep gate keeps "Remote DE" (capitals = the ISO code)');
   check(gate('Berlin · Remote').keep === true, 'sweep gate keeps a German city plus remote');
-  check(gate('Europe').keep === true && gate('EMEA').keep === true, 'a bare regional label that includes Germany is kept (location_filter.allow reads it as remote-in-area)');
+  check(gate('Europe').keep === true && gate('EMEA').keep === true, 'a bare regional label that includes Germany is kept (triage decides from the JD)');
   check(gate('Eastern Europe, Baltics & Balkans').keep === false, 'Eastern Europe / Baltics / Balkans do not include Germany');
   check(gate('DE Bundesweit').keep === true, '"DE Bundesweit" (Germany nationwide) is reachable');
   // URL evidence: only towards home/munich, never towards remote.

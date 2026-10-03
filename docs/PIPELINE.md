@@ -56,7 +56,7 @@ flowchart TD
 
 | Gate | Stage | Refuses |
 |---|---|---|
-| `title_filter` / `location_filter` | 1 | Wrong role, wrong place. `always_allow` > `block` > `allow`; outside the home and Munich regions, **remote only** |
+| `title_filter` / `location_filter` | 1 | Wrong role, wrong place. `always_allow` > `block` > `allow`; any location in Germany is in scope (on-site, hybrid or remote); outside Germany is dropped |
 | `blacklist` · `_trust-validator` | 1 | Do-not-apply employers; postings whose company and domain disagree |
 | **`scan-run-health`** | 1 | Reasoning over a scan that was rate-limited rather than empty |
 | **`triage-prefilter`** | 1 | Postings the title and location already settle — 67% of them, at zero token cost |

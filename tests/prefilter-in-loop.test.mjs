@@ -30,7 +30,6 @@ const bucket = (title, location) => rankEntry({ title, location, url: '', compan
 for (const [t, l] of [
   ['Praktikum Redaktion Medien Journalismus (m/w/d)', 'Erlangen-Nürnberg'],
   ['Werkstudent im Verkauf Outlet Ingolstadt (m/w/d)', 'München'],
-  ['Student Assistant Computer Vision and Graphics', 'Berlin'],
 ]) {
   bucket(t, l) === 'skip'
     ? pass(`skipped: ${t.slice(0, 44)}`)
@@ -50,6 +49,13 @@ for (const t of [
     ? pass(`Munich on-archetype role survives: ${t.slice(0, 40)}`)
     : fail(`Munich role was skipped on location: ${t}`);
 }
+
+// ── Anywhere in Germany is in scope since 2026-10-03 ────────────────────────
+// This Berlin row was a "clear skip" only because of its location. Under the
+// user's rule (any German location, no location penalty) it must survive.
+bucket('Student Assistant Computer Vision and Graphics', 'Berlin') !== 'skip'
+  ? pass('a Berlin on-archetype role is no longer skipped on location')
+  : fail('a Berlin role was skipped on location');
 
 // ── The home region is never skipped on reach ───────────────────────────────
 bucket('Werkstudent (w/m/d) Data Analytics', 'Erlangen') !== 'skip'

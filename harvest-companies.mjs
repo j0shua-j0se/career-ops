@@ -136,7 +136,8 @@ export function titleLooksRelevant(title) {
 // blank location proves nothing, and a wrongly-added board costs scan time on
 // every future pass forever, not just once. See DE_ONLY_PORTALS below for the
 // one case a blank location is still admissible.
-const POSITIVE_REACH = new Set(['home', 'munich', 'remote']);
+// 'germany' joined 2026-10-03: any location in Germany is in scope now.
+const POSITIVE_REACH = new Set(['home', 'munich', 'remote', 'germany']);
 
 // Providers whose ENTIRE inventory is Germany-scoped by construction — a
 // listing from one of these needs no location text to prove it's German, the
@@ -681,7 +682,7 @@ function runSelfTest() {
   check(isQualifyingSighting({ location: 'Erlangen' }), 'isQualifyingSighting: home city, no portal needed');
   check(isQualifyingSighting({ location: 'Munich' }), 'isQualifyingSighting: Munich commuter ring qualifies');
   check(!isQualifyingSighting({ location: '' }), 'isQualifyingSighting: a blank location from an unknown portal does NOT qualify (the fix)');
-  check(!isQualifyingSighting({ location: 'Berlin' }), 'isQualifyingSighting: elsewhere-in-Germany, no portal, does NOT qualify');
+  check(isQualifyingSighting({ location: 'Berlin' }), 'isQualifyingSighting: elsewhere-in-Germany qualifies (any German location is in scope since 2026-10-03)');
   check(!isQualifyingSighting({ location: 'Remote, US' }), 'isQualifyingSighting: "Remote, US" is abroad, rejected');
   check(!isQualifyingSighting({ location: 'New York, USA' }), 'isQualifyingSighting: abroad rejected');
   check(isQualifyingSighting({ location: '', portal: 'arbeitsagentur-api' }), 'isQualifyingSighting: blank location from a DE-only portal qualifies');

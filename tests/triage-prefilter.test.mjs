@@ -115,6 +115,7 @@ try {
     ['home', 'Erlangen / N', 'the home-base row'],
     ['munich', 'Munich hybrid', 'the Munich hybrid row'],
     ['remote', 'fully remote', 'the remote-in-Germany row'],
+    ['germany', 'Anywhere else in Germany', 'the elsewhere-in-Germany row (in scope since 2026-10-03)'],
     ['abroad', 'Outside Germany', 'the outside-Germany row'],
   ];
   for (const [key, label, human] of tiers) {
