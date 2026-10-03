@@ -485,3 +485,23 @@ try {
     else fail(`nested traversal threw the wrong error: ${err.message}`);
   }
 }
+
+// 2026-10-03: a CV that failed the ATS gate (3 pages) stayed in output/ AND in
+// data/pdf-index.tsv, so sync-pdf-flags marked the row ✅ and the kits stage
+// counted a kit that had no cover letter. quarantineRejectedCv undoes both.
+{
+  const { quarantineRejectedCv } = await import('../build-application.mjs');
+  const { mkdtempSync, writeFileSync: wf, readFileSync: rf, existsSync: ex } = await import('node:fs');
+  const { join: j } = await import('node:path');
+  const { tmpdir: td } = await import('node:os');
+  const box = mkdtempSync(j(td(), 'cops-quarantine-'));
+  const pdf = j(box, 'x-cv.pdf');
+  const idx = j(box, 'pdf-index.tsv');
+  wf(pdf, '%PDF-fake');
+  wf(idx, '# report\tpdf\thtml\tformat\tdate\n240\toutput/x-cv.pdf\toutput/x-cv.html\ta4\t2026-10-03\n239\toutput/y-cv.pdf\toutput/y-cv.html\ta4\t2026-10-03\n');
+  quarantineRejectedCv(pdf, '240', { indexPath: idx });
+  const idxAfter = rf(idx, 'utf-8');
+  const ok = !ex(pdf) && ex(j(box, 'x-cv.rejected.pdf')) && !/^240\t/m.test(idxAfter) && /^239\t/m.test(idxAfter);
+  if (ok) console.log('  ✅ quarantineRejectedCv renames the rejected PDF and drops only its pdf-index row');
+  else { console.log('  ❌ quarantineRejectedCv did not quarantine correctly'); process.exitCode = 1; }
+}

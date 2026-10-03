@@ -58,13 +58,14 @@
  */
 
 import { spawnSync } from 'child_process';
-import { existsSync, readFileSync, readdirSync, appendFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, appendFileSync, mkdirSync, renameSync, writeFileSync } from 'fs';
 import { dirname, join, resolve, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
 import { resolveCoverOutputPath } from './generate-cover-letter.mjs';
 import { classifyLanguage } from './language-loss.mjs';
-import { getCareerOpsRoot } from './path-resolver.mjs';
+import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
+import { resolvePdfIndexPath } from './tracker-utils.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -332,12 +333,20 @@ async function main() {
     // before it would be checking a file that no longer exists on disk.
     values['skip-ats'] ? null : ['ATS gate', atsArgs],
   ].filter(Boolean);
+  let rendered = false;
   for (const [label, args] of cvSteps) {
     if (!run(label, args)) {
+      // A step AFTER the render failed (scrub or ATS gate): the PDF on disk is
+      // a rejected artifact, but generate-pdf.mjs already recorded it in
+      // data/pdf-index.tsv. sync-pdf-flags then flipped the tracker's PDF cell
+      // to ✅ and the kits stage counted the row as built — a 3-page CV with no
+      // cover letter (report 240, 2026-10-03). Move it aside and unlink it.
+      if (rendered) quarantineRejectedCv(cvPdfPath, reportNum);
       console.error(`\n❌ ${label} failed. Nothing further was built.`);
       process.exitCode = 1;
       return;
     }
+    if (label === 'Render CV PDF') rendered = true;
   }
 
   // ── 3. Cover letter ───────────────────────────────────────────────────────
@@ -385,6 +394,30 @@ async function main() {
   console.log(`  cover pdf   : ${coverBuilt ? (resolveStagedCoverPdfPath(coverPayload, values['out-cover'], values.stage) || 'generate-cover-letter default') : 'none'}`);
   console.log('=============================================');
   console.log('\nReview both PDFs before sending. Nothing here submits anything.');
+}
+
+/**
+ * Move a CV PDF that failed a post-render gate to `<name>.rejected.pdf` and drop
+ * its data/pdf-index.tsv row, so nothing downstream mistakes it for a kit.
+ * Best-effort: a failure here is reported, never thrown.
+ */
+export function quarantineRejectedCv(cvPdfPath, reportNum, { indexPath } = {}) {
+  try {
+    if (existsSync(cvPdfPath)) {
+      const rejected = cvPdfPath.replace(/\.pdf$/i, '.rejected.pdf');
+      renameSync(cvPdfPath, rejected);
+      console.error(`   Moved the rejected CV to ${basename(rejected)} so it is not counted as a built kit.`);
+    }
+    const manifest = indexPath || resolvePdfIndexPath(resolveTrackerPath(getCareerOpsRoot()));
+    if (reportNum && existsSync(manifest)) {
+      const norm = (v) => String(v ?? '').trim().replace(/^0+(?=\d)/, '');
+      const lines = readFileSync(manifest, 'utf-8').split('\n');
+      const kept = lines.filter((l) => l.startsWith('#') || !l.trim() || norm(l.split('\t')[0]) !== norm(reportNum));
+      if (kept.length !== lines.length) writeFileSync(manifest, kept.join('\n'));
+    }
+  } catch (err) {
+    console.error(`   (could not quarantine the rejected CV: ${err.message})`);
+  }
 }
 
 if (isMainModule(import.meta.url)) {
