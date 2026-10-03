@@ -397,11 +397,14 @@ async function main() {
 }
 
 /**
- * Move a CV PDF that failed a post-render gate to `<name>.rejected.pdf` and drop
- * its data/pdf-index.tsv row, so nothing downstream mistakes it for a kit.
- * Best-effort: a failure here is reported, never thrown.
+ * Move a CV PDF that failed a post-render gate to `<name>.rejected.pdf`, drop
+ * its data/pdf-index.tsv row, and set the tracker's PDF cell back to ❌ (via
+ * mark-pdf-ready.mjs --clear), so nothing downstream mistakes it for a kit.
+ * The ❌ matters on a REbuild: the row may already carry ✅ from an earlier
+ * kit whose CV this failed render just overwrote, and sync-pdf-flags.mjs only
+ * ever upgrades. Best-effort: a failure here is reported, never thrown.
  */
-export function quarantineRejectedCv(cvPdfPath, reportNum, { indexPath } = {}) {
+export function quarantineRejectedCv(cvPdfPath, reportNum, { indexPath, clearFlag = clearTrackerPdfFlag } = {}) {
   try {
     if (existsSync(cvPdfPath)) {
       const rejected = cvPdfPath.replace(/\.pdf$/i, '.rejected.pdf');
@@ -415,8 +418,19 @@ export function quarantineRejectedCv(cvPdfPath, reportNum, { indexPath } = {}) {
       const kept = lines.filter((l) => l.startsWith('#') || !l.trim() || norm(l.split('\t')[0]) !== norm(reportNum));
       if (kept.length !== lines.length) writeFileSync(manifest, kept.join('\n'));
     }
+    if (reportNum && clearFlag) clearFlag(reportNum);
   } catch (err) {
     console.error(`   (could not quarantine the rejected CV: ${err.message})`);
+  }
+}
+
+function clearTrackerPdfFlag(reportNum) {
+  const res = spawnSync(process.execPath, [join(ROOT, 'mark-pdf-ready.mjs'), String(parseInt(reportNum, 10)), '--clear'], {
+    encoding: 'utf-8',
+  });
+  // Exit 2 = no tracker row links this report yet (a first build): nothing to clear.
+  if (res.status !== 0 && res.status !== 2) {
+    console.error(`   (could not reset the tracker PDF flag: ${(res.stderr || res.stdout || '').trim()})`);
   }
 }
 

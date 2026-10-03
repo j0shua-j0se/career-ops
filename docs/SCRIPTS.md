@@ -1038,7 +1038,7 @@ These have no `npm run` binding — modes and agents call them with
 | Invocation | Purpose |
 |------------|---------|
 | `node set-status.mjs <report#\|company> <State> [--note]` | Canonical tracker write path: strict states.yml validation, shared lock, atomic write. Modes call this instead of hand-editing `applications.md` |
-| `node mark-pdf-ready.mjs <report#> [--dry-run] [--json]` | Mark the matched tracker's PDF cell ready after the web PDF render path finishes; resolves the report number, uses the shared tracker lock, and writes atomically |
+| `node mark-pdf-ready.mjs <report#> [--clear] [--dry-run] [--json]` | Mark the matched tracker's PDF cell ready after the web PDF render path finishes (`--clear` reverses it); resolves the report number, uses the shared tracker lock, and writes atomically |
 | `node followup-cadence.mjs [--summary]` | Follow-up cadence per active application; flags overdue entries |
 | `node followup-seed.mjs [--backfill]` | Seed `data/follow-ups.md` with a pinned first follow-up date when a row turns Applied |
 | `node reply-watch.mjs` | Classify employer replies from `data/reply-candidates.json`, match to tracker rows, print a review digest |
@@ -1121,7 +1121,14 @@ filename or Report cell, not the tracker row's `#` value.
 node mark-pdf-ready.mjs <report#>                  # mark the matching row
 node mark-pdf-ready.mjs <report#> --dry-run       # validate without writing
 node mark-pdf-ready.mjs <report#> --json          # emit machine-readable output
+node mark-pdf-ready.mjs <report#> --clear         # reverse it: PDF cell back to ❌
 ```
+
+`--clear` is for a kit that turned out not to exist after all.
+`build-application.mjs` calls it when it quarantines a CV that failed a
+post-render gate. `sync-pdf-flags.mjs` only ever upgrades, so before `--clear`
+a wrong ✅ could only be removed by hand-editing the table. The row is matched
+on the report file its link points to, never on the link's label.
 
 The script resolves the report-to-row link, refuses ambiguous matches, and
 leaves an already-ready row unchanged. Writes use the same shared tracker lock

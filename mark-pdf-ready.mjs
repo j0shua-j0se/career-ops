@@ -23,6 +23,12 @@
  * Idempotent: a row whose PDF cell is already ✅ is a no-op success (changed:
  * false), so a retried render never fails this step.
  *
+ * `--clear` is the reverse write (✅ → ❌), for a kit that turned out not to
+ * exist after all — e.g. build-application.mjs quarantining a CV that failed a
+ * post-render gate. sync-pdf-flags.mjs only ever upgrades, so before --clear a
+ * wrong ✅ could only be removed by hand-editing the table. Same lock, same
+ * atomic write, same idempotency (an already-❌ row is a no-op success).
+ *
  * The read-modify-write runs under the shared tracker lock (tracker-utils.mjs,
  * same lock as merge-tracker.mjs / set-status.mjs) and the file is replaced
  * atomically. Only the PDF cell of the matched row changes; every other byte
@@ -48,9 +54,10 @@ const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // acquireTrackerLockForCli() itself (tracker-utils.mjs), via CLI_EXIT.LOCK_TIMEOUT.
 const { OK: EXIT_OK, USAGE: EXIT_USAGE, NOT_FOUND: EXIT_NOT_FOUND, AMBIGUOUS: EXIT_AMBIGUOUS } = CLI_EXIT;
 
-const USAGE = `Usage: node mark-pdf-ready.mjs <report#> [--dry-run] [--json]
+const USAGE = `Usage: node mark-pdf-ready.mjs <report#> [--clear] [--dry-run] [--json]
 
   <report#>    The NNN from reports/NNN-{slug}-{date}.md (NOT the tracker # column)
+  --clear      Reverse it: set the PDF cell back to ❌ (the kit does not exist)
   --dry-run    Resolve and validate, but write nothing
   --json       Machine-readable output on stdout (errors included)`;
 
@@ -58,10 +65,11 @@ const USAGE = `Usage: node mark-pdf-ready.mjs <report#> [--dry-run] [--json]
 
 const rawArgs = process.argv.slice(2);
 const positional = [];
-const flags = { dryRun: false, json: false };
+const flags = { dryRun: false, json: false, clear: false };
 
 for (const a of rawArgs) {
   if (a === '--dry-run') { flags.dryRun = true; }
+  else if (a === '--clear') { flags.clear = true; }
   else if (a === '--json') { flags.json = true; }
   else if (a.startsWith('--')) { failUsage(`Unknown flag: ${a}`); }
   else { positional.push(a); }
@@ -152,16 +160,19 @@ const target = matches[0];
 
 // ── locked read-modify-write ─────────────────────────────────────
 
-const alreadyReady = target.pdf.trim() === '✅';
+const wanted = flags.clear ? '❌' : '✅';
+const isReady = target.pdf.trim() === '✅';
+// Already in the wanted state: ✅ when marking, anything but ✅ when clearing.
+const alreadyDone = flags.clear ? !isReady : isReady;
 // Matches set-status.mjs's contract: `changed` reflects whether a write WOULD
 // happen, computed independent of --dry-run, so a preview call can tell "would
 // mark" apart from "already ✅" without actually writing.
-const changed = !alreadyReady;
+const changed = !alreadyDone;
 
 if (changed && !flags.dryRun) {
   const parts = lines[target.lineIdx].split('|').map(s => s.trim());
   while (parts.length <= colmap.pdf) parts.push('');
-  parts[colmap.pdf] = '✅';
+  parts[colmap.pdf] = wanted;
   lines[target.lineIdx] = rebuildRow(parts);
   try {
     writeFileAtomic(APPS_FILE, lines.join('\n'));
@@ -179,6 +190,8 @@ const result = {
   company: target.company,
   role: target.role,
   reportNum: targetReportNum,
+  pdf: changed && !flags.dryRun ? wanted : target.pdf.trim(),
+  ...(flags.clear ? { cleared: true } : {}),
   ...(flags.dryRun ? { dryRun: true } : {}),
   tracker: APPS_FILE,
 };
@@ -186,7 +199,8 @@ const result = {
 if (flags.json) {
   console.log(JSON.stringify(result, null, 2));
 } else {
-  const verb = flags.dryRun ? (alreadyReady ? 'already' : 'would mark') : changed ? 'marked' : 'already';
-  console.log(`✅ #${target.num} ${target.company} — ${target.role}: ${verb} PDF ready`);
+  const verb = flags.dryRun ? (alreadyDone ? 'already' : 'would mark') : changed ? 'marked' : 'already';
+  const what = flags.clear ? 'PDF not built (❌)' : 'PDF ready';
+  console.log(`${flags.clear ? '↩️ ' : '✅'} #${target.num} ${target.company} — ${target.role}: ${verb} ${what}`);
 }
 process.exit(EXIT_OK);

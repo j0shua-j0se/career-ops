@@ -499,9 +499,11 @@ try {
   const idx = j(box, 'pdf-index.tsv');
   wf(pdf, '%PDF-fake');
   wf(idx, '# report\tpdf\thtml\tformat\tdate\n240\toutput/x-cv.pdf\toutput/x-cv.html\ta4\t2026-10-03\n239\toutput/y-cv.pdf\toutput/y-cv.html\ta4\t2026-10-03\n');
-  quarantineRejectedCv(pdf, '240', { indexPath: idx });
+  const cleared = [];
+  quarantineRejectedCv(pdf, '240', { indexPath: idx, clearFlag: (n) => cleared.push(n) });
   const idxAfter = rf(idx, 'utf-8');
-  const ok = !ex(pdf) && ex(j(box, 'x-cv.rejected.pdf')) && !/^240\t/m.test(idxAfter) && /^239\t/m.test(idxAfter);
-  if (ok) console.log('  ✅ quarantineRejectedCv renames the rejected PDF and drops only its pdf-index row');
+  const ok = !ex(pdf) && ex(j(box, 'x-cv.rejected.pdf')) && !/^240\t/m.test(idxAfter) && /^239\t/m.test(idxAfter)
+    && cleared.join(',') === '240';
+  if (ok) console.log('  ✅ quarantineRejectedCv renames the rejected PDF, drops only its pdf-index row, and clears the tracker flag');
   else { console.log('  ❌ quarantineRejectedCv did not quarantine correctly'); process.exitCode = 1; }
 }

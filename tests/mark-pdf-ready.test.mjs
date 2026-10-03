@@ -445,3 +445,33 @@ const TRACKER_DUP_REPORT = `# Applications Tracker
     }
   }
 }
+
+// --clear is the reverse write (✅ → ❌). Before it, a wrong ✅ could only be
+// removed by hand-editing the table, because sync-pdf-flags.mjs only upgrades.
+{
+  const sandbox = makeSandbox(TRACKER_9);
+  try {
+    const r = runMarkPdfReady(['2', '--clear', '--json'], sandbox);
+    const after = readTracker(sandbox);
+    const out = JSON.parse(r.stdout || '{}');
+    const globex = after.split('\n').find(l => /Globex/.test(l)) || '';
+    const acme = after.split('\n').find(l => /Acme/.test(l)) || '';
+    if (r.code === 0 && out.changed === true && out.cleared === true && /\|\s*❌\s*\|\s*\[2\]/.test(globex)
+        && /\|\s*❌\s*\|\s*\[1\]/.test(acme)) {
+      pass('mark-pdf-ready --clear flips ✅ back to ❌ on the matched row only');
+    } else {
+      fail(`mark-pdf-ready --clear failed: code=${r.code} stdout=${r.stdout} row=${globex.trim()}`);
+    }
+    const again = runMarkPdfReady(['2', '--clear', '--json'], sandbox);
+    const again1 = runMarkPdfReady(['1', '--clear', '--json'], sandbox);
+    if (again.code === 0 && JSON.parse(again.stdout).changed === false
+        && again1.code === 0 && JSON.parse(again1.stdout).changed === false
+        && readTracker(sandbox) === after) {
+      pass('mark-pdf-ready --clear is idempotent on an already-❌ row');
+    } else {
+      fail(`mark-pdf-ready --clear not idempotent: ${again.stdout} / ${again1.stdout}`);
+    }
+  } finally {
+    rmSync(sandbox.dir, { recursive: true, force: true });
+  }
+}
