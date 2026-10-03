@@ -222,6 +222,27 @@ const coveredRetro = buildPassRetro({
 check('when loop-state.json run_id falls inside the scan window, it is used (loopStateCoversThisPass)', coveredRetro.loopStateCoversThisPass === true);
 check('llm-scored (non-prefiltered) candidate above minScore counts as qualified for its source', coveredRetro.sourceRows.find((r) => r.source === 'greenhouse-api')?.qualified === 1);
 check('a prefiltered candidate counts as free_rejected, not llm_triaged, for its source', coveredRetro.sourceRows.find((r) => r.source === 'interamt')?.freeRejected === 1);
+
+// 2026-10-03: qualified follows the loop's verdict when one is recorded. A
+// prefilter rejection with a high (location) score is not a qualifier, and a
+// priority-employer PASS below minScore is.
+{
+  const verdictRetro = buildPassRetro({
+    window: fixtureWindow, scanHistoryRows,
+    discardEntries: [], reportFiles: [], readReportText: () => '',
+    pdfIndexRows: [], trackerRows: [],
+    loopState: {
+      ...loopStateFixture,
+      candidates: {
+        a: { url: 'https://boards.greenhouse.io/co/jobs/1', score: 2.8, prefiltered: false, verdict: 'qualified' },
+        b: { url: 'https://www.interamt.de/jobs/3', score: 4, prefiltered: true, verdict: 'rejected' },
+      },
+    },
+    loopRunLogText: '',
+  });
+  check('a qualified verdict counts even below minScore (priority-employer PASS)', verdictRetro.sourceRows.find((r) => r.source === 'greenhouse-api')?.qualified === 1);
+  check('a rejected prefilter candidate never counts as qualified, whatever its score', verdictRetro.sourceRows.find((r) => r.source === 'interamt')?.qualified === 0);
+}
 check('no loop-state/loop-run-log omission note when loop-state covers the pass', !coveredRetro.omitted.some((o) => /LATEST loop run/.test(o)));
 
 // ── run-all.mjs sync step: present, ordered, non-fatal ────────────────────

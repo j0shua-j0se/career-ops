@@ -104,7 +104,7 @@ for (let i = 0; i < lines.length; i++) {
   const row = parseTrackerRow(lines[i], colmap);
   if (!row) continue;
   
-  const reportNums = extractTrackerReportNumbers(row.report);
+  const reportNums = extractTrackerReportNumbers(row.report, '', { pathOnly: true });
   const hasPdf = reportNums.some(num => manifestReports.has(num));
   
   if (hasPdf) {

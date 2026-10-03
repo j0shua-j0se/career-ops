@@ -561,7 +561,15 @@ export function buildPassRetro(inputs) {
           || cand.source || null;
         if (cand.prefiltered) bump(source, 'freeRejected');
         else bump(source, 'llmTriaged');
-        if (minScore != null && typeof cand.score === 'number' && cand.score >= minScore) bump(source, 'qualified');
+        // The loop's own verdict decides, when it recorded one. The score rule
+        // alone was wrong both ways on 2026-10-03: prefilter rejections carried
+        // a LOCATION reach score (4-5) and counted as qualifiers, while a
+        // priority-employer PASS at 2.8 — which the loop does qualify — did not.
+        // The score rule stays only for loop states written before verdicts.
+        const qualified = cand.verdict
+          ? cand.verdict === 'qualified'
+          : (!cand.prefiltered && minScore != null && typeof cand.score === 'number' && cand.score >= minScore);
+        if (qualified) bump(source, 'qualified');
       }
     }
   }

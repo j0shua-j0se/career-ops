@@ -182,6 +182,30 @@ try {
   } else {
     fail(`merge-tracker skipped the sort with no additions: [${numColumn(noAdditions.tracker).join(' ')}]`);
   }
+
+  // An ordinary append to an already-sorted table moves nothing. New rows were
+  // spliced in under the separator and sorted back down, so a 2-row merge into
+  // a 180-row tracker printed "182 row(s) repositioned" (2026-10-03).
+  const append = runMerge({
+    rows: [row(1, 'Alfa'), row(2, 'Bravo'), row(3, 'Charlie')],
+    additions: {
+      '4-delta.tsv': '4\t2026-02-01\tDelta\tML Eng\tEvaluated\t4.5/5\t❌\t[4](reports/4-delta-2026-02-01.md)\tnew\n',
+      '5-echo.tsv': '5\t2026-02-02\tEcho\tData Eng\tEvaluated\t4.1/5\t❌\t[5](reports/5-echo-2026-02-02.md)\tnew\n',
+    },
+  });
+  if (numColumn(append.tracker).join(' ') === '1 2 3 4 5' && !/repositioned/.test(append.output)) {
+    pass('merge-tracker appends new rows at the end and reports no repositioning for an in-order append');
+  } else {
+    fail(`append reported a reorder or misplaced rows: [${numColumn(append.tracker).join(' ')}] ${append.output.match(/.*repositioned.*/)?.[0] ?? ''}`);
+  }
+
+  // A genuinely misplaced row is counted once, not as every row it displaced.
+  const oneOff = runMerge({ rows: [row(2, 'Bravo'), row(3, 'Charlie'), row(4, 'Delta'), row(1, 'Alfa')] });
+  if (/\(1 row\(s\) repositioned\)/.test(oneOff.output) && numColumn(oneOff.tracker).join(' ') === '1 2 3 4') {
+    pass('merge-tracker counts the minimum rows moved (one straggler = 1)');
+  } else {
+    fail(`straggler count wrong: ${oneOff.output.match(/.*repositioned.*/)?.[0] ?? '(no message)'}`);
+  }
 } catch (e) {
   fail(`merge-tracker sort tests crashed: ${e.message}`);
 }

@@ -395,7 +395,13 @@ function parseMarkdownLinks(value) {
   return links;
 }
 
-export function extractTrackerReportNumbers(reportCell, notesCell = '') {
+// `pathOnly` drops the numeric link label and keeps only the number in the
+// file the link points at. The default (label + path) suits occupancy checks,
+// where either number may be taken. A caller that asserts a fact about one
+// report file needs `pathOnly`. Observed 2026-10-04: row #199 carried
+// `[199](reports/200-…)`, so sync-pdf-flags read report 199's kit as the kit
+// for both #199 and #200 and set ✅ on a row with no kit.
+export function extractTrackerReportNumbers(reportCell, notesCell = '', { pathOnly = false } = {}) {
   const value = String(reportCell ?? '').trim();
   if (!value || value === '-' || value === '—') return scanNotesForReportNumbers(notesCell);
 
@@ -416,7 +422,7 @@ export function extractTrackerReportNumbers(reportCell, notesCell = '') {
     const pathNum = numberFromTarget(link.target);
     if (pathNum == null) continue;
     const label = link.label.trim();
-    if (/^\d+$/.test(label)) {
+    if (!pathOnly && /^\d+$/.test(label)) {
       const labelNum = parseInt(label, 10);
       if (labelNum > 0) numbers.add(labelNum);
     }

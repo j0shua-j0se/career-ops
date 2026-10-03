@@ -133,7 +133,7 @@ if (rows.length === 0) {
   failWith(EXIT_NOT_FOUND, 'empty-tracker', `Tracker at ${APPS_FILE} has no data rows`);
 }
 
-const matches = rows.filter(r => extractTrackerReportNumbers(r.report).includes(targetReportNum));
+const matches = rows.filter(r => extractTrackerReportNumbers(r.report, '', { pathOnly: true }).includes(targetReportNum));
 if (matches.length === 0) {
   failWith(EXIT_NOT_FOUND, 'not-found', `No tracker row links report #${targetReportNum}`);
 }

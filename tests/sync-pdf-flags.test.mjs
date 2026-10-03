@@ -17,6 +17,7 @@ const TRACKER_HEADER = [
   '| 2 | 2026-01-02 | Globex | Data Eng | 4.0/5 | Evaluated | — | [2](reports/2-globex.md) | |',
   '| 3 | 2026-01-03 | Initech | SE | 3.5/5 | Evaluated | ✅ | [3](reports/3-initech.md) | |',
   '| 4 | 2026-01-04 | Massive Dynamic | SE | 4.0/5 | Evaluated | ❌ | [4](reports/4-massive.md) | |',
+  '| 5 | 2026-01-05 | Hooli | DS | 3.3/5 | SKIP | ❌ | [1](reports/5-hooli.md) | |',
   '',
 ].join('\n');
 
@@ -81,6 +82,15 @@ try {
     fail(`sync-pdf-flags wrongly flipped Massive: ${massive.trim()}`);
   }
   
+  // Row 5's label says [1] but the link opens report 5. Report 1 has a kit and
+  // report 5 does not, so the flag must stay ❌ (observed 2026-10-04, #199/#200).
+  const hooli = rows.find(l => /\bHooli\b/.test(l)) || '';
+  if (/\|\s*❌\s*\|\s*\[1\]\(reports\/5-hooli/.test(hooli)) {
+    pass('sync-pdf-flags joins on the link target, not a mislabelled link text');
+  } else {
+    fail(`sync-pdf-flags flipped a row whose link only LABELS a kitted report: ${hooli.trim()}`);
+  }
+
   if (/4-draft/.test(PDF_MANIFEST)) {
     pass('sync-pdf-flags correctly ignores partially numeric report IDs (4-draft)');
   }

@@ -1209,8 +1209,18 @@ function sortTrackerRowsInPlace(lines) {
     return a.num === b.num ? a.i - b.i : a.num - b.num;
   });
   const sorted = decorated.map(d => d.line);
-  let moved = 0;
-  for (let i = 0; i < sorted.length; i++) if (sorted[i] !== block[i]) moved++;
+  // Rows that genuinely changed place = everything outside the longest run that
+  // was already in order (a longest increasing subsequence of original indices).
+  // Counting index mismatches instead reported "182 row(s) repositioned" when a
+  // merge appended two rows: they are spliced in under the separator and sorted
+  // to the bottom, which shifts every row's index by two without reordering any.
+  const tails = [];
+  for (const { i } of decorated) {
+    let lo = 0, hi = tails.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (tails[mid] < i) lo = mid + 1; else hi = mid; }
+    tails[lo] = i;
+  }
+  const moved = decorated.length - tails.length;
   lines.splice(sepIdx + 1, block.length, ...sorted);
   return moved;
 }
@@ -1914,6 +1924,12 @@ if (newLines.length > 0) {
       insertIdx = i + 1;
       break;
     }
+  }
+  // Append at the END of the table, where new (highest-numbered) rows belong
+  // after the ascending sort below — inserting under the separator made every
+  // merge "reposition" the whole table to move the new rows back down.
+  if (insertIdx >= 0) {
+    while (insertIdx < appLines.length && appLines[insertIdx].startsWith('|')) insertIdx++;
   }
   if (insertIdx < 0) {
     // #2394: no separator row means no insert point. The old code left
