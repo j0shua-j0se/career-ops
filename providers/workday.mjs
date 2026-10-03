@@ -239,6 +239,94 @@ export function boardOutOfLocationScope(facets, locationHints) {
 }
 
 /**
+ * The in-scope slice of a board's COUNTRY facet, or null when there is no
+ * usable one.
+ *
+ * A location-scoped caller wants only the postings in its countries. When the
+ * board publishes a country facet, querying just those values is far cheaper
+ * than paginating the whole board and discarding the rest downstream.
+ * Measured 2026-10-03: the 7-day Workday/Ashby sweep took 24 of the pass's 52
+ * minutes and produced 0 qualifiers.
+ *
+ * Opt-in: it runs only when `location_filter.countries` lists the countries
+ * the user wants, and then nothing outside them is wanted. It cannot be
+ * inferred from allow/always_allow. A city-only list ("Toronto") names no
+ * country value, so inference would stop such boards at page 0. A list that
+ * also allows "Remote" may want remote postings filed under other countries.
+ *
+ * Deliberately limited to COUNTRY facets. A country value ("Germany") is
+ * unambiguous. A city or site facet is not: a town missing from the hints
+ * (Schnelldorf, Grevenbroich) would be silently skipped even though the job's
+ * own location text would pass the filter.
+ *
+ * Two ways a facet counts as the country level:
+ * - its name says so (`locationCountry`, descriptor "Country"), or
+ * - it is a location facet with a value that IS a wanted country, exactly
+ *   ("Germany"). Large tenants nest their location levels inside a
+ *   `locationMainGroup` group: NVIDIA's country level is `locationHierarchy1`,
+ *   labelled "Locations". Its site level ("Germany, Munich") never matches
+ *   exactly, so a site facet is never mistaken for the country one.
+ * Only a facet NAMED as the country level may report "none in scope"; an
+ * exact-match facet is only known to be the country level because it HAS the
+ * country.
+ *
+ * Unless `total` is the clamped offset ceiling, a facet covering less than
+ * 95% of it is unusable: postings without a country value would never be
+ * requested by any slice.
+ *
+ * Returns `{ facetParameter, values, inScopeCount }`. An empty `values` means
+ * the board's country facet lists none of the wanted countries.
+ */
+export function countryScopeSlice(facets, locationHints, total = null) {
+  const wanted = normalizedHintValues(locationHints?.countries);
+  if (wanted.length === 0) return null;
+  const usable = (facet) => (Array.isArray(facet?.values) ? facet.values : []).filter(
+    (v) => typeof v?.id === 'string' && v.id && Number.isInteger(v?.count) && v.count >= 0
+      && String(v?.descriptor || '').trim() !== '',
+  );
+  const isWanted = (v) => wanted.includes(String(v.descriptor).trim().toLowerCase());
+
+  for (const facet of flattenFacets(facets)) {
+    const facetParameter = facet?.facetParameter;
+    if (typeof facetParameter !== 'string' || !facetParameter) continue;
+    const values = usable(facet);
+    // Fewer than two countries is not a partition worth trusting: a one-value
+    // facet usually means the board fills it for some postings only.
+    if (values.length < 2) continue;
+    const namedCountry = /country/i.test(`${facetParameter} ${facet?.descriptor || ''}`);
+    if (!namedCountry && !(facetLooksLikeLocation(facet) && values.some(isWanted))) continue;
+    const coverage = values.reduce((sum, v) => sum + v.count, 0);
+    const clampedTotal = total === WORKDAY_OFFSET_CEILING;
+    if (Number.isInteger(total) && total > 0 && !clampedTotal && coverage < total * 0.95) continue;
+    const inScope = values.filter(isWanted);
+    if (inScope.length === 0 && !namedCountry) continue;
+    return {
+      facetParameter,
+      values: inScope,
+      inScopeCount: inScope.reduce((sum, v) => sum + v.count, 0),
+    };
+  }
+  return null;
+}
+
+/**
+ * Top-level facets plus the facets nested one level down inside a group
+ * (`locationMainGroup` → `locationHierarchy1`, `locations`, ...). A nested
+ * facet's parameter is applied directly in `appliedFacets`, as the board's own
+ * site does.
+ */
+function flattenFacets(facets) {
+  const out = [];
+  for (const facet of Array.isArray(facets) ? facets : []) {
+    out.push(facet);
+    for (const value of Array.isArray(facet?.values) ? facet.values : []) {
+      if (typeof value?.facetParameter === 'string' && Array.isArray(value?.values)) out.push(value);
+    }
+  }
+  return out;
+}
+
+/**
  * Pick a facet to split a clamped board on, preferring user-configured
  * locations when the caller supplies location_filter hints. A matching
  * location value may be the only useful slice (for example, Toronto among
@@ -526,7 +614,7 @@ export default {
      * Returns the facets alongside the jobs because the caller needs them to
      * decide whether this query was clamped and, if so, what to split it on.
      */
-    const runQuery = async (appliedFacets) => {
+    const runQuery = async (appliedFacets, { scopeCheck = false } = {}) => {
       pagesSpent++;
       const first = await fetchJsonWithRetry(ctx, ep.api, { ...postOpts, body: makeBody(0, appliedFacets) }, RETRY_POLICY);
       const jobs = parseWorkdayResponse(first, entry);
@@ -562,6 +650,22 @@ export default {
       if (stopReason === 'complete' && sinceMs !== null && ctx?.includeUndated !== true
         && !sawAnyDatedPosting && jobs.length > 0) {
         stopReason = 'no-date-skip';
+      }
+
+      // Country-scoped shortcut (see countryScopeSlice). Only on the unfaceted
+      // root query of a location-scoped caller, and only when the in-scope
+      // slices cost fewer pages than the rest of the full crawl. A board whose
+      // country facet lists no in-scope country stops at page 0. Clamped boards
+      // gain twice: a Germany slice usually fits under the offset ceiling.
+      if (scopeCheck && stopReason === 'complete' && ctxCap === Infinity && pagesToFetch > 1) {
+        const slice = countryScopeSlice(facets, ctx?.locationHints, total);
+        if (slice) {
+          if (slice.values.length === 0) return { jobs, total, facets, stopReason: 'out-of-scope', clamped: false };
+          const slicePages = slice.values.reduce((n, v) => n + Math.max(1, Math.ceil(v.count / PAGE_SIZE)), 0);
+          if (slicePages < pagesToFetch - 1) {
+            return { jobs, total, facets, stopReason: 'country-scoped', clamped: false, scope: slice };
+          }
+        }
       }
 
       // A clamped query is still worth paginating: everything up to the ceiling
@@ -610,7 +714,7 @@ export default {
       return { jobs, total, facets, stopReason, clamped };
     };
 
-    const root = await runQuery({});
+    const root = await runQuery({}, { scopeCheck: true });
     const { total, stopReason } = root;
 
     // Set when the split ran out of depth, slices, or splittable facets with
@@ -626,6 +730,57 @@ export default {
     let transientFailure = false;
     let slicesSpent = 0;
     let jobs = root.jobs;
+
+    if (root.stopReason === 'out-of-scope') {
+      // Complete for a location-scoped caller: the board's own country facet
+      // says none of its postings are in scope. Page 0 is still returned and
+      // filtered normally.
+      jobs.workdayOutOfScope = true;
+    }
+
+    if (root.stopReason === 'country-scoped') {
+      // Each in-scope country slice, then page 0 (unfaceted), deduped on URL.
+      // Slices go first so their labelled copy of a posting wins over page 0's.
+      //
+      // The label: a multi-site posting's location reads only "3 Locations",
+      // which no location filter can place, so it was dropped. Live NVIDIA
+      // board, 2026-10-04: 53 of its 61 German postings read that way. The
+      // slice proves the country, so such a posting becomes
+      // "Germany (3 Locations)".
+      const seenUrls = new Set();
+      const out = [];
+      const absorb = (list, country = null) => {
+        for (const job of list) {
+          if (seenUrls.has(job.url)) continue;
+          seenUrls.add(job.url);
+          if (country && /^\s*\d+\s+locations?\s*$/i.test(String(job.location || ''))) {
+            out.push({ ...job, location: `${country} (${String(job.location).trim()})` });
+          } else {
+            out.push(job);
+          }
+        }
+      };
+      for (const value of root.scope.values) {
+        if (pagesSpent >= pageBudget) { budgetExhausted = true; break; }
+        await sleep(INTER_PAGE_DELAY_MS, ctx);
+        let result;
+        try {
+          result = await runQuery({ [root.scope.facetParameter]: [value.id] });
+        } catch (err) {
+          const attempts = err.attempts ?? RETRY_POLICY.retries + 1;
+          console.error(`⚠️  workday: ${entry.name} country slice ${value.descriptor} failed on its first page after ${attempts} attempts: ${err.message}`);
+          splitIncomplete = true;
+          transientFailure = true;
+          continue;
+        }
+        absorb(result.jobs, String(value.descriptor).trim());
+        if (result.stopReason === 'fetch-error') { splitIncomplete = true; transientFailure = true; }
+        if (result.stopReason === 'cap' || result.clamped) splitIncomplete = true;
+      }
+      absorb(root.jobs);
+      jobs = out;
+      jobs.workdayCountryScoped = true;
+    }
 
     if (root.clamped) {
       // Slices overlap wherever a posting carries several values of the split

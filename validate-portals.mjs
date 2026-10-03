@@ -170,6 +170,7 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       validateKeywordList(config.location_filter.allow, 'location_filter.allow', errors);
       validateKeywordList(config.location_filter.block, 'location_filter.block', errors);
       validateKeywordList(config.location_filter.block_hard, 'location_filter.block_hard', errors);
+      validateKeywordList(config.location_filter.countries, 'location_filter.countries', errors);
     }
   }
 

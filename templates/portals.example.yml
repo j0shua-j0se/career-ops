@@ -100,6 +100,14 @@
 # Do NOT copy your whole `block` list here: a city in block_hard would kill
 # "Stockholm or London" postings, which is exactly what always_allow prevents.
 #
+# `countries` is optional and opt-in: the only countries you want postings
+# from, e.g. ["Germany", "Deutschland"]. It does not filter by itself. It lets
+# a provider that exposes a country facet (Workday) query only those
+# countries' slice of a board instead of paginating all of it, and stop at the
+# first page of a board whose country facet lists none of them. Leave it out
+# if you want remote roles filed under other countries; it is never inferred
+# from always_allow/allow.
+#
 # Example below targets US-based remote + a couple of US metros, blocking
 # common foreign hubs. Customize to your geography.
 

@@ -862,6 +862,12 @@ async function main() {
   // re-hit the cap — it's reported, not retried, so capped coverage is visible
   // instead of passing for a fully-walked board.
   let cappedBoards = cc.cappedBoards || 0;
+  // Workday boards crawled by country slice instead of in full, and boards
+  // whose country facet listed no wanted country (stopped at page 0). See
+  // countryScopeSlice() in providers/workday.mjs; both need
+  // location_filter.countries.
+  let countryScopedBoards = cc.countryScopedBoards || 0;
+  let countryOutOfScopeBoards = cc.countryOutOfScopeBoards || 0;
   const datasetStatus = {};
 
   const snapshotCounters = () => ({
@@ -870,6 +876,7 @@ async function main() {
     droppedCountryEligibility, countryEligibilityUntestable,
     droppedNoLocation, droppedReach, droppedReachReasons,
     noDateSkipCompanies, noDateSkipJobs, cappedBoards,
+    countryScopedBoards, countryOutOfScopeBoards,
   });
   const checkpointBase = () => ({
     version: 1,
@@ -1033,6 +1040,8 @@ async function main() {
             if (opts.verbose) console.error(`  ⚠ ${name}/${entry.name}: hit the page cap — later postings not scanned`);
           }
           if (jobs.workdayNoDateSkip) { noDateSkipCompanies++; noDateSkipJobs += jobs.length; }
+          if (jobs.workdayCountryScoped) countryScopedBoards++;
+          if (jobs.workdayOutOfScope) countryOutOfScopeBoards++;
           await processJobs(jobs, name, source.provider, entry.name);
         })(), COMPANY_TIMEOUT_MS, `${name}/${entry.name}`);
       } catch (err) {
@@ -1187,6 +1196,9 @@ async function main() {
   // no-postedOn workday posting counted here also hits the per-job undated
   // filter in the scan loop above and gets dropped there too. Report it as
   // a breakdown, not a second count — the two aren't additive.
+  if (countryScopedBoards || countryOutOfScopeBoards) {
+    log(`Country scope:     ${countryScopedBoards} workday board(s) crawled by country slice, ${countryOutOfScopeBoards} stopped at page 0 (no wanted country)`);
+  }
   if (droppedNoDate) {
     const breakdown = noDateSkipCompanies
       ? ` (incl. ${noDateSkipJobs} from ${noDateSkipCompanies} workday companies with no postedOn)`
