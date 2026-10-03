@@ -40,6 +40,7 @@ import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
 import { resolveColumns, parseTrackerRow, extractReqNumber, REQ_NUMBER_RE } from './tracker-parse.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { stripStepstoneInlineSuffix } from './url-key.mjs';
+import { localToday } from './lib/local-today.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CAREER_OPS = getCareerOpsRoot();
@@ -294,6 +295,27 @@ export function normalizeCompanyForDup(raw) {
  * import-time-side-effect reason as the legal-forms list above.
  */
 export function companyDupMatch(a, b) {
+  // A parenthetical is often the employer's OTHER name, not noise:
+  // "DLR (Deutsches Zentrum fuer Luft- und Raumfahrt e.V.)" in the tracker vs
+  // "Deutsches Zentrum für Luft- und Raumfahrt" from hiring.cafe. Stripping it
+  // left "dlr" against the long form, so an application already sent (#23) was
+  // re-queued as new on 2026-10-03. Each side is now tried under its main name
+  // AND each parenthetical; the title must still match for a duplicate.
+  for (const x of companyDupAliases(a)) {
+    for (const y of companyDupAliases(b)) {
+      if (companyKeyMatch(x, y)) return true;
+    }
+  }
+  return false;
+}
+
+function companyDupAliases(raw) {
+  const s = String(raw ?? '');
+  const inner = [...s.matchAll(/\(([^)]*)\)/g)].map((m) => m[1]);
+  return [s, ...inner].filter((v) => normalizeCompanyForDup(v));
+}
+
+function companyKeyMatch(a, b) {
   const ta = normalizeCompanyForDup(a).split(' ').filter(Boolean);
   const tb = normalizeCompanyForDup(b).split(' ').filter(Boolean);
   const ka = ta.join('');
@@ -785,7 +807,9 @@ silently. Queues only; never evaluates or submits.`);
     },
   );
 
-  const today = new Date().toISOString().slice(0, 10);
+  // The LOCAL day, like every other dated writer (#3070): between 00:00 and
+  // 02:00 CEST the UTC day is still yesterday.
+  const today = localToday();
   const rows = queued.map((o) => renderRow(o, source, today));
   const queryYield = computeQueryYield(offers, { queued, duplicates, duplicateTitle });
 
@@ -836,29 +860,34 @@ silently. Queues only; never evaluates or submits.`);
     allowListing,
     allowTitleDups,
     dryRun: Boolean(values['dry-run']),
-    rows: rows.slice(0, 20),
+    // Every queued row. Capping this at 20 (with `queued` still the full count)
+    // made a caller that builds its next step from `rows` silently drop the
+    // 21st+ lead — 2 of 22 Apify leads on 2026-10-03 were caught only later.
+    rows,
     invalidReasons: invalid.slice(0, 5).map((i) => i.reason),
     rejectedReasons: rejected.map((r) => `${r.company || '?'} — ${r.url} — ${r.reason}`),
     duplicateIdReasons: duplicateIds.map((r) => `${r.company || '?'} — ${r.url} — ${r.reason}`),
     duplicateTitleReasons: duplicateTitle.map((r) => `${r.company || '?'} | ${r.title || '?'} — ${r.reason}`),
   }, null, 2));
 
+  // Human-readable notes go to stderr: stdout is the JSON summary above, and a
+  // trailing text block made `ingest-jobs … | JSON.parse` fail (2026-10-03).
   if (rejected.length) {
-    console.log(`\n${rejected.length} row(s) rejected as non-postings (listing/search pages, placeholder companies, aggregator content):`);
-    for (const r of rejected) console.log(`  - ${r.company || '?'} | ${r.url} | ${r.reason}`);
-    if (!allowListing) console.log('  Pass --allow-listing to let listing-page URLs through deliberately.');
+    console.error(`\n${rejected.length} row(s) rejected as non-postings (listing/search pages, placeholder companies, aggregator content):`);
+    for (const r of rejected) console.error(`  - ${r.company || '?'} | ${r.url} | ${r.reason}`);
+    if (!allowListing) console.error('  Pass --allow-listing to let listing-page URLs through deliberately.');
   }
   if (duplicateIds.length) {
-    console.log(`\n${duplicateIds.length} row(s) rejected as an ambiguous duplicate posting ID (same ID, different companies, unverifiable):`);
-    for (const r of duplicateIds) console.log(`  - ${r.company || '?'} | ${r.url} | ${r.reason}`);
+    console.error(`\n${duplicateIds.length} row(s) rejected as an ambiguous duplicate posting ID (same ID, different companies, unverifiable):`);
+    for (const r of duplicateIds) console.error(`  - ${r.company || '?'} | ${r.url} | ${r.reason}`);
   }
   if (duplicateTitle.length) {
-    console.log(`\n${duplicateTitle.length} row(s) skipped as a company+title duplicate of an existing tracker/pipeline/scan-history row:`);
-    for (const r of duplicateTitle) console.log(`  - ${r.company || '?'} | ${r.title || '?'} | ${r.url} | ${r.reason}`);
-    if (!allowTitleDups) console.log('  Pass --allow-title-dups to queue these anyway.');
+    console.error(`\n${duplicateTitle.length} row(s) skipped as a company+title duplicate of an existing tracker/pipeline/scan-history row:`);
+    for (const r of duplicateTitle) console.error(`  - ${r.company || '?'} | ${r.title || '?'} | ${r.url} | ${r.reason}`);
+    if (!allowTitleDups) console.error('  Pass --allow-title-dups to queue these anyway.');
   }
 
-  console.log('\nQueued only — nothing evaluated, nothing submitted. Next: /career-ops pipeline');
+  console.error('\nQueued only — nothing evaluated, nothing submitted. Next: /career-ops pipeline');
 }
 
 if (isMainModule(import.meta.url)) {

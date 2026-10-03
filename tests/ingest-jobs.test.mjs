@@ -16,7 +16,7 @@
 // NOTE: no process.exit() anywhere — test-all.mjs runs discovered suites
 // in-process and greps for it.
 import { pass, fail, ROOT, NODE } from './helpers.mjs';
-import { execFileSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -28,14 +28,17 @@ const SCRIPT = join(ROOT, 'ingest-jobs.mjs');
 
 function cli(args, env = {}) {
   try {
-    const stdout = execFileSync(NODE, [SCRIPT, ...args], {
+    // spawnSync, not execFileSync: the human-readable notes are on stderr, and
+    // execFileSync discards stderr on a zero exit.
+    const r = spawnSync(NODE, [SCRIPT, ...args], {
       cwd: ROOT,
       encoding: 'utf-8',
       timeout: 30000,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...env },
     });
-    return { code: 0, stdout, stderr: '' };
+    if (r.error) throw r.error;
+    return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
   } catch (e) {
     return {
       code: e?.status ?? null,
@@ -319,12 +322,12 @@ try {
   } else {
     fail(`rejectedReasons missing or wrong length: ${JSON.stringify(parsed?.rejectedReasons)}`);
   }
-  if (/rejected as non-postings/.test(run1.stdout) && /founditgulf\.com/.test(run1.stdout)) {
+  if (/rejected as non-postings/.test(run1.stderr) && /founditgulf\.com/.test(run1.stderr)) {
     pass('the human-readable section names the rejected URLs, not just a summary count');
   } else {
     fail('the CLI did not print a human-readable rejection listing');
   }
-  if (/--allow-listing/.test(run1.stdout)) {
+  if (/--allow-listing/.test(run1.stderr)) {
     pass('the CLI mentions --allow-listing as the override for listing-page rejections');
   } else {
     fail('the CLI output does not mention --allow-listing');
@@ -499,6 +502,21 @@ try {
       pass('companyDupMatch folds a GmbH legal suffix and tolerates a trailing descriptor via whole-token prefix');
     } else {
       fail('companyDupMatch did not equate "CHECK24" with "CHECK24 Services Personal GmbH"');
+    }
+    // 2026-10-03: tracker row #23 (Applied) read "DLR (Deutsches Zentrum fuer
+    // Luft- und Raumfahrt e.V.)"; hiring.cafe sent "Deutsches Zentrum für Luft-
+    // und Raumfahrt". Dropping the parenthetical left "dlr" vs the long form,
+    // and the applied-to posting was re-queued as new.
+    if (companyDupMatch('DLR (Deutsches Zentrum fuer Luft- und Raumfahrt e.V.)', 'Deutsches Zentrum für Luft- und Raumfahrt')
+      && companyDupMatch('Deutsches Zentrum für Luft- und Raumfahrt (DLR)', 'DLR')) {
+      pass('companyDupMatch treats a parenthetical as an alias of the employer, in either position');
+    } else {
+      fail('companyDupMatch missed the DLR long-form/acronym pair');
+    }
+    if (!companyDupMatch('Acme (Germany)', 'Beta (Austria)')) {
+      pass('two different employers with unrelated parentheticals still do not match');
+    } else {
+      fail('parenthetical aliases matched two unrelated employers');
     }
     if (companyDupMatch('SUXXEED Sales for your Success GmbH', 'SUXXEED')) {
       pass('companyDupMatch is direction-independent');

@@ -111,6 +111,22 @@ try {
   check('a second ingest of the same offers records no further scan-history rows',
     again.json?.added === 0 && !('sourced' in again.json) && readFileSync(p.scanHistory, 'utf-8') === before, JSON.stringify(again.json));
 
+  // Wave timing: an ingest only knows when the wave ENDED. Without --started the
+  // duration is unknown (null start), never a fabricated ~1 ms.
+  {
+    const waves = JSON.parse(readFileSync(p.state, 'utf-8')).waves;
+    check('an ingest without --started records no start time (duration unknown, not ~0)',
+      waves[0].started_at === null && typeof waves[0].finished_at === 'string', JSON.stringify(waves[0]));
+    check('the ingest log line leads with the strategy, so run-retro can name the wave',
+      /ingest · wave=1 · .*· (portals|manual|[a-z-]+) wave=1 found=4 new=4/.test(readFileSync(p.runLog, 'utf-8')),
+      readFileSync(p.runLog, 'utf-8').split('\n').find((l) => l.includes('ingest')));
+    const timed = loop('ingest', '--file', offersFile, '--started', '2026-10-03T07:00:00.000Z');
+    const last = JSON.parse(readFileSync(p.state, 'utf-8')).waves.at(-1);
+    check('ingest --started <iso> records the real start', timed.status === 0 && last.started_at === '2026-10-03T07:00:00.000Z', JSON.stringify(last));
+    const bad = loop('ingest', '--file', offersFile, '--started', 'yesterday');
+    check('ingest --started with a non-date is refused, not silently dropped', bad.status !== 0 && /--started must be an ISO timestamp/.test(bad.stderr), bad.stderr.trim());
+  }
+
   // ── run-retro attributes them ──────────────────────────────────────────────
   const scanHistoryRows = retro.parseTsv(readFileSync(p.scanHistory, 'utf-8'));
   const t = (ms) => new Date(Date.parse(state.run_id) + ms).toISOString();

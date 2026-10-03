@@ -10,7 +10,7 @@
 import { pass, fail } from './helpers.mjs';
 import {
   selectQueries, isProviderCovered, groupBySite, PROVIDER_COVERED_SITES, collectRecordNames,
-  parseYieldLog, aggregateYield, buildQueryStates, selectIndeedSearches, indeedSearchId,
+  parseYieldLog, aggregateYield, buildQueryStates, selectIndeedSearches, indeedSearchId, recordZeroYieldRuns, toWebSearchCall,
 } from '../websearch-plan.mjs';
 
 console.log('\nWebSearch plan');
@@ -262,4 +262,49 @@ selectQueries([], { lastRun: {} }, {}).length === 0
   withRetired.length === 2
     ? pass('selectIndeedSearches --include-retired brings the retired Indeed pair back')
     : fail(`expected 2 active pairs with includeRetired, got ${withRetired.length}`);
+}
+
+// --- A run that found nothing still counts as a run (2026-10-03). Runs come only
+// from yield rows, and ingest writes a row only for a query that contributed an
+// offer — so the three Indeed searches sat at "0 runs" for passes and could never
+// retire. --record now logs a zero row for whatever ingest did not log today.
+{
+  const { mkdtempSync, writeFileSync, readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const box = mkdtempSync(join(tmpdir(), 'cops-ws-zero-'));
+  const path = join(box, 'websearch-yield.tsv');
+  const now = new Date('2026-10-03T10:00:00Z');
+  writeFileSync(path, '2026-10-03\tindeed:Werkstudent Data@Erlangen\twebsearch\t6\t1\t3\t2\n2026-09-29\tLinkedIn A\twebsearch\t3\t0\t3\t0\n', 'utf-8');
+  const written = recordZeroYieldRuns(['indeed:Werkstudent Data@Erlangen', 'indeed:Werkstudent KI@Nürnberg', 'LinkedIn A'], { path, now });
+  (written.length === 2 && written.includes('indeed:Werkstudent KI@Nürnberg') && written.includes('LinkedIn A'))
+    ? pass('recordZeroYieldRuns logs a zero row only for queries ingest did not log today')
+    : fail(`wrong zero rows: ${JSON.stringify(written)}`);
+  const m = aggregateYield(parseYieldLog(readFileSync(path, 'utf-8')));
+  (m.get('indeed:Werkstudent Data@Erlangen').runs === 1 && m.get('indeed:Werkstudent KI@Nürnberg').runs === 1 && m.get('LinkedIn A').runs === 2)
+    ? pass('a zero-yield run counts toward runs, so a dead query can finally retire; a yielding one is not double-counted')
+    : fail(`runs wrong: ${JSON.stringify([...m])}`);
+  const rows = parseYieldLog(readFileSync(path, 'utf-8'));
+  rows.find((r) => r.query === 'indeed:Werkstudent KI@Nürnberg')?.source === 'indeed'
+    ? pass('a zero row for an Indeed search is labelled source=indeed')
+    : fail(`source wrong: ${JSON.stringify(rows)}`);
+  recordZeroYieldRuns(['LinkedIn A'], { path, now }).length === 0
+    ? pass('recording the same query twice on one day writes nothing more')
+    : fail('second --record on the same day double-counted');
+}
+
+// --- site: → allowed_domains (2026-10-03): the WebSearch tool ignores inline site:.
+{
+  const a = toWebSearchCall('site:linkedin.com/jobs ("Werkstudent" OR "Praktikum") Erlangen');
+  (a.query === '("Werkstudent" OR "Praktikum") Erlangen' && JSON.stringify(a.allowedDomains) === '["linkedin.com"]')
+    ? pass('toWebSearchCall strips site: and hands its host over as allowed_domains (path dropped)')
+    : fail(`toWebSearchCall wrong: ${JSON.stringify(a)}`);
+  const b = toWebSearchCall('site:www.jobs.bosch.com "Werkstudent" OR site:wellfound.com "AI"');
+  JSON.stringify(b.allowedDomains) === '["jobs.bosch.com","wellfound.com"]' && !/site:/.test(b.query)
+    ? pass('toWebSearchCall handles several site: terms and drops a www. prefix')
+    : fail(`multi-site wrong: ${JSON.stringify(b)}`);
+  const c = toWebSearchCall('"Google" ("Student Researcher") Munich 2026');
+  c.allowedDomains.length === 0 && c.query === '"Google" ("Student Researcher") Munich 2026'
+    ? pass('a query with no site: passes through unchanged with no domain filter')
+    : fail(`no-site wrong: ${JSON.stringify(c)}`);
 }

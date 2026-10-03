@@ -262,7 +262,12 @@ function prefilterReject(state) {
       r = rankEntry({ title: c.title || '', location: c.location || '', url: c.url || '', company: c.company || '' });
     } catch { continue; }          // never let a ranking error drop a posting
     if (r.bucket !== 'skip') continue;
-    c.score = Number.isFinite(r.score) ? r.score : 1.0;
+    // r.score is the prefilter's LOCATION reach score (Erlangen 5.0, Munich
+    // 4.0), not a fit score. Stored as `score` it read as "triage 4.0/5" for a
+    // posting dropped on its title, and run-retro counted those as qualifiers.
+    // Keep it under its own name; the triage score of a title-only drop is 1.0.
+    c.score = 1.0;
+    if (Number.isFinite(r.score)) c.reachScore = r.score;
     c.verdict = 'rejected';
     c.reason = `zero-token prefilter (title + location only): ${r.reason}`;
     c.prefiltered = true;
@@ -483,10 +488,21 @@ export async function cmdIngest(flags) {
     Object.values(state.candidates).filter((c) => !knownBefore.has(c.key)));
   const prefiltered = prefilterReject(state);
   if (prefiltered) console.error(`  pre-triage: ${prefiltered} posting(s) rejected on title + location alone (zero tokens).`);
+  // The offers were gathered BEFORE this call (a hand-run strategy, a web
+  // sweep), so "now" is only when the wave ended. Stamping it as the start too
+  // gave every ingested wave a ~1 ms duration, and run-retro.tsv reported a
+  // 40-minute ATS sweep as instantaneous (2026-09-29 and 2026-10-01 passes).
+  // `--started <iso>` supplies the real start; without it the duration is
+  // unknown (null), which run-retro leaves blank rather than inventing.
+  const startedFlag = typeof flags.started === 'string' ? new Date(flags.started) : null;
+  const startedAt = startedFlag && !Number.isNaN(startedFlag.getTime()) ? startedFlag.toISOString() : null;
+  if (flags.started !== undefined && !startedAt) {
+    throw new Error(`ingest --started must be an ISO timestamp (got ${JSON.stringify(flags.started)}).`);
+  }
   state.waves.push({
     n: wave,
     strategy: strategy ? strategy.id : 'manual',
-    started_at: new Date().toISOString(),
+    started_at: startedAt,
     finished_at: new Date().toISOString(),
     exit_code: 0,
     found: offers.length,
@@ -494,7 +510,10 @@ export async function cmdIngest(flags) {
     duplicate: counts.duplicate,
   });
   saveState(state);
-  log(state, 'ingest', `wave=${wave} found=${offers.length} new=${counts.added}${attributed ? ` sourced=${attributed}` : ''}`);
+  // Strategy first, like the 'wave' event's "portals exit=0 found=…" — run-retro
+  // reads the leading token as the strategy and treats a leading `wave=N` as
+  // unrecorded, so the old "wave=2 found=21" line lost the strategy name.
+  log(state, 'ingest', `${strategy ? strategy.id : 'manual'} wave=${wave} found=${offers.length} new=${counts.added}${attributed ? ` sourced=${attributed}` : ''}`);
   return { wave, ...counts, ...(attributed ? { sourced: attributed } : {}), next: decideNextAction(state) };
 }
 
@@ -988,7 +1007,7 @@ const HELP = `scan-loop.mjs — loop controller for /career-ops scan
   start [--target N] [--min-score X] [--reset]   begin a run
   next                                            what to do next (JSON)
   wave [--dry-run]                                run the next scan rung
-  ingest --file <offers.json>                     hand-scanned offers in
+  ingest --file <offers.json> [--started <iso>]   hand-scanned offers in (--started: when the wave began)
   record --file <scores.json>                     feed triage scores back
   finish [--force]                                promote to shortlist + tracker
   status [--summary]                              current run state

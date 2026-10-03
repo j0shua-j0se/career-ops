@@ -537,6 +537,53 @@ test('fetchOne: an API description under MIN_OK_CHARS is not ok — it falls thr
   }
 });
 
+test('fetchOne: a shell read before the SPA rendered waits once and re-reads the full JD (jobs.infineon.com, 2026-10-03)', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    const finalUrl = 'https://jobs.infineon.com/careers/job/563808971182692-working-student';
+    const shell = 'Skip to main content Job Search My Activity Profile Careers FAQs Benefits Join Talent Network English '
+      + 'Single Position #WeAreIn Usage of this website is subject to our Usage Terms Imprint Contact Glossary Use of cookies '
+      + 'This enables us to optimize and personalize our website for you.';
+    const full = `${shell}\nWorking Student Project Coordinator (f/m/div) Munich. Your tasks: coordinate project plans. `
+      + 'Requirements: enrolled student, Python, English. '.repeat(20);
+    const page = fakeActivePage({ bodyText: shell, applyControls: ['Apply Now'], finalUrl });
+    let waited = 0;
+    page.waitForFunction = async () => { waited++; page.evaluate = async (fn) => {
+      const src = fn.toString();
+      if (src.includes('querySelectorAll')) return ['Apply Now'];
+      if (src.includes('preferredText')) return { preferredText: '', bodyText: full };
+      return full;
+    }; };
+
+    const result = await fetchOne(
+      { key: 'k', url: finalUrl, company: 'Infineon', title: 'Working Student', location: 'Munich' },
+      { newPage: async () => page, checkRobotsFn: async () => ({ retry: true }), checkLivenessViaApiFn: apiInconclusive },
+    );
+    assert.equal(waited, 1);
+    assert.equal(result.status, 'ok');
+    assert.match(result.text, /Your tasks: coordinate project plans/);
+  } finally {
+    restoreDns();
+  }
+});
+
+test('fetchOne: a short page that never grows keeps its verdict after the bounded render wait', async () => {
+  const restoreDns = setHostResolver(async () => ['93.184.216.34']);
+  try {
+    const finalUrl = 'https://careers.example.com/job/1';
+    const page = fakeActivePage({ bodyText: 'a'.repeat(MIN_OK_CHARS), applyControls: ['Apply'], finalUrl });
+    page.waitForFunction = async () => { throw new Error('Timeout 6000ms exceeded'); };
+    const result = await fetchOne(
+      { key: 'k', url: finalUrl, company: 'X', title: 'Y', location: 'Z' },
+      { newPage: async () => page, checkRobotsFn: async () => ({ retry: true }), checkLivenessViaApiFn: apiInconclusive },
+    );
+    assert.equal(result.status, 'ok');
+    assert.equal(result.chars, MIN_OK_CHARS);
+  } finally {
+    restoreDns();
+  }
+});
+
 test('fetchOne: the MIN_OK_CHARS boundary — 25 chars is error/empty-text, exactly MIN_OK_CHARS is ok', async () => {
   const restoreDns = setHostResolver(async () => ['93.184.216.34']);
   try {
@@ -1040,4 +1087,17 @@ test('splitGatedResults: a pipe in company/title is written as "/" so the line i
   // Exactly five cells: verdict, company, role, score, reason.
   assert.equal(line.replace(/^TRIAGE:\s*/, '').split('|').length, 5);
   assert.equal(parseTriageLine(line).role, 'Werkstudent Data Enablement (m/w/d)');
+});
+
+test('htmlToText: an entity-encoded description (Greenhouse API content) comes out as plain text, not markup (2026-10-03)', () => {
+  const encoded = '&lt;p&gt;&lt;strong&gt;&lt;span data-contrast=&quot;none&quot;&gt;Mission Brief&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;&lt;ul&gt;&lt;li&gt;Python&lt;/li&gt;&lt;/ul&gt;';
+  const text = htmlToText(encoded);
+  assert.doesNotMatch(text, /<\/?[a-z]/i);
+  assert.match(text, /Mission Brief/);
+  assert.match(text, /- Python/);
+});
+
+test('htmlToText: literal angle brackets in prose survive (no infinite re-decode)', () => {
+  const text = htmlToText('<p>Compare a &lt; b and b &gt; c</p>');
+  assert.match(text, /a < b and b > c/);
 });

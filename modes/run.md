@@ -101,9 +101,12 @@ node websearch-plan.mjs --summary
 It picks up to **6** `site:` queries from `portals.yml` → `search_queries`:
 never-run first, then queries that have produced a new lead before, then by
 staleness. A query with 3+ logged runs and 0 new leads is **retired** (listed,
-not run; `--include-retired` restores it). Run each with WebSearch and collect
-`{url, company, title, location, query}` per hit — `query` is the exact name
-`--summary` printed. For Indeed, run only the (search, location) pairs listed
+not run; `--include-retired` restores it). Run each with WebSearch **using the
+`query` and `allowed_domains` that `--summary` prints under it** — the tool
+largely ignores an inline `site:` operator (2026-10-03: `site:` queries returned
+other boards; the same keywords with `allowed_domains` returned only the named
+site). Collect `{url, company, title, location, query}` per hit — `query` is the
+exact name `--summary` printed. For Indeed, run only the (search, location) pairs listed
 under "Indeed searches", tagging each offer `query: "indeed:<search>@<location>"`.
 The `query` tag is what logs yield to `data/websearch-yield.tsv`; an untagged
 offer still ingests but teaches the rotation nothing. Then:
@@ -112,7 +115,10 @@ offer still ingests but teaches the rotation nothing. Then:
 node ingest-jobs.mjs --file offers.json --source websearch
 ```
 
-Then `node websearch-plan.mjs --record "<name>" ...` so the next pass rotates on,
+Then `node websearch-plan.mjs --record "<name>" ...` — AFTER the ingest, and for
+every query and Indeed pair you ran, including ones that found nothing: it logs
+a zero-yield run for any query the ingest did not, which is what lets a dead
+query retire — so the next pass rotates on,
 and `node run-all.mjs note-sources --note "..."` to complete the stage.
 
 **Why a search engine and not a fetcher.** LinkedIn (`User-agent: * → Disallow:

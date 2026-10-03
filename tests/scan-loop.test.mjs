@@ -37,6 +37,11 @@ const paths = {
   additions: join(box, 'batch', 'tracker-additions'),
   batchState: join(box, 'batch', 'batch-state.tsv'),
   reports: join(box, 'reports'),
+  // Without these two, `finish` appended the prefiltered fixture
+  // (boards.greenhouse.io/acme/jobs/1) to the REAL data/discard.log on every
+  // suite run — seven lines by 2026-10-03.
+  discardLog: join(box, 'data', 'discard.log'),
+  scanHistory: join(box, 'data', 'scan-history.tsv'),
 };
 
 mkdirSync(join(box, 'data'), { recursive: true });
@@ -72,6 +77,8 @@ const env = {
   CAREER_OPS_ADDITIONS: paths.additions,
   CAREER_OPS_BATCH_STATE: paths.batchState,
   CAREER_OPS_REPORTS_DIR: paths.reports,
+  CAREER_OPS_DISCARD_LOG: paths.discardLog,
+  CAREER_OPS_SCAN_HISTORY: paths.scanHistory,
 };
 
 function loop(...args) {

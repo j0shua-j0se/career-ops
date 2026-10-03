@@ -263,6 +263,12 @@ export function htmlToText(html) {
     .replace(LI_OPEN_TAG, '\n- ')
     .replace(/<[^>]+>/g, ''); // strip every remaining tag
   text = decodeHtmlEntities(text);
+  // An entity-ENCODED description ("&lt;p&gt;…", the Greenhouse job-board API's
+  // `content` field) has no tags to strip until it is decoded, so one pass left
+  // literal "<p><span data-ccp-props=…>" markup in the text. On 2026-10-03 that
+  // markup filled most of an Isar Aerospace JD's 3,500-character budget and the
+  // zero-token German gate quoted a span tag. One more pass when tags survived.
+  if (/<\/?[a-z][^>]*>/i.test(text) && text !== html) return htmlToText(text);
   return text;
 }
 
@@ -659,9 +665,43 @@ export async function fetchPlainJd(url, { fetchTextFn = fetchText, maxChars = DE
 // An `ok` result must carry enough text to triage from. Below this a page
 // delivered a shell, a cookie stub or a title line, not a job description; the
 // worker's fallback rule (WebFetch/browser) only runs for non-`ok` results.
+// Upper bound on the sequential error retry in main() (see there).
+const MAX_SEQUENTIAL_RETRIES = 40;
+
 export const MIN_OK_CHARS = 200;
 export const EMPTY_TEXT_CODE = 'empty-text';
 const isUsableJdText = (text) => typeof text === 'string' && text.length >= MIN_OK_CHARS;
+
+// A page read before its SPA has rendered the description: short, and none of
+// the section words a JD carries. On the 2026-10-03 pass jobs.infineon.com
+// returned the full JD (3.5k chars) for some postings and only the site chrome
+// (436-538 chars: nav, cookie notice) for others from the same board in the
+// same run — all of them live. The chrome passed MIN_OK_CHARS, went to the
+// triage worker as `ok`, and was recorded SKIP "JD text not captured".
+const SHELL_MAX_CHARS = 1000;
+const RENDER_WAIT_MS = 6000;
+export const looksLikeShell = (text) => typeof text === 'string'
+  && text.length < SHELL_MAX_CHARS && !JD_SECTION_RE.test(text);
+
+/**
+ * Give a shell page one bounded chance to finish rendering, then re-read it.
+ * Returns the new text only when the body actually grew; null otherwise, so a
+ * genuinely short page costs at most RENDER_WAIT_MS and keeps its verdict.
+ */
+async function waitForRenderedJd(page, prevLength) {
+  if (typeof page?.waitForFunction !== 'function') return null;
+  try {
+    await page.waitForFunction(
+      (min) => (document.body?.innerText ?? '').length > min,
+      prevLength + 500,
+      { timeout: RENDER_WAIT_MS },
+    );
+  } catch {
+    return null; // never grew — a short page, not a slow one
+  }
+  const text = await extractPageText(page);
+  return text.length > prevLength ? text : null;
+}
 
 /**
  * Fetch and compact one entry's JD.
@@ -792,7 +832,10 @@ export async function fetchOne(entry, {
     // worker then triaged as if it were a posting), so it is reported as
     // `error`/`empty-text` and the worker's WebFetch/browser fallback runs
     // instead. A truly empty extraction keeps its own `no_content` code.
-    const rawText = await extractPageText(page);
+    let rawText = await extractPageText(page);
+    if (looksLikeShell(compactJdText(rawText, { maxChars }))) {
+      rawText = (await waitForRenderedJd(page, rawText.length)) ?? rawText;
+    }
     const compact = compactJdText(rawText, { maxChars });
     if (!compact) {
       return { ...base, status: 'error', liveness: 'no_content', chars: 0, text: '' };
@@ -876,7 +919,7 @@ async function main() {
   const browser = await chromium.launch({ headless: true });
   let results;
   try {
-    results = await runPool(batch, async (entry) => {
+    const fetchEntry = async (entry) => {
       const fallback = () => ({
         key: entry.key ?? entry.url,
         url: entry.url,
@@ -901,7 +944,28 @@ async function main() {
       } finally {
         if (createdPage) await createdPage.context().close().catch(() => {});
       }
-    }, concurrency);
+    };
+    results = await runPool(batch, fetchEntry, concurrency);
+
+    // One sequential retry for entries that ERRORED under parallel load. On the
+    // 2026-10-03 pass, 19 of 280 postings errored at --concurrency 12 and went
+    // to triage title-only; four Siemens rows were then promoted on a
+    // priority-override PASS — and a sequential re-fetch showed all four
+    // demanding fluent German, a zero-token verdict. A retry on a quiet line is
+    // seconds; a wrong promotion is a full evaluation. Capped so a dead host
+    // cannot stretch a run.
+    const retryIdx = results
+      .map((r, i) => (r?.status === 'error' ? i : -1))
+      .filter((i) => i !== -1)
+      .slice(0, MAX_SEQUENTIAL_RETRIES);
+    if (concurrency > 1 && retryIdx.length) {
+      let recovered = 0;
+      for (const i of retryIdx) {
+        const again = await fetchEntry(batch[i]);
+        if (again?.status && again.status !== 'error') { results[i] = again; recovered++; }
+      }
+      console.log(`fetch-jds: retried ${retryIdx.length} errored URL(s) sequentially — ${recovered} recovered.`);
+    }
   } finally {
     await browser.close();
   }

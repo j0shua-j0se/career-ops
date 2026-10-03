@@ -46,12 +46,13 @@
  *   node websearch-plan.mjs --record q1 q2     # mark queries as run (by name)
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as yaml from 'js-yaml';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { localToday } from './lib/local-today.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CAREER_OPS = getCareerOpsRoot();
@@ -169,6 +170,34 @@ export function aggregateYield(rows) {
   return m;
 }
 
+/**
+ * Log a zero-yield run for every recorded query that ingest-jobs.mjs did not
+ * log today. Runs are counted ONLY from yield rows, and ingest writes a row only
+ * for a query that contributed at least one offer — so a query that found
+ * nothing (or whose hits were all dropped before ingest) never counted as run,
+ * stayed at "0 runs" forever, and could never reach RETIRE_AFTER_RUNS. The
+ * three Indeed searches sat at "0 runs, 0 new" after several passes for exactly
+ * this reason (2026-10-03). Run `--record` AFTER ingest, as the plan says, so a
+ * query that did yield is not logged twice.
+ *
+ * @param {string[]} names
+ * @param {{path?: string, now?: Date}} [opts]
+ * @returns {string[]} the names a zero row was written for
+ */
+export function recordZeroYieldRuns(names, { path = YIELD_PATH, now = new Date() } = {}) {
+  const existing = existsSync(path) ? parseYieldLog(readFileSync(path, 'utf-8')) : [];
+  // ingest-jobs.mjs dates its rows in UTC; accept the local day too.
+  const days = new Set([now.toISOString().slice(0, 10), localToday(now)]);
+  const loggedToday = new Set(existing.filter((r) => days.has(r.date)).map((r) => r.query));
+  const missing = [...new Set(names)].filter((n) => !loggedToday.has(n));
+  if (missing.length === 0) return [];
+  const sourceOf = (n) => (n.startsWith('indeed:') ? 'indeed' : n.startsWith('apify:') ? 'apify' : 'websearch');
+  const cell = (v) => String(v).replace(/[\t\r\n]+/g, ' ').trim();
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, missing.map((n) => [localToday(now), cell(n), sourceOf(n), 0, 0, 0, 0].join('\t') + '\n').join(''), 'utf-8');
+  return missing;
+}
+
 export function loadYieldMap(path = YIELD_PATH) {
   if (!existsSync(path)) return new Map();
   try {
@@ -281,6 +310,31 @@ export function selectIndeedSearches(list, yieldMap = new Map(), { includeRetire
   };
 }
 
+/**
+ * Turn a configured `site:` query into the WebSearch tool's own form.
+ *
+ * The WebSearch tool largely ignores an inline `site:` operator: on the
+ * 2026-10-03 pass, `site:linkedin.com/jobs …`, `site:wellfound.com …` and
+ * `site:jobs.sequoiacap.com …` returned StepStone, Indeed and talent.com pages
+ * and not one result from the named site, while the same keywords with
+ * `allowed_domains: ["linkedin.com"]` / `["wellfound.com"]` returned only that
+ * site's job pages. So: strip every `site:` term and hand its host over as a
+ * domain filter. A path (`linkedin.com/jobs`) cannot be expressed as a domain
+ * and is dropped — the keywords already say "jobs".
+ *
+ * @param {string} query
+ * @returns {{query: string, allowedDomains: string[]}}
+ */
+export function toWebSearchCall(query) {
+  const allowedDomains = [];
+  const stripped = String(query ?? '').replace(/(^|\s)site:([^\s)"']+)/gi, (_, lead, target) => {
+    const host = target.replace(/^https?:\/\//i, '').split('/')[0].replace(/^www\./i, '').toLowerCase();
+    if (host && !allowedDomains.includes(host)) allowedDomains.push(host);
+    return lead;
+  }).replace(/\s+/g, ' ').trim();
+  return { query: stripped, allowedDomains };
+}
+
 /** Group selected queries by the site they target, purely for readable output. */
 export function groupBySite(selected) {
   const groups = new Map();
@@ -335,7 +389,12 @@ function main(argv) {
     const configured = new Set((portals.search_queries ?? [])
       .filter((q) => q && typeof q.name === 'string')
       .map((q) => q.name));
-    const unknown = names.filter((n) => !configured.has(n));
+    // Indeed (`indeed:<search>@<location>`) and Apify (`apify:…`) runs are
+    // tracked by the same yield log, so they can be recorded the same way.
+    const recIndeedList = Array.isArray(portals.indeed_searches) && portals.indeed_searches.length
+      ? portals.indeed_searches : DEFAULT_INDEED_SEARCHES;
+    for (const e of recIndeedList) if (e && e.search && e.location) configured.add(indeedSearchId(e));
+    const unknown = names.filter((n) => !configured.has(n) && !n.startsWith('apify:'));
     if (unknown.length > 0) {
       console.error(`websearch-plan: --record got ${unknown.length} name(s) that match no query in portals.yml → search_queries:`);
       for (const n of unknown) console.error(`  • ${JSON.stringify(n)}`);
@@ -346,7 +405,9 @@ function main(argv) {
     const now = new Date().toISOString();
     for (const n of names) state.lastRun[n] = now;
     saveState(state);
-    console.log(`Recorded ${names.length} query/queries as run at ${now}.`);
+    const zero = recordZeroYieldRuns(names);
+    console.log(`Recorded ${names.length} query/queries as run at ${now}.`
+      + (zero.length ? ` Logged ${zero.length} zero-yield run(s) ingest had not logged today: ${zero.join('; ')}.` : ''));
     return;
   }
 
@@ -368,6 +429,8 @@ function main(argv) {
       console.log(`  ── ${site}`);
       for (const q of items) {
         console.log(`     ${q.lastRun ? `last run ${q.lastRun.slice(0, 10)}` : 'never run'} · ${q.name}`);
+        const t = toWebSearchCall(q.query);
+        console.log(`        query: ${t.query}${t.allowedDomains.length ? `  · allowed_domains: ${JSON.stringify(t.allowedDomains)}` : ''}`);
       }
     }
     if (retiredQueries.length) {
@@ -391,7 +454,7 @@ function main(argv) {
 
   console.log(JSON.stringify({
     total,
-    selected: selected.map(({ name, query, lastRun }) => ({ name, query, lastRun })),
+    selected: selected.map(({ name, query, lastRun }) => ({ name, query, lastRun, webSearch: toWebSearchCall(query) })),
     retired: retiredQueries.map((q) => q.name),
     indeedSearches: indeed,
     ingest: 'node ingest-jobs.mjs --file offers.json --source websearch',
