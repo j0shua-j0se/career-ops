@@ -554,6 +554,7 @@ if (dupeNums === 0) ok('No duplicate tracker numbers');
 // already terminal; failing the whole health check for them would just
 // train the user to ignore it.
 let missingSummary = 0;
+let unscoredStubs = 0;
 for (const name of reportFiles) {
   let reportContent;
   try {
@@ -575,12 +576,22 @@ for (const name of reportFiles) {
     }
   }
   const hasScore = parsed && parsed.score !== undefined && parsed.score !== null && String(parsed.score).trim() !== '';
+  // A liveness-gate stub (posting dead before Block A) declares itself:
+  // `score: null` written on purpose, plus legitimacy_tier "not_evaluated".
+  // There is no score to recover, so warning on it every run is noise (three
+  // Allianz stubs from 2026-09-02 were the only warnings for a month).
+  if (!hasScore && parsed && parsed.score === null && parsed.legitimacy_tier === 'not_evaluated') {
+    unscoredStubs++;
+    continue;
+  }
   if (!hasScore) {
     warn(`No usable Machine Summary (score: missing/unparseable) — invisible to analyze-patterns.mjs, upskill.mjs and salary-gap.mjs: reports/${name}`);
     missingSummary++;
   }
 }
-if (missingSummary === 0) ok('Every report has a parseable Machine Summary with a score');
+if (missingSummary === 0) {
+  ok(`Every report has a parseable Machine Summary with a score${unscoredStubs ? ` (${unscoredStubs} dead-posting stub(s) deliberately unscored)` : ''}`);
+}
 
 // --- Check 18: employer-name variants, shared req IDs, shared URLs ---
 // Check 9 above catches two reports for the same company+role only when the

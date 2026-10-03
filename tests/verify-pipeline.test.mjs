@@ -139,6 +139,24 @@ try {
   check('the real report alongside the sentinel still passes cleanly',
     out.stdout.includes('Every report has a parseable Machine Summary with a score'), out.stdout);
   check('sentinel fixture stays exit 0', out.status === 0, `status=${out.status}`);
+
+  // ── 7. A dead-posting stub (score: null + not_evaluated) is deliberate ────
+  writeFileSync(join(reportsDir, '008-allianz-2026-09-02.md'),
+    '# Evaluation: Allianz — Werkstudent KI\n\n' +
+    '## Machine Summary\n\n```yaml\ncompany: "Allianz"\nrole: "Werkstudent KI"\nscore: null\nlegitimacy_tier: "not_evaluated"\n```\n');
+  writeFileSync(join(reportsDir, '009-oscorp-2026-09-03.md'),
+    '# Evaluation: Oscorp — Analyst\n\n' +
+    '## Machine Summary\n\n```yaml\ncompany: "Oscorp"\nrole: "Analyst"\nscore: null\n```\n');
+  writeTracker(tracker, [
+    '| 7 | 2026-01-09 | Massive Dynamic | Research Scientist | 4.5/5 | Evaluated | ❌ | [7](reports/007-massive-dynamic-2026-01-09.md) | ok |',
+    '| 8 | 2026-09-02 | Allianz | Werkstudent KI | N/A | Discarded | ❌ | [8](reports/008-allianz-2026-09-02.md) | dead |',
+    '| 9 | 2026-09-03 | Oscorp | Analyst | N/A | Discarded | ❌ | [9](reports/009-oscorp-2026-09-03.md) | — |',
+  ]);
+  out = verify(reportsDir, tracker);
+  check('a liveness-gate stub (score: null, legitimacy_tier not_evaluated) is not flagged',
+    !/No usable Machine Summary[^\n]*008-allianz/.test(out.stdout), out.stdout);
+  check('a bare score: null without the stub marker is still flagged',
+    /⚠️[^\n]*No usable Machine Summary[^\n]*009-oscorp/.test(out.stdout), out.stdout);
 } catch (e) {
   fail(`verify-pipeline Machine Summary tests crashed: ${e.message}`);
 } finally {
