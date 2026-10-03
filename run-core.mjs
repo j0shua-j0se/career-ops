@@ -303,6 +303,40 @@ export function triageOnlyRows(rows = []) {
   return out;
 }
 
+/** Rows a scoring-rule change can still lift: open, or skipped below the bar. */
+const RESCORE_STATUSES = new Set(['Evaluated', 'SKIP']);
+
+/**
+ * Rows that a change to the scoring rules may have scored too low.
+ *
+ * A row qualifies when it has a report to re-score from, its status is
+ * Evaluated or SKIP, its score sits within `band` below the kit threshold,
+ * and it was added on or after `since` (older postings have mostly closed).
+ * Highest score first, since those are likeliest to clear the bar.
+ *
+ * Observed 2026-10-03: Infineon "Data Analytics & AI" was discarded at 2.8 on
+ * 1 October and scored 3.8 under the new location rule. Only a manual sweep
+ * caught it. This list makes that sweep part of the pass.
+ *
+ * @param {Array<object>} rows - Parsed tracker rows.
+ * @param {{threshold:number, band?:number, since?:string|null}} opts
+ * @returns {Array<{num:number, company:string, role:string, score:number, status:string, date:string}>}
+ */
+export function rescoreCandidates(rows = [], { threshold, band = 0.6, since = null } = {}) {
+  const out = [];
+  if (!Number.isFinite(threshold)) return out;
+  for (const row of rows) {
+    if (!row || !RESCORE_STATUSES.has(row.status)) continue;
+    if (!/\[.*\]\(.*\)/.test(String(row.report ?? ''))) continue;
+    const score = parseFloat(String(row.score ?? '').replace('/5', ''));
+    if (!Number.isFinite(score) || score >= threshold || score < threshold - band - 1e-9) continue;
+    const date = String(row.date ?? '').trim();
+    if (since && /^\d{4}-\d{2}-\d{2}$/.test(date) && date < since) continue;
+    out.push({ num: row.num, company: row.company, role: row.role, score, status: row.status, date });
+  }
+  return out.sort((a, b) => b.score - a.score || Number(a.num) - Number(b.num));
+}
+
 /**
  * Did this completed loop run belong to an earlier pass?
  *

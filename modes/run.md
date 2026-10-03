@@ -75,6 +75,22 @@ Check `scripts/prescan-status.ps1` or `finished_at` in
 The prescan never evaluates, builds a kit or touches the tracker, so stages 2-4
 are unchanged either way — they just start from more.
 
+## When `start` returns `rescore`
+
+`start` fingerprints the files evaluations are scored against
+(`modes/_brief.md`, `modes/_profile.md`) and compares them with the last pass.
+If either changed, its output carries `rescore.candidates`: open or SKIP rows
+with a report, added in the last 45 days, scoring up to 0.6 below the kit
+threshold. Those are the rows the new rules may lift over the bar. Re-score
+them in stage 2, alongside the inbox: work from each report's archived JD,
+check that the posting is still live, and write the new score as a
+`batch/tracker-additions/` TSV carrying the row's own `num`, report link and
+`url`, so `merge-tracker.mjs` updates the existing row rather than adding one.
+Add `re-scored YYYY-MM-DD: old → new` to its notes, and show the user the
+before/after list. Rows that cross the threshold reach the kits stage like any other. The
+notice is shown once per change; the next `start` takes the new fingerprints
+as its baseline.
+
 ## Stage 1b: the sources the scan loop cannot reach
 
 Several high-value sources have no zero-token HTTP provider and never will. They
@@ -90,6 +106,14 @@ Collect `{url, company, title, location?, postedAt?}` into a JSON array, then:
 ```bash
 node ingest-jobs.mjs --file offers.json --source <label>
 ```
+
+**Search early, ingest late.** The searches in this stage (WebSearch, the
+Indeed MCP, any connector the user has authorised in `modes/_custom.md`) write
+nothing locally; only `ingest-jobs.mjs` / `scan-loop.mjs ingest` does. So
+**start them while scan wave 1 runs** (`scan-loop.mjs wave` in the
+background), hold the results, and ingest once the loop is no longer writing
+its state. On 2026-10-03 the best source of the pass (22 fresh leads in about
+a minute) sat idle behind a 24-minute ATS sweep because it ran last.
 
 **This stage is now enforced AND mechanical.** When the scan loop finishes,
 `run-all.mjs next` returns `scan-agent-sources`. Do this:
@@ -142,7 +166,7 @@ deliberately — the note is the audit trail.
 | **Indeed** | the Indeed MCP `search_jobs` (needs `search`, `location`, `country_code: "DE"`). Not a `providers/` module and never can be — the MCP is a tool only the agent can call, Indeed publishes no public job API, and the RSS feed returns 403. | ✅ found a Siemens Healthineers Werkstudent in Forchheim |
 | **StepStone** | **Automated — no longer a Stage 1b step.** `providers/stepstone.mjs` runs in wave 1 with every other board, shelling out to the `scrapling` CLI (StepStone has no usable API; `/public-api/` is robots-Disallowed and a plain fetch is refused). Needs `scrapling` on PATH. | ✅ 25 cards/page parsed, company + location + date |
 | **BMW** | **Do not scrape it.** `bmwgroup.jobs` runs Akamai Bot Manager: the shell returns 200 but the job-search component never initialises for an automated client, so there is no API call to intercept. Its SuccessFactors instance is the RCM application portal, not the public RMK board `providers/successfactors.mjs` reads. BMW arrives through the **Arbeitsagentur — BMW Group** board instead. | ✅ 16 found, 1 queued |
-| **LinkedIn** | Not supported. Reaching it needs the user's `li_at` session cookie — a credential — and breaches LinkedIn's ToS with real account-restriction risk against a profile that is a live asset in this search. Do not build it without an explicit, informed instruction. | — |
+| **LinkedIn** | No scraper, ever, in this repo. Reaching it directly needs the user's `li_at` session cookie — a credential — and breaches LinkedIn's ToS with real account-restriction risk against a profile that is a live asset in this search. Two routes stay open: the `site:linkedin.com/jobs` WebSearch queries above, and, **only if the user has explicitly authorised it in `modes/_custom.md`**, a login-free actor called through a hosted connector (e.g. the Apify MCP). Our scripts still never contact linkedin.com. | — |
 
 **Arbeitsagentur is the highest-yield source and the least fought-over.** It is
 the federal job database, every German employer posts there as routine, and it

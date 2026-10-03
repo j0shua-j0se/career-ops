@@ -41,12 +41,13 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, ren
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import * as yaml from 'js-yaml';
 
 import {
   STAGES, STAGE_INFO, DEFAULT_RUN_CONFIG,
   resolveRunConfig, newRun, normalizeRun, decideNextStage,
-  currentStage, isFinished, kitCandidates, triageOnlyRows, summarize, renderRunLogEntry,
+  currentStage, isFinished, kitCandidates, triageOnlyRows, rescoreCandidates, summarize, renderRunLogEntry,
 } from './run-core.mjs';
 import { parsePipeline } from './triage-prefilter.mjs';
 import { buildGmailQuery } from './gmail-sweep.mjs';
@@ -65,6 +66,14 @@ const RUN_LOG_PATH = process.env.CAREER_OPS_RUN_LOG || join(CAREER_OPS, 'data', 
 const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE_FILE || join(CAREER_OPS, 'data', 'pipeline.md');
 const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || join(CAREER_OPS, 'config', 'profile.yml');
 const TRACKER_PATH = resolveTrackerPathForWrite(CAREER_OPS);
+// The files evaluations are scored against: triage reads _brief.md and the
+// A-G evaluation reads _profile.md. Their fingerprints from the last `start`
+// sit next to the run state, so a test that redirects the state also
+// redirects this file.
+const SCORING_INPUTS = ['modes/_brief.md', 'modes/_profile.md'];
+const SCORING_STATE_PATH = join(dirname(STATE_PATH), 'scoring-inputs.json');
+// Rows added longer ago than this are mostly closed; re-scoring them is waste.
+const RESCORE_LOOKBACK_DAYS = 45;
 
 // ── State I/O ───────────────────────────────────────────────────────────────
 
@@ -243,7 +252,66 @@ function cmdStart(flags) {
   const state = newRun(config, { skip });
   saveState(state);
   log(state, 'start', `skip=[${skip.join(',')}] kitThreshold=${config.kitThreshold}`);
-  return { started: true, config: state.config, skipped: skip, next: decideNextStage(state, gatherFacts(state)) };
+  const rescore = checkScoringInputs(state, config);
+  return {
+    started: true, config: state.config, skipped: skip,
+    ...(rescore ? { rescore } : {}),
+    next: decideNextStage(state, gatherFacts(state)),
+  };
+}
+
+function scoringFingerprints() {
+  const out = {};
+  for (const rel of SCORING_INPUTS) {
+    const path = join(CAREER_OPS, rel);
+    out[rel] = existsSync(path) ? createHash('sha1').update(readFileSync(path)).digest('hex') : null;
+  }
+  return out;
+}
+
+/**
+ * Compare the scoring files against the last pass. If any changed, list the
+ * open rows just below the kit threshold that the new rules might lift, and
+ * log it. Then record today's fingerprints as the new baseline, so the notice
+ * appears once per change. The first pass only records the baseline.
+ */
+function checkScoringInputs(state, config) {
+  const current = scoringFingerprints();
+  let previous = null;
+  try {
+    if (existsSync(SCORING_STATE_PATH)) previous = JSON.parse(readFileSync(SCORING_STATE_PATH, 'utf-8'));
+  } catch { previous = null; }
+
+  let rescore = null;
+  const changed = previous?.files
+    ? Object.keys(current).filter((rel) => previous.files[rel] !== current[rel])
+    : [];
+  if (changed.length) {
+    const sinceDate = new Date(Date.now() - RESCORE_LOOKBACK_DAYS * 86400000).toISOString().slice(0, 10);
+    const candidates = rescoreCandidates(trackerRows(), { threshold: config.kitThreshold, since: sinceDate });
+    rescore = {
+      changed,
+      changedSince: previous.recorded_at ?? null,
+      candidates,
+      instructions: candidates.length
+        ? `The scoring rules changed (${changed.join(', ')}). These rows scored just below the kit threshold `
+          + `${config.kitThreshold} under the old rules. Re-score each against its report's archived JD with the `
+          + 'current rules and check that the posting is still live. Write the new score as a '
+          + 'batch/tracker-additions/ TSV carrying the row\'s num, report link and url, so merge-tracker.mjs '
+          + 'updates the existing row. Show the user the before/after list (see modes/run.md).'
+        : `The scoring rules changed (${changed.join(', ')}), but no open row sits just below the kit threshold.`,
+    };
+    log(state, 'rescore', `${changed.join(', ')} changed since ${previous.recorded_at ?? 'the last pass'}; `
+      + `${candidates.length} row(s) to re-score${candidates.length ? `: ${candidates.map((c) => `#${c.num}`).join(', ')}` : ''}`);
+  }
+
+  try {
+    mkdirSync(dirname(SCORING_STATE_PATH), { recursive: true });
+    writeFileSync(SCORING_STATE_PATH, JSON.stringify({ recorded_at: state.started_at ?? new Date().toISOString(), files: current }, null, 2), 'utf-8');
+  } catch (err) {
+    console.error(`run-all: could not record scoring fingerprints (${err.message})`);
+  }
+  return rescore;
 }
 
 /**
