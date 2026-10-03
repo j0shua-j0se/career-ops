@@ -114,6 +114,16 @@ MARGINAL band below depends on.
 `modes/_brief.md`, return PASS regardless of score. Check the company name before
 returning a verdict.
 
+The override needs the posting's text. It promotes a posting whose JD you have
+**read** and found to undersell itself; it never stands in for reading it. If
+you could only see the title and company (a fetch `error`, a body under ~300
+chars, or a WebFetch fallback that returned only navigation), apply step 1's
+inaccessible rule and add `(priority employer: JD not read, re-fetch)` to the
+reason. Observed 2026-10-03: four Siemens postings whose fetch errored were
+promoted on their titles alone. A sequential re-fetch showed all four
+required fluent German, a Hard DQ that costs nothing to detect, and each
+promotion had cost a full evaluation.
+
 ### 5. Return
 Return ONLY this single line. No prose. No markdown. No headers.
 
