@@ -27,6 +27,9 @@ import {
   loadSeenUrls,
   buildTitleFilter,
   buildLocationFilter,
+  scanFilterFingerprint,
+  filterSkipStatus,
+  normalizeUrlForDedup,
   PORTALS_PATH,
   SCAN_HISTORY_PATH,
 } from './scan.mjs';
@@ -109,6 +112,9 @@ const keywords = SINGLE_KEYWORD
 // scan-eures.mjs and every provider already enforce.
 const matchesTitle = buildTitleFilter(config.title_filter);
 const locationFilter = buildLocationFilter(config.location_filter);
+// Title/location skips are recorded with this fingerprint and dedup only while
+// the filters stay the same, so a portals.yml filter change re-admits them.
+const FILTER_FP = scanFilterFingerprint(config);
 
 // ── Date helpers ─────────────────────────────────────────────────────
 
@@ -277,7 +283,7 @@ async function searchInteramt(page, keyword, isFirst) {
 async function main() {
   mkdirSync(join(DATA_ROOT, 'data'), { recursive: true });
 
-  const { seen } = loadSeenUrls();
+  const { seen, filterRecheck } = loadSeenUrls({ filterFingerprint: FILTER_FP });
   const date = localToday();
 
   const lastScanDate = NO_DATE_FILTER ? null : loadLastScanDate();
@@ -321,11 +327,11 @@ async function main() {
             postedAt: pubDate ? pubDate.getTime() : undefined,
           };
 
-          if (!matchesTitle(offer.title)) { seen.add(canonical.url); titleSkipped.push(canonical); continue; }
-          if (!locationFilter(location, canonical.url, offer.title)) { seen.add(canonical.url); locationSkipped.push(canonical); continue; }
+          if (!matchesTitle(offer.title)) { if (!seen.has(canonical.url)) titleSkipped.push(canonical); seen.add(canonical.url); continue; }
+          if (!locationFilter(location, canonical.url, offer.title)) { if (!seen.has(canonical.url)) locationSkipped.push(canonical); seen.add(canonical.url); continue; }
           // Same-day offers pass: lastScanDate is the day of the last run, and an
           // offer published later that same day should not be treated as stale.
-          if (lastScanDate && pubDate && pubDate < lastScanDate) { seen.add(canonical.url); dateSkipped.push(canonical); continue; }
+          if (lastScanDate && pubDate && pubDate < lastScanDate && !filterRecheck.has(normalizeUrlForDedup(canonical.url))) { if (!seen.has(canonical.url)) dateSkipped.push(canonical); seen.add(canonical.url); continue; }
           if (seen.has(canonical.url)) { dupeSkipped.push(canonical); continue; }
           seen.add(canonical.url);
           newOffers.push(canonical);
@@ -343,8 +349,8 @@ async function main() {
   if (!DRY_RUN) {
     if (newOffers.length > 0) await appendToPipeline(newOffers);
     if (newOffers.length > 0) await appendToScanHistory(newOffers, date, 'added');
-    if (titleSkipped.length > 0) await appendToScanHistory(titleSkipped, date, 'skipped_title');
-    if (locationSkipped.length > 0) await appendToScanHistory(locationSkipped, date, 'skipped_location');
+    if (titleSkipped.length > 0) await appendToScanHistory(titleSkipped, date, filterSkipStatus('skipped_title', FILTER_FP));
+    if (locationSkipped.length > 0) await appendToScanHistory(locationSkipped, date, filterSkipStatus('skipped_location', FILTER_FP));
     if (dateSkipped.length > 0) await appendToScanHistory(dateSkipped, date, 'skipped_date');
     if (dupeSkipped.length > 0) await appendToScanHistory(dupeSkipped, date, 'skipped_dup');
   }

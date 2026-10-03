@@ -53,7 +53,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'fs';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import * as yaml from 'js-yaml';
@@ -1268,6 +1268,35 @@ const PERMANENT_SCAN_HISTORY_STATUSES = new Set([
   'skipped_blocked_host',
 ]);
 
+// Statuses that record a FILTER verdict (the title/location filter in force
+// that day), not a fact about the URL. Scanners stamp them with the filters'
+// fingerprint (`skipped_location@3fa9c1d2`); the row dedups only while the
+// filters are unchanged. Before this, a skip was permanent: the location
+// policy change of 2026-10-03 could never re-admit a posting Interamt had
+// already dropped as "elsewhere in Germany", because the history row put its
+// URL in the seen set and the scanner then counted it as a duplicate.
+// Unstamped legacy rows are rechecked once by a caller that passes a
+// fingerprint; callers that pass none keep the old always-dedup behaviour.
+const FILTER_SKIP_STATUSES = new Set(['skipped_title', 'skipped_location']);
+
+/**
+ * Short, stable fingerprint of the portals.yml filters a scanner applies
+ * before dedup. Key order inside the filter objects is normalized, so
+ * reformatting portals.yml does not count as a change.
+ */
+export function scanFilterFingerprint(config = {}) {
+  const canon = (v) => (Array.isArray(v) ? v.map(canon)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])]))
+      : v ?? null);
+  const payload = JSON.stringify({ title: canon(config.title_filter), location: canon(config.location_filter) });
+  return createHash('sha1').update(payload).digest('hex').slice(0, 8);
+}
+
+/** `skipped_title` + fingerprint → `skipped_title@<fp>` (bare when no fingerprint). */
+export function filterSkipStatus(base, fingerprint) {
+  return fingerprint ? `${base}@${fingerprint}` : base;
+}
+
 function daysBetweenIsoDates(start, end) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) return null;
   const startDate = new Date(`${start}T00:00:00Z`);
@@ -1282,8 +1311,13 @@ function daysBetweenIsoDates(start, end) {
 // evening run, so the cooldown opened a day early (#3070). The recheck window
 // below reads one day high the same way. Callers may still pass `today`
 // explicitly; only the default moves.
-export function shouldDedupScanHistoryRow({ firstSeen, status = 'added' }, { recheckAfterDays = null, today = localToday() } = {}) {
+export function shouldDedupScanHistoryRow({ firstSeen, status = 'added' }, { recheckAfterDays = null, today = localToday(), filterFingerprint = null } = {}) {
   if (PERMANENT_SCAN_HISTORY_STATUSES.has(status)) return true;
+  if (filterFingerprint) {
+    const at = status.indexOf('@');
+    const base = at === -1 ? status : status.slice(0, at);
+    if (FILTER_SKIP_STATUSES.has(base)) return at !== -1 && status.slice(at + 1) === filterFingerprint;
+  }
   if (status.startsWith('cooldown:')) {
     const parts = status.split(':');
     const cooldownUntil = parts[parts.length - 1];
@@ -1617,6 +1651,11 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
   const { scanHistoryText = '', pipelineText = '', applicationsText = '' } = sources;
   const seen = new Set();
   let recheckEligible = 0;
+  // URLs whose only history is a title/location skip under OTHER filters than
+  // `policy.filterFingerprint`. A scanner lets these past its "older than the
+  // last scan" date cut: the posting is old, but the verdict on it is not.
+  const filterRecheck = new Set();
+  const staleFilterSkip = [];
 
   // scan-history.tsv
   for (const line of scanHistoryText.split('\n').slice(1)) { // skip header
@@ -1629,7 +1668,12 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
           if (token) seen.add(token);
         }
       }
-    } else recheckEligible++;
+    } else {
+      recheckEligible++;
+      if (policy.filterFingerprint && FILTER_SKIP_STATUSES.has(status.split('@')[0])) {
+        staleFilterSkip.push(normalizeUrlForDedup(url));
+      }
+    }
   }
 
   // pipeline.md — extract URLs from checkbox lines, wherever the URL sits in the
@@ -1645,7 +1689,10 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
     seen.add(normalizeUrlForDedup(match[0]));
   }
 
-  return { seen, recheckEligible };
+  // A URL that was ALSO added, tracked or queued is not a recheck.
+  for (const url of staleFilterSkip) if (!seen.has(url)) filterRecheck.add(url);
+
+  return { seen, recheckEligible, filterRecheck };
 }
 
 // Path options mirror mergeIntoPipeline's seam below: the defaults are the
