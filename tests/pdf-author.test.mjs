@@ -156,6 +156,12 @@ test('generate-pdf.mjs never hard-codes a name: it reads candidate.full_name', (
 test('a real Chromium render carries /Title and the candidate as /Author', async (t) => {
   const { renderHtmlToPdf } = await import('../generate-pdf.mjs');
   const outDir = mkdtempSync(join(ROOT, 'output', 'pdf-author-'));
+  // Every completed render is recorded in the PDF index. Without this redirect
+  // each run added two rows for these throwaway files to the user's real
+  // data/pdf-index.tsv (26 had piled up by 2026-10-05).
+  const indexDir = mkdtempSync(join(tmpdir(), 'pdf-author-index-'));
+  const previousIndex = process.env.CAREER_OPS_PDF_INDEX;
+  process.env.CAREER_OPS_PDF_INDEX = join(indexDir, 'pdf-index.tsv');
   try {
     mkdirSync(outDir, { recursive: true });
     const html = '<!doctype html><html><head><meta charset="utf-8"><title>Test Candidate - CV</title></head>'
@@ -183,6 +189,9 @@ test('a real Chromium render carries /Title and the candidate as /Author', async
     await renderHtmlToPdf(html, bare, { author: '' });
     assert.doesNotMatch(readFileSync(bare).toString('latin1'), /\/Author/);
   } finally {
+    if (previousIndex === undefined) delete process.env.CAREER_OPS_PDF_INDEX;
+    else process.env.CAREER_OPS_PDF_INDEX = previousIndex;
     rmSync(outDir, { recursive: true, force: true });
+    rmSync(indexDir, { recursive: true, force: true });
   }
 });
