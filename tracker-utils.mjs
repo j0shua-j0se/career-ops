@@ -184,6 +184,23 @@ export function resolvePdfIndexPath(trackerPath) {
 }
 
 /**
+ * Whether a data/pdf-index.tsv row records a cover letter rather than a CV.
+ *
+ * Both go through generate-pdf.mjs's manifest writer, and a report owns one row
+ * of each. A cover letter is rendered from its payload JSON, a CV from HTML, so
+ * the source column tells them apart; the `-cover.pdf` name is the fallback for
+ * rows whose source column is empty.
+ *
+ * @param {string} pdfPath - column 2
+ * @param {string} [sourcePath] - column 3
+ */
+export function isCoverIndexRow(pdfPath, sourcePath = '') {
+  const src = String(sourcePath ?? '').trim();
+  if (src) return /\.json$/i.test(src);
+  return /-cover\.pdf$/i.test(String(pdfPath ?? '').trim());
+}
+
+/**
  * Convert the tracker path into one stable absolute spelling before hashing it.
  *
  * Equivalent tracker paths can be written in multiple ways, such as a relative

@@ -41,7 +41,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { readStyleTokens, injectThemeStyle, readCvSectionOrder, readCandidateName } from './theme-style.mjs';
-import { resolvePdfIndexPath, resolveTrackerPath, resolveWorkspaceRoot } from './tracker-utils.mjs';
+import { resolvePdfIndexPath, resolveTrackerPath, resolveWorkspaceRoot, isCoverIndexRow } from './tracker-utils.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { setPdfAuthor } from './lib/pdf-info.mjs';
 
@@ -1202,6 +1202,7 @@ function updatePDFManifest(reportNum, pdfPath, htmlPath, format) {
   // "008" and "8" are the same report — zero-padded report-link form vs
   // unpadded tracker-# form. Normalize so replacement rows match.
   const normKey = (s) => (s || '').trim().replace(/^0+(?=\d)/, '');
+  const writingCover = isCoverIndexRow(relPDF, relHTML);
 
   let lines = [];
   if (existsSync(manifestPath)) {
@@ -1209,7 +1210,13 @@ function updatePDFManifest(reportNum, pdfPath, htmlPath, format) {
       if (!line.trim() || line.startsWith('#')) return false;
       const fields = line.split('\t');
       if (fields[1] === relPDF) return false;
-      if (reportNum && normKey(fields[0]) === normKey(reportNum)) return false;
+      // Supersede only the same KIND of artifact. The cover letter renders
+      // through here right after the CV with the same report number, and
+      // dropping every row for the report let it evict the CV row — 68 of 70
+      // reports ended up indexed by their cover letter alone (2026-10-06), so
+      // the dashboard, find.mjs and outcome.mjs took the letter for the CV.
+      if (reportNum && normKey(fields[0]) === normKey(reportNum)
+        && isCoverIndexRow(fields[1], fields[2]) === writingCover) return false;
       return true;
     });
   }

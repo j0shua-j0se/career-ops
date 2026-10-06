@@ -156,9 +156,28 @@ func LoadPDFManifest(careerOpsPath string) PDFManifest {
 		if entry.ReportNumber == "" || entry.PDFPath == "" || !isSafeRepoRelativePath(entry.PDFPath) {
 			continue
 		}
-		manifest[normalizeReportKey(entry.ReportNumber)] = entry
+		// A report owns a CV row AND a cover-letter row, and the letter is
+		// written second. "Later wins" therefore handed the dashboard the
+		// letter as the application's PDF — and its payload JSON as the HTML
+		// to regenerate from. A CV row always beats a cover row; a cover row
+		// is kept only for a report with no CV row at all.
+		key := normalizeReportKey(entry.ReportNumber)
+		if prev, ok := manifest[key]; ok && isCoverEntry(entry) && !isCoverEntry(prev) {
+			continue
+		}
+		manifest[key] = entry
 	}
 	return manifest
+}
+
+// isCoverEntry mirrors isCoverIndexRow in tracker-utils.mjs: a cover letter is
+// rendered from its payload JSON, a CV from HTML; the -cover.pdf name decides
+// only when the source column is empty.
+func isCoverEntry(e PDFManifestEntry) bool {
+	if e.HTMLPath != "" {
+		return strings.EqualFold(filepath.Ext(e.HTMLPath), ".json")
+	}
+	return strings.HasSuffix(strings.ToLower(e.PDFPath), "-cover.pdf")
 }
 
 // rePDFDate extracts the trailing YYYY-MM-DD stamp from generated CV

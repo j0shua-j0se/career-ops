@@ -181,3 +181,18 @@ func TestKebabCase(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadPDFManifestPrefersCVOverLaterCoverRow(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, "data/pdf-index.tsv",
+		"267\toutput/to-apply/dlr-cv.pdf\toutput/to-apply/dlr-cv.html\ta4\t2026-10-06\n"+
+			"267\toutput/to-apply/dlr-cover.pdf\tpayloads/dlr-cover.json\ta4\t2026-10-06\n"+
+			"269\toutput/to-apply/yarres-cover.pdf\tpayloads/yarres-cover.json\ta4\t2026-10-06\n")
+	m := LoadPDFManifest(root)
+	if got := m["267"].PDFPath; got != "output/to-apply/dlr-cv.pdf" {
+		t.Fatalf("expected the CV row to win over the later cover row, got %q", got)
+	}
+	if got := m["269"].PDFPath; got != "output/to-apply/yarres-cover.pdf" {
+		t.Fatalf("expected a cover-only report to keep its cover row, got %q", got)
+	}
+}

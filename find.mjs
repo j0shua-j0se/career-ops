@@ -28,7 +28,7 @@ import { readFileSync, existsSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
-import { resolvePdfIndexPath } from './tracker-utils.mjs';
+import { resolvePdfIndexPath, isCoverIndexRow } from './tracker-utils.mjs';
 import { roleFuzzyMatch } from './role-matcher.mjs';
 import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
@@ -80,8 +80,8 @@ export function parseTrackerRows(text) {
 
 /**
  * Parse data/pdf-index.tsv (report \t pdf \t html \t format \t date) into a
- * normalized-report# → PDF-path map. Comment lines and rows generated without
- * a report number are skipped.
+ * normalized-report# → CV-PDF-path map. Comment lines, rows generated without
+ * a report number, and cover-letter rows are skipped.
  *
  * @param {string} text - Full contents of pdf-index.tsv.
  * @returns {Map<string,string>}
@@ -92,6 +92,11 @@ export function parsePdfIndex(text) {
     if (!line.trim() || line.startsWith('#')) continue;
     const fields = line.split('\t');
     if (!fields[0]?.trim() || !fields[1]) continue;
+    // The CV row only. A report's cover letter has its own row, and every
+    // caller here means the CV: find prints it, merge-tracker reads it as a
+    // built kit, and outcome.mjs archives (then may delete) it as the
+    // submitted CV.
+    if (isCoverIndexRow(fields[1], fields[2])) continue;
     map.set(normNum(fields[0]), fields[1]);
   }
   return map;
