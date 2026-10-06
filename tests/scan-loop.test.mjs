@@ -345,7 +345,7 @@ try {
   const skipOffersFile = writeJson('skip-offers.json', [
     { url: 'https://boards.greenhouse.io/skipco/jobs/1', company: 'SkipCo', title: 'Engineer', location: 'Berlin' },
   ]);
-  loop('ingest', '--file', skipOffersFile);
+  loop('ingest', '--file', skipOffersFile, '--rung', 'portals');
   const skipKey = Object.keys(readState().candidates)[0];
   loop('record', '--file', writeJson('skip-scores.json', [{ key: skipKey, score: 1.0 }]));
 

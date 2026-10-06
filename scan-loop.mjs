@@ -48,7 +48,12 @@ import {
 } from './loop-core.mjs';
 import { parsePipeline, rankEntry, writeVerdictRowsToInbox } from './triage-prefilter.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
-import { appendToPipeline, appendToScanHistory, SCAN_HISTORY_PATH } from './scan.mjs';
+import {
+  appendToPipeline, appendToScanHistory, SCAN_HISTORY_PATH,
+  loadSeenUrls, loadSeenCompanyRoles, companyRoleDedupKey, normalizeUrlForDedup,
+} from './scan.mjs';
+import { computeQueryYield, appendYieldLog } from './ingest-jobs.mjs';
+import { resolveTrackerPath } from './tracker-utils.mjs';
 import {
   DEFAULT_AGGREGATOR_HOSTS, isAggregatorUrl, resolveAggregatorLeads,
   rewriteResolvedLine, rewriteUnresolvedLine, applyPipelineChanges,
@@ -345,7 +350,7 @@ function cmdWave(flags) {
       strategy: strategy.id,
       instructions: `Run ${strategy.describe}. Collect {url, company, title, location} for every `
         + 'hit that passes portals.yml title_filter/location_filter, write them as a JSON array, '
-        + 'then run `node scan-loop.mjs ingest --file <that file>`.',
+        + `then run \`node scan-loop.mjs ingest --file <that file> --rung ${strategy.id}\` (--rung records this rung as run).`,
     };
   }
 
@@ -478,12 +483,24 @@ export async function cmdIngest(flags) {
   if (!Array.isArray(offers)) throw new Error(`${flags.file} must contain a JSON array of offers.`);
 
   const wave = state.waves.length + 1;
-  // effectiveStrategies(), not raw WAVE_STRATEGIES: with a rung skipped by
-  // config, the strategy actually due at this wave index shifts, and this
-  // must label the ingested wave the same way decideNextAction would have.
-  const strategy = effectiveStrategies(state.config)[state.waves.length];
+  // `--rung <id>`: these offers ARE the due ladder rung (the agent-web rung, or
+  // a rung run by hand), so the wave is recorded as that rung and advances the
+  // ladder. Without it, an ingest is extra input (Indeed, Apify, WebSearch)
+  // and stays off the ladder.
+  let rung = null;
+  if (flags.rung !== undefined) {
+    const due = decideNextAction(state);
+    const dueId = due.action === 'scan' ? due.strategy?.id : null;
+    if (typeof flags.rung !== 'string' || flags.rung !== dueId) {
+      throw new Error(`ingest --rung ${flags.rung}: the rung due now is ${dueId ? `"${dueId}"` : 'none'} (next action "${due.action}").`);
+    }
+    rung = dueId;
+  }
   const knownBefore = new Set(Object.keys(state.candidates));
-  const counts = ingestOffers(state, offers, wave);
+  const isKnown = earlierPassFilter();
+  const { addedOffers, duplicateOffers, ...counts } = ingestOffers(state, offers, wave, { isKnown });
+  if (counts.known) console.error(`  ingest: ${counts.known} offer(s) already seen by an earlier pass (scan-history / inbox / tracker) — not re-triaged.`);
+  logIngestYield(offers, addedOffers, duplicateOffers);
   const attributed = await recordSourcesInScanHistory(
     Object.values(state.candidates).filter((c) => !knownBefore.has(c.key)));
   const prefiltered = prefilterReject(state);
@@ -499,22 +516,88 @@ export async function cmdIngest(flags) {
   if (flags.started !== undefined && !startedAt) {
     throw new Error(`ingest --started must be an ISO timestamp (got ${JSON.stringify(flags.started)}).`);
   }
+  // `agent: true` keeps this wave off the escalation ladder: it is extra input
+  // gathered by the agent (Indeed, Apify, WebSearch), not a rung. Labelling it
+  // with the rung due next made that rung look already run (see loopStats).
   state.waves.push({
     n: wave,
-    strategy: strategy ? strategy.id : 'manual',
+    strategy: rung ?? 'agent',
+    ...(rung ? {} : { agent: true }),
     started_at: startedAt,
     finished_at: new Date().toISOString(),
     exit_code: 0,
     found: offers.length,
     added: counts.added,
     duplicate: counts.duplicate,
+    known: counts.known,
   });
   saveState(state);
   // Strategy first, like the 'wave' event's "portals exit=0 found=…" — run-retro
   // reads the leading token as the strategy and treats a leading `wave=N` as
   // unrecorded, so the old "wave=2 found=21" line lost the strategy name.
-  log(state, 'ingest', `${strategy ? strategy.id : 'manual'} wave=${wave} found=${offers.length} new=${counts.added}${attributed ? ` sourced=${attributed}` : ''}`);
+  log(state, 'ingest', `${rung ?? 'agent'} wave=${wave} found=${offers.length} new=${counts.added} known=${counts.known}${attributed ? ` sourced=${attributed}` : ''}`);
   return { wave, ...counts, ...(attributed ? { sourced: attributed } : {}), next: decideNextAction(state) };
+}
+
+/**
+ * Predicate: did an EARLIER pass already see this offer? Same two keys a scan
+ * wave dedups on: the normalized URL (scan-history, inbox, tracker) and the
+ * company + role key. Today's scan-history rows are not "earlier": they belong
+ * to this pass and are already in the loop state.
+ */
+function earlierPassFilter() {
+  try {
+    const today = localToday();
+    const historyText = existsSync(SCAN_HISTORY_PATH) ? readFileSync(SCAN_HISTORY_PATH, 'utf-8') : '';
+    const lines = historyText.split('\n');
+    const earlier = [lines[0] ?? '', ...lines.slice(1).filter((l) => (l.split('\t')[1] ?? '') < today)].join('\n');
+    const tmp = mkdtempSync(join(tmpdir(), 'scan-loop-seen-'));
+    const earlierPath = join(tmp, 'scan-history.tsv');
+    writeFileSync(earlierPath, earlier, 'utf-8');
+    // Only PROCESSED inbox lines (`- [x]` / `- [!]`) are an earlier verdict. A
+    // pending `- [ ]` row is still waiting for one, and ingesting it is how the
+    // loop gives it one — `finish` then ticks that same line.
+    const pipelineText = existsSync(PIPELINE_PATH) ? readFileSync(PIPELINE_PATH, 'utf-8') : '';
+    const processedPath = join(tmp, 'pipeline.md');
+    writeFileSync(processedPath, pipelineText.split('\n').filter((l) => !/^\s*-\s*\[ \]/.test(l)).join('\n'), 'utf-8');
+    const trackerPath = resolveTrackerPath(CAREER_OPS);
+    try {
+      const { seen } = loadSeenUrls({}, { scanHistoryPath: earlierPath, pipelinePath: processedPath, applicationsPath: trackerPath });
+      const roles = loadSeenCompanyRoles(trackerPath, undefined, { scanHistoryPath: earlierPath, pipelinePath: processedPath });
+      return (offer) => seen.has(normalizeUrlForDedup(offer.url))
+        || roles.has(companyRoleDedupKey(offer.company, offer.title));
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  } catch (err) {
+    console.error(`  ingest: could not load earlier-pass history (${err.message}) — ingesting without it.`);
+    return null;
+  }
+}
+
+/**
+ * Log per-query yield for offers tagged `query` (Indeed / Apify / WebSearch),
+ * the same rows ingest-jobs.mjs writes. Without them, `websearch-plan.mjs
+ * --record` counted every query ingested through the loop as zero-yield, so a
+ * productive query could retire.
+ */
+function logIngestYield(offers, addedOffers, duplicateOffers) {
+  try {
+    const bySource = new Map();
+    for (const o of offers) {
+      if (typeof o?.query !== 'string' || !o.query.trim()) continue;
+      const src = typeof o.source === 'string' && o.source ? o.source : 'agent';
+      if (!bySource.has(src)) bySource.set(src, []);
+      bySource.get(src).push(o);
+    }
+    for (const [source, group] of bySource) {
+      const inGroup = (list) => list.filter((o) => group.includes(o));
+      const rows = computeQueryYield(group, { queued: inGroup(addedOffers), duplicates: inGroup(duplicateOffers), duplicateTitle: [] });
+      appendYieldLog(rows, { source, today: localToday() });
+    }
+  } catch (err) {
+    console.error(`  ingest: could not log query yield (${err.message}).`);
+  }
 }
 
 /**
@@ -1007,7 +1090,7 @@ const HELP = `scan-loop.mjs — loop controller for /career-ops scan
   start [--target N] [--min-score X] [--reset]   begin a run
   next                                            what to do next (JSON)
   wave [--dry-run]                                run the next scan rung
-  ingest --file <offers.json> [--started <iso>]   hand-scanned offers in (--started: when the wave began)
+  ingest --file <offers.json> [--started <iso>] [--rung <id>]   offers in (--started: when gathered; --rung: they ARE the due rung)
   record --file <scores.json>                     feed triage scores back
   finish [--force]                                promote to shortlist + tracker
   status [--summary]                              current run state

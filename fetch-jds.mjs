@@ -727,6 +727,21 @@ async function waitForRenderedJd(page, prevLength) {
  * @param {{key?:string, url:string, company?:string, title?:string, location?:string}} entry
  * @param {{newPage: () => Promise<object>, checkRobotsFn?: typeof checkRobots, checkLivenessViaApiFn?: typeof checkLivenessViaApi, maxChars?: number}} deps
  */
+/**
+ * Hosts our scripts never fetch: robots.txt forbids it (LinkedIn, XING) or the
+ * site is read only through its own connector (Indeed MCP). Without this list,
+ * `to.indeed.com` came back `robots-unconfirmed` (the robots read itself was
+ * inconclusive), which sends a triage worker off to WebFetch Indeed: the one
+ * thing it must not do. Matched as a host suffix.
+ */
+export const AGENT_ONLY_HOSTS = ['linkedin.com', 'indeed.com', 'xing.com'];
+
+export function isAgentOnlyHost(url) {
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return false; }
+  return AGENT_ONLY_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+}
+
 export async function fetchOne(entry, {
   newPage,
   checkRobotsFn = checkRobots,
@@ -742,6 +757,23 @@ export async function fetchOne(entry, {
     title: entry.title ?? '',
     location: entry.location ?? '',
   };
+
+  // Connector-supplied text (Apify LinkedIn, Indeed MCP, hiring.cafe) arrives
+  // on the entry as `description`. Use it as-is: no request at all, and the
+  // zero-token German gate still reads it. Before this, a LinkedIn or Indeed
+  // lead was either SKIPped as "Not fetchable" (robots-blocked) or handed to
+  // triage with no text, although the agent already held its full JD.
+  if (typeof entry.description === 'string' && entry.description.trim()) {
+    const compact = compactJdText(htmlToText(entry.description), { maxChars });
+    if (isUsableJdText(compact)) {
+      return { ...base, status: 'ok', liveness: 'connector-text', chars: compact.length, text: compact, source: 'connector' };
+    }
+  }
+
+  // Never fetched by our scripts; definite, and decided without a request.
+  if (isAgentOnlyHost(entry.url)) {
+    return { ...base, status: 'robots-blocked', liveness: 'agent-only host (connector or search engine only)', chars: 0, text: '' };
+  }
 
   // Circuit breaker — checked before ANY request for this URL, including the
   // robots.txt read gateUrl below would otherwise make. A host that has

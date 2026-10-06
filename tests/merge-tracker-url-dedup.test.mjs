@@ -400,3 +400,40 @@ ok('row with `---` in its URL (Workday slug) stays visible to dedup', () => {
     assert.ok(rows[0].includes('4.0/5'), 'the row was found and LWW-updated');
   } finally { cleanup(env); }
 });
+
+// 2026-10-05: the DLR and BCG evaluations each became a SECOND row beside their
+// own triage-only placeholders, because the placeholder held the LinkedIn lead
+// URL and the evaluation the employer's own posting. The URL guard read the
+// difference as proof of two postings. A placeholder (no report, "triage-only
+// ... full evaluation pending") is now adopted by the evaluation naming its row.
+const HEADED = ['num', 'date', 'company', 'role', 'status', 'score', 'pdf', 'report', 'notes', 'url'];
+const writeHeaded = (env, name, row) => writeFileSync(join(env.addDir, name), `${HEADED.join('\t')}\n${row.join('\t')}\n`);
+
+ok('an evaluation adopts its triage-only placeholder row even when the URL was resolved to the employer', () => {
+  const env = makeEnv();
+  try {
+    writeTracker(env, [
+      '| 264 | 2026-10-05 | German Aerospace Center (DLR) | Student of computer science, systems engineering, mathematics, or similar (f/m/x) | 3.6/5 | Evaluated | ❌ | — | triage-only from loop wave 2 — full evaluation pending | https://de.linkedin.com/jobs/view/student-of-computer-science-at-dlr-4474314301 |',
+    ]);
+    writeHeaded(env, '267-dlr.tsv', ['264', '2026-10-05', 'German Aerospace Center (DLR)', 'Student of computer science, systems engineering, mathematics, or similar (f/m/x)', 'Evaluated', '4.4/5', '❌', '[267](reports/267-dlr-2026-10-05.md)', 'Req 6481; English B2 only', 'https://jobs.dlr.de/job/Bremerhaven-Student/6481-en_GB/']);
+    runMerge(env);
+    const rows = trackerRows(env);
+    assert.equal(rows.length, 1, `expected the placeholder to be updated in place, got ${rows.length} rows:\n${rows.join('\n')}`);
+    assert.match(rows[0], /\| 264 \|/);
+    assert.match(rows[0], /4\.4\/5/);
+    assert.match(rows[0], /\[267\]\(/);
+    assert.equal(urlCell(rows[0]), 'https://jobs.dlr.de/job/Bremerhaven-Student/6481-en_GB/');
+  } finally { cleanup(env); }
+});
+
+ok('a row that already has a report is NOT adopted across a URL difference (the guard still holds)', () => {
+  const env = makeEnv();
+  try {
+    writeTracker(env, [
+      '| 50 | 2026-10-01 | Acme | Data Working Student | 3.9/5 | Evaluated | ❌ | [50](reports/050-acme-2026-10-01.md) | evaluated | https://jobs.acme.example/1 |',
+    ]);
+    writeHeaded(env, '51-acme.tsv', ['50', '2026-10-05', 'Acme', 'Data Working Student', 'Evaluated', '3.7/5', '❌', '[51](reports/051-acme-2026-10-05.md)', 'other req', 'https://jobs.acme.example/2']);
+    runMerge(env);
+    assert.equal(trackerRows(env).length, 2, 'a distinct posting must stay a distinct row');
+  } finally { cleanup(env); }
+});

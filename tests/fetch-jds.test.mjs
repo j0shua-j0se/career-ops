@@ -1101,3 +1101,29 @@ test('htmlToText: literal angle brackets in prose survive (no infinite re-decode
   const text = htmlToText('<p>Compare a &lt; b and b &gt; c</p>');
   assert.match(text, /a < b and b > c/);
 });
+
+// 2026-10-05: connector-sourced leads (Apify LinkedIn, Indeed MCP) were either
+// SKIPped "Not fetchable" or handed to triage with no text, although the agent
+// held their full JD. And to.indeed.com came back robots-unconfirmed, which
+// would send a worker to WebFetch Indeed.
+test('fetchOne uses connector-supplied description text and makes no request', async () => {
+  const { fetchOne: fo } = await import('../fetch-jds.mjs');
+  const boom = () => { throw new Error('must not be called'); };
+  const description = 'Werkstudent KI-Automatisierung. Aufgaben: n8n-Workflows aufbauen, LLM-APIs integrieren, Prozesse analysieren und dokumentieren. Profil: Informatik oder Data Science, Python oder JavaScript, SQL. 10-15 Stunden pro Woche, 16-20 EUR pro Stunde, Muenchen, teilweise Homeoffice.';
+  const r = await fo({ url: 'https://to.indeed.com/aahj8kynyrdg', company: 'Yarres', title: 'Werkstudent KI', description },
+    { newPage: boom, checkRobotsFn: boom, checkLivenessViaApiFn: boom, fetchTextFn: boom, isHostBlockedFn: () => null });
+  assert.equal(r.status, 'ok');
+  assert.equal(r.source, 'connector');
+  assert.match(r.text, /n8n/);
+});
+
+test('fetchOne marks LinkedIn / Indeed / XING robots-blocked without any request', async () => {
+  const { fetchOne: fo, isAgentOnlyHost } = await import('../fetch-jds.mjs');
+  const boom = () => { throw new Error('must not be called'); };
+  for (const url of ['https://to.indeed.com/aa1', 'https://de.indeed.com/viewjob?jk=1', 'https://de.linkedin.com/jobs/view/x-123', 'https://www.xing.com/jobs/x-1']) {
+    const r = await fo({ url, company: 'X', title: 'Y' }, { newPage: boom, checkRobotsFn: boom, checkLivenessViaApiFn: boom, fetchTextFn: boom, isHostBlockedFn: () => null });
+    assert.equal(r.status, 'robots-blocked', url);
+  }
+  assert.equal(isAgentOnlyHost('https://notindeed.com.example/x'), false);
+  assert.equal(isAgentOnlyHost('https://jobs.dlr.de/job/1'), false);
+});

@@ -356,17 +356,28 @@ export function normalizeState(state, config = DEFAULT_LOOP_CONFIG) {
  * ingested one was not, which is how every agent-ingested lead reached
  * run-retro.mjs as "(unattributed)".
  *
+ * `isKnown(offer)` (optional) reports an offer an EARLIER pass already saw
+ * (scan-history, the inbox, the tracker). Those are counted as `known` and
+ * not added. Without it, an agent-sourced lead re-found on every pass was
+ * re-triaged every pass: on 2026-10-05, 28 of 45 ingested leads were repeats
+ * from 2026-10-03.
+ *
  * @param {object} state
  * @param {Array<{url:string, company?:string, title?:string, location?:string, postedAt?:string, source?:string}>} offers
  * @param {number} wave
- * @returns {{added: number, duplicate: number, invalid: number}}
+ * @param {{isKnown?: (offer: object) => boolean}} [opts]
+ * @returns {{added: number, duplicate: number, known: number, invalid: number,
+ *   addedOffers: object[], duplicateOffers: object[]}}
  */
-export function ingestOffers(state, offers, wave) {
-  let added = 0, duplicate = 0, invalid = 0;
+export function ingestOffers(state, offers, wave, { isKnown = null } = {}) {
+  let added = 0, duplicate = 0, known = 0, invalid = 0;
+  const addedOffers = [];
+  const duplicateOffers = [];
   for (const offer of Array.isArray(offers) ? offers : []) {
     const key = candidateKey(offer?.url);
     if (!key) { invalid++; continue; }
-    if (state.candidates[key]) { duplicate++; continue; }
+    if (state.candidates[key]) { duplicate++; duplicateOffers.push(offer); continue; }
+    if (isKnown && isKnown(offer)) { known++; duplicateOffers.push(offer); continue; }
     const source = cleanSource(offer.source);
     state.candidates[key] = {
       key,
@@ -376,6 +387,11 @@ export function ingestOffers(state, offers, wave) {
       location: String(offer.location ?? '').trim(),
       postedAt: offer.postedAt ? String(offer.postedAt).trim() : null,
       ...(source ? { source } : {}),
+      // Connector JD text (Apify / Indeed MCP). It rides along in the scoring
+      // batch so fetch-jds.mjs reads it instead of fetching a host it may not.
+      // Capped: the state file holds every candidate.
+      ...(typeof offer.description === 'string' && offer.description.trim()
+        ? { description: offer.description.trim().slice(0, 6000) } : {}),
       wave,
       score: null,
       verdict: 'pending',
@@ -383,8 +399,9 @@ export function ingestOffers(state, offers, wave) {
       reportNum: null,
     };
     added++;
+    addedOffers.push(offer);
   }
-  return { added, duplicate, invalid };
+  return { added, duplicate, known, invalid, addedOffers, duplicateOffers };
 }
 
 /**
@@ -721,7 +738,12 @@ export function summarize(state) {
   return {
     target: config.target,
     minScore: config.minScore,
-    waves: state?.waves?.length ?? 0,
+    // Ladder waves only. An agent ingest (`scan-loop.mjs ingest`, marked
+    // `agent: true`) is extra input, not a rung: counting it made the next
+    // rung look already run. On 2026-10-05 an ingest of LinkedIn/Indeed leads
+    // took ats-recent's slot, and the loop halted "ladder exhausted" without
+    // ever running the sweep.
+    waves: (state?.waves ?? []).filter((w) => !w?.agent).length,
     discovered: candidates.length,
     // `scored`: every candidate with a verdict, free rejections included —
     // kept for backward compatibility with anything reading this field.

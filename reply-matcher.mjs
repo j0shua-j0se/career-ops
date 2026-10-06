@@ -561,6 +561,31 @@ export function roleOverlapBonus(text, role) {
   return hits >= 2 && ratio >= 0.5 ? Math.round(ratio * 100) / 100 : 0;
 }
 
+// English exonyms of German cities as job titles spell them ("90471 Nuremberg")
+// against the German form a branch office writes ("90489 Nürnberg").
+const CITY_EXONYMS = new Map([
+  ['nuremberg', 'nuernberg'], ['munich', 'muenchen'], ['cologne', 'koeln'],
+  ['hanover', 'hannover'], ['brunswick', 'braunschweig'], ['frankfurt am main', 'frankfurt'],
+]);
+const canonicalCity = (s) => { const f = foldToAscii(s).trim(); return CITY_EXONYMS.get(f) ?? f; };
+const POSTCODE_CITY_RE = /(?<!\d)\d{5}\s+([\p{Lu}][\p{L}-]+)/gu;
+
+/**
+ * Location tie-breaker for one employer's several rows (#67 Eggolsheim and #197
+ * Nuremberg are both Amazon "Sortation Associate"): +1 when the message names
+ * the row's "NNNNN City", -1 when it names a German postcode+city and the row's
+ * city is not among them, 0 when either side carries no location. The message
+ * side requires a postcode, so a city named in passing ("our Munich office")
+ * never counts against a row.
+ */
+export function locationMatchBonus(text, role) {
+  const roleCities = [...String(role || '').matchAll(POSTCODE_CITY_RE)].map((m) => canonicalCity(m[1]));
+  if (!roleCities.length || !text) return 0;
+  const mailCities = new Set([...String(text).matchAll(POSTCODE_CITY_RE)].map((m) => canonicalCity(m[1])));
+  if (!mailCities.size) return 0;
+  return roleCities.some((c) => mailCities.has(c)) ? 1 : -1;
+}
+
 export function matchCandidates(candidates, apps, followups = []) {
   const results = [];
   
@@ -648,6 +673,14 @@ export function matchCandidates(candidates, apps, followups = []) {
           score = Math.round((score + bonus) * 100) / 100;
           signals.push('role-overlap');
           roleHint = roleHint || app.role;
+        }
+        // Weighted to outrank a role-title match: two rows of one employer often
+        // share most of a title, and the branch's postcode is the only thing
+        // the message says that tells them apart.
+        const loc = locationMatchBonus(roleContext, app.role);
+        if (loc) {
+          score = Math.round((score + loc * 2) * 100) / 100;
+          signals.push(loc > 0 ? 'location' : 'location-mismatch');
         }
       }
 
@@ -930,7 +963,19 @@ export function classifyReply(cand) {
   // 6. Interview keywords
   const interviewKeywords = [
     '邀您面试', '邀约面试', '微信小程序面试', 'AI微信小程序', '面试形式', '面试时间', '面试时长', '安排面试', '预约面试', '首轮面试', '视频面试', '电话面试', '现场面试', '面试邀请', '面试流程', '简历通过',
-    'interview invitation', 'schedule an interview', 'scheduling link', 'ai interview', 'video interview', 'phone screen', 'onsite interview', 'final round', 'invite you to interview', 'interview request', 'interview schedule'
+    'interview invitation', 'schedule an interview', 'scheduling link', 'ai interview', 'video interview', 'phone screen', 'onsite interview', 'final round', 'invite you to interview', 'interview request', 'interview schedule',
+    // A booked slot, not an invitation to book one. Observed live 2026-10-05: an
+    // Amazon/Adecco "Confirmation of Scheduled Appointment" ("Interview in
+    // Niederlassung: …") matched nothing and classified Unknown, so the row sat
+    // at Applied with the interview already on the calendar. Rejection and
+    // auto-confirmation are decided first, so "after your interview" in a
+    // rejection still classifies Rejected.
+    'interview appointment', 'interview has been scheduled', 'interview is scheduled', 'interview in ', 'interview at ', 'interview on ',
+    // German. The rejection side has matchGermanRejection(); the interview side
+    // had no German at all, while most of this tracker's employers write German.
+    'vorstellungsgespräch', 'vorstellungsgespraech', 'bewerbungsgespräch', 'bewerbungsgespraech',
+    'kennenlerngespräch', 'kennenlerngespraech', 'einladung zum gespräch', 'einladung zu einem gespräch',
+    'interviewtermin', 'gesprächstermin', 'gespraechstermin'
   ];
 
   // 7. Responded keywords

@@ -137,7 +137,14 @@ const COUNT_CLAIM_RE = new RegExp(
   // one a human reads. #2279's wide-window cases are unaffected — "~5 live
   // Cloud Run deployments" still yields "5 deployments", because there is only
   // one noun to bind to.
-  String.raw`\b(\d[\d,.]*(?:[kKmMbB]\b)?)\s*\+?\s*(?:[A-Za-z][A-Za-z-]*\s+){0,${MODIFIER_WINDOW}}?(${METRIC_NOUNS.join('|')})\b`,
+  //
+  // A locative/relational preposition ends the noun phrase the number counts:
+  // "10+ models at Elevate Labs" counts models, not labs, but the window walked
+  // across "at Elevate" and bound "10 labs" — blocking a truthful line copied
+  // from cv.md (observed live 2026-10-06). "of" stays crossable ("50 of our
+  // customers" is a real count), and a number is still a hard barrier, so this
+  // only ever drops a binding that reached into a different phrase.
+  String.raw`\b(\d[\d,.]*(?:[kKmMbB]\b)?)\s*\+?\s*(?:(?!(?:at|in|on|for|with|from|by|to|across|into|via|per|under|within)\s)[A-Za-z][A-Za-z-]*\s+){0,${MODIFIER_WINDOW}}?(${METRIC_NOUNS.join('|')})\b`,
   'gi'
 );
 const NOUN_SYNONYMS = new Map([
@@ -965,6 +972,10 @@ function runSelfTest() {
     claimsOf('I would bring 20 years of experience.'), '20 years');
   equal('an ordinary time metric is untouched',
     claimsOf('Cut deployment time to 2 days.'), '2 days');
+  equal('a preposition ends the counted phrase',
+    claimsOf('Trained 10+ models at Elevate Labs.'), '');
+  equal("but 'of' does not",
+    claimsOf('Served 50 of our customers.'), '50 customers');
   // The marker must be in the SAME sentence, or one conditional courtesy line
   // would silence every time-unit claim in the document.
   equal('a marker in a neighbouring sentence does not reach',

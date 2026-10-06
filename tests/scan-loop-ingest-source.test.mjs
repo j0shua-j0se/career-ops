@@ -57,8 +57,14 @@ try {
   for (const d of ['data', 'config', join('batch', 'tracker-additions'), 'reports']) mkdirSync(join(box, d), { recursive: true });
   writeFileSync(p.profile, 'loop:\n  target: 5\n  min_score: 3.8\n  score_batch: 12\n', 'utf-8');
   const HISTORY_HEADER = 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\tfingerprint\tposted_at\ttrust_score\ttrust_flags\tnormalized_company';
+  // KNOWN: a scanner wave of THIS pass already logged it (dated today), so the
+  // ingest still adds it and the scanner's attribution stands. EARLIER: an
+  // earlier pass saw it, so ingest must not re-triage it.
+  const { localToday } = await import(pathToFileURL(join(ROOT, 'lib', 'local-today.mjs')).href);
   const KNOWN = 'https://boards.greenhouse.io/known/jobs/9';
-  writeFileSync(p.scanHistory, `${HISTORY_HEADER}\n${KNOWN}\t2026-09-30\tgreenhouse-api\tKnown\tKnown Co\tadded\tBerlin\t\t\t\t\tknownco\n`, 'utf-8');
+  const EARLIER = 'https://boards.greenhouse.io/earlier/jobs/7';
+  writeFileSync(p.scanHistory, `${HISTORY_HEADER}\n${KNOWN}\t${localToday()}\tgreenhouse-api\tKnown\tKnown Co\tadded\tBerlin\t\t\t\t\tknownco\n`
+    + `${EARLIER}\t2026-09-30\tgreenhouse-api\tEarlier Role\tEarlier Co\tadded\tBerlin\t\t\t\t\tearlierco\n`, 'utf-8');
 
   const env = {
     ...process.env,
@@ -103,7 +109,24 @@ try {
   check('an offer with no source gets no scan-history row (stays unattributed, as before)', rowFor(offers[2].url).length === 0);
   check('a URL scan-history already holds is not recorded twice (the first row stays authoritative)',
     rowFor(KNOWN).length === 1 && rowFor(KNOWN)[0].split('\t')[2] === 'greenhouse-api', rowFor(KNOWN).join(' // '));
-  check('the run log notes how many sources were recorded', /ingest · .*new=4 sourced=2/.test(readFileSync(p.runLog, 'utf-8')));
+  check('the run log notes how many sources were recorded', /ingest · .*new=4 known=0 sourced=2/.test(readFileSync(p.runLog, 'utf-8')));
+
+  // An offer an EARLIER pass already logged is counted `known`, not re-added
+  // (2026-10-05: 28 of 45 ingested leads were repeats from two days before).
+  {
+    const earlierFile = join(box, 'earlier.json');
+    writeFileSync(earlierFile, JSON.stringify([
+      { url: EARLIER, company: 'Earlier Co', title: 'Earlier Role', location: 'Berlin', source: 'apify-linkedin' },
+      { url: 'https://other.example/jobs/new-req', company: 'Earlier Co', title: 'Earlier Role', location: 'Berlin', source: 'apify-linkedin' },
+    ]), 'utf-8');
+    const r = loop('ingest', '--file', earlierFile);
+    const st = JSON.parse(readFileSync(p.state, 'utf-8'));
+    check('an offer an earlier pass saw (by URL, or by company + role) is counted known and not added',
+      r.status === 0 && r.json?.known === 2 && r.json?.added === 0
+      && !Object.values(st.candidates).some((c) => c.company === 'Earlier Co'), JSON.stringify(r.json));
+    check('an agent ingest stays off the escalation ladder (agent: true)',
+      st.waves.at(-1)?.agent === true && st.waves.at(-1)?.strategy === 'agent', JSON.stringify(st.waves.at(-1)));
+  }
 
   // Re-ingesting the same offers adds nothing and writes nothing more.
   const before = readFileSync(p.scanHistory, 'utf-8');
@@ -118,7 +141,7 @@ try {
     check('an ingest without --started records no start time (duration unknown, not ~0)',
       waves[0].started_at === null && typeof waves[0].finished_at === 'string', JSON.stringify(waves[0]));
     check('the ingest log line leads with the strategy, so run-retro can name the wave',
-      /ingest · wave=1 · .*· (portals|manual|[a-z-]+) wave=1 found=4 new=4/.test(readFileSync(p.runLog, 'utf-8')),
+      /ingest · wave=\d+ ·.*· (agent|portals|manual|[a-z-]+) wave=1 found=4 new=4/.test(readFileSync(p.runLog, 'utf-8')),
       readFileSync(p.runLog, 'utf-8').split('\n').find((l) => l.includes('ingest')));
     const timed = loop('ingest', '--file', offersFile, '--started', '2026-10-03T07:00:00.000Z');
     const last = JSON.parse(readFileSync(p.state, 'utf-8')).waves.at(-1);

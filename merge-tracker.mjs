@@ -1621,6 +1621,24 @@ for (const file of tsvFiles) {
   }
 
   if (!duplicate) {
+    // A triage-only placeholder is adopted by the evaluation that names its
+    // row number, even across a URL difference. The placeholder carries the
+    // LEAD's URL (LinkedIn, Indeed, a board copy); the evaluation resolves the
+    // employer's own posting, so the two URLs differ by design, and the URL
+    // guard above read that as proof of two postings. On 2026-10-05 the DLR and
+    // BCG evaluations were each appended as a second row next to their own
+    // placeholders (#264 → #267, #265 → #268). Number, company and a fuzzy
+    // role match must all agree, and the row must have no report yet.
+    const isTriagePlaceholder = (app) => !/\[.*\]\(.*\)/.test(String(app.report ?? ''))
+      && /triage[- ]only/i.test(String(app.notes ?? '')) && /full evaluation pending/i.test(String(app.notes ?? ''));
+    duplicate = existingApps.find(app => app.num === addition.num
+      && isTriagePlaceholder(app)
+      && companiesMatch(app.company, addition.company)
+      && roleFuzzyMatch(addition.role, app.role));
+    if (duplicate) dupReason = 'placeholder';
+  }
+
+  if (!duplicate) {
     // Company + role fuzzy match
     const additionReqNum = extractReqNumber(addition.notes);
     // Two passes, exact company first. With a single find() the wider

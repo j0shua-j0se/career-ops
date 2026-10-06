@@ -780,3 +780,33 @@ test('checkCompanyMatch - a company name must be a WORD, not an infix (#dida)', 
   assert.ok(checkCompanyMatch('Feedback on your Mercedes-Benz application', 'Mercedes-Benz'));
   assert.ok(checkCompanyMatch('Bewerbung bei Primetals Technologies', 'Primetals Technologies Germany GmbH') === false);
 });
+
+// Observed live 2026-10-05: an Amazon/Adecco interview confirmation classified
+// Unknown and matched the wrong one of two Amazon rows.
+test('a scheduled interview appointment classifies Interview, German too', () => {
+  const booked = classifyReply({
+    from: 'noreply@jobs.amazon.com',
+    subject: 'Confirmation of Scheduled Appointment',
+    body_snippet: 'Great news, your appointment has been scheduled. Interview in Niederlassung: Adecco, 90489 Nürnberg.',
+  });
+  assert.equal(booked.type, 'Interview');
+  const german = classifyReply({ from: 'karriere@firma.de', subject: 'Einladung zum Vorstellungsgespräch', body_snippet: '' });
+  assert.equal(german.type, 'Interview');
+  const rejected = classifyReply({ from: 'hr@x.com', subject: 'Update', body_snippet: 'Thank you for your interview at X. Unfortunately we will not proceed.' });
+  assert.equal(rejected.type, 'Rejected');
+});
+
+test('the postcode + city in a message picks between two rows of one employer', () => {
+  const apps = [
+    { num: 67, company: 'Amazon', role: 'Sortation Associate (m/f/d) - Lager- und Versandmitarbeiter, 91330 Eggolsheim', status: 'Responded' },
+    { num: 197, company: 'Amazon', role: 'Sortation Associate (m/f/d) - 90471 Nuremberg', status: 'Interview' },
+  ];
+  const [match] = matchCandidates([{
+    message_id: 'm1',
+    from: 'noreply@jobs.amazon.com',
+    subject: 'Confirmation of Scheduled Appointment',
+    body_snippet: 'Interview in Niederlassung: Adecco, Äußere Sulzbacher Straße 16, 90489 Nürnberg. Stelle als Lager- und Versandmitarbeiter für Amazon.',
+  }], apps);
+  assert.equal(match.application_num, 197);
+  assert.ok(match.signals.includes('location'));
+});

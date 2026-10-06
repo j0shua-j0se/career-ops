@@ -288,11 +288,16 @@ try {
     { url: u3.done, company: 'done', title: 'Engineer', location: 'Berlin' },
   ]), 'utf-8');
   check('queue suite: start succeeds', loop3('start').status === 0);
-  check('queue suite: ingest adds the three offers', loop3('ingest', '--file', offers3).json?.added === 3);
+  // The processed - [x] row is an earlier verdict, so ingest itself now skips it
+  // as known; finish's own no-resurrection guard is covered by the pure
+  // inboxQualifierRows block above.
+  const ing3 = loop3('ingest', '--file', offers3).json;
+  check('queue suite: ingest adds the two unprocessed offers and skips the processed one as known',
+    ing3?.added === 2 && ing3?.known === 1, JSON.stringify(ing3));
   const state3 = JSON.parse(readFileSync(p3.state, 'utf-8'));
   writeFileSync(join(box3, 'scores.json'), JSON.stringify(Object.keys(state3.candidates).map((key) => (
     { key, score: 4.5, verdict: 'PASS', reason: 'fits' }))), 'utf-8');
-  check('queue suite: all three qualify', loop3('record', '--file', join(box3, 'scores.json')).json?.qualified === 3);
+  check('queue suite: both qualify', loop3('record', '--file', join(box3, 'scores.json')).json?.qualified === 2);
 
   const fin3 = loop3('finish');
   check('queue suite: finish exits 0 and reports one queued row',

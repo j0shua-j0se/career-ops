@@ -145,6 +145,21 @@ a zero-yield run for any query the ingest did not, which is what lets a dead
 query retire — so the next pass rotates on,
 and `node run-all.mjs note-sources --note "..."` to complete the stage.
 
+**Connector results (Apify, Indeed MCP) go through `scan-loop.mjs ingest`,
+not `ingest-jobs.mjs`,** whenever a loop run is open: it dedups against the
+tracker, pipeline and earlier passes' scan history, logs per-`query` yield, and
+keeps each offer's `description` on the candidate. Pass the posting body the
+connector returned as `description` (Apify `descriptionText`, Indeed
+`get_job_details`). `fetch-jds.mjs` reads it instead of fetching, and for
+`linkedin.com` / `indeed.com` / `xing.com` URLs without one it records
+`robots-blocked` rather than requesting the page (2026-10-05: 26 LinkedIn and
+7 Indeed leads were mis-scored SKIP as "not fetchable" before this). Without
+`--rung`, an ingest is an off-ladder agent wave and consumes no ladder slot.
+
+**Read an Apify dataset only after its run reports `SUCCEEDED`** (`get-actor-run`).
+A dataset read mid-run returns what has been pushed so far: on 2026-10-05 a read
+returned 1 of 20 items and looked like a near-empty source.
+
 **Why a search engine and not a fetcher.** LinkedIn (`User-agent: * → Disallow:
 /`) and XING (`Disallow: /jobs/search/`) both refuse automated fetching in
 robots.txt — XING's matching `Allow` is scoped to `User-agent: Perplexity-User`,
