@@ -796,7 +796,11 @@ test('a scheduled interview appointment classifies Interview, German too', () =>
   assert.equal(rejected.type, 'Rejected');
 });
 
-test('the postcode + city in a message picks between two rows of one employer', () => {
+// A postcode in the mail is where the RECRUITER sits, not the workplace: this
+// mail came from Adecco's Nürnberg branch for the Eggolsheim role (#67, hired
+// 2026-10-06). A location tie-breaker picked #197 here; the role title is the
+// signal that was right.
+test('the role title, not the branch postcode, picks between two rows of one employer', () => {
   const apps = [
     { num: 67, company: 'Amazon', role: 'Sortation Associate (m/f/d) - Lager- und Versandmitarbeiter, 91330 Eggolsheim', status: 'Responded' },
     { num: 197, company: 'Amazon', role: 'Sortation Associate (m/f/d) - 90471 Nuremberg', status: 'Interview' },
@@ -807,6 +811,6 @@ test('the postcode + city in a message picks between two rows of one employer', 
     subject: 'Confirmation of Scheduled Appointment',
     body_snippet: 'Interview in Niederlassung: Adecco, Äußere Sulzbacher Straße 16, 90489 Nürnberg. Stelle als Lager- und Versandmitarbeiter für Amazon.',
   }], apps);
-  assert.equal(match.application_num, 197);
-  assert.ok(match.signals.includes('location'));
+  assert.equal(match.application_num, 67);
+  assert.ok(match.signals.includes('role-title'));
 });
